@@ -1,17 +1,23 @@
-# 算模 AC — Architecture Compiler
+# 算模 AC — Architecture Compiler - v0
 
 ![算模AC - ArchCalc](assets/image.png)
 
 AC is a hardware-aware architecture compiler that turns a compute budget, hardware target, and optional base model into Pareto-front model architectures and architecture deltas.
 
 > AC is a compiler for model architecture design under real hardware constraints. Given a target hardware platform, parameter budget, training tokens, serving workload, or an existing baseline architecture, AC searches for Pareto-improving architectures and local modifiers across choices like width/depth, attention layout, GQA/KV configuration, precision policy, MoE structure, and hybrid attention/state ratios. It supports greenfield architecture search, baseline-aware local modification, and delta influence evaluation, making it useful both for designing new models and for understanding whether a proposed architecture change actually improves the quality–latency–memory tradeoff.
+
+check out demo here: [ac-demo](https://antheali.github.io/ac-demo/)
+
 Three composable capabilities, one shared config format:
 
-- **Greenfield** | Given compute, what's the optimal Pareto-front architecture? | `ac-compile --hardware H --params N --tokens T …` |
+- **Greenfield**  Given compute, what's the optimal Pareto-front architecture? 
+ `ac-compile --hardware H --params N --tokens T …` |
 
-- **Modifier** | Given compute + a base architecture, what's the best local Pareto modifier? | `ac-compile --baseline-config CONF --hardware H …` |
+- **Modifier**  Given compute + a base architecture, what's the best local Pareto modifier? 
+ `ac-compile --baseline-config CONF --hardware H …` |
 
-- **Delta influence** | Given compute + base + a delta, quantify the influence. | `ac-delta-eval --baseline-config CONF --apply NAME …` |
+- **Delta influence**  Given compute + base + a delta, quantify the influence. 
+ `ac-delta-eval --baseline-config CONF --apply NAME …` |
 
 
 ---
@@ -133,7 +139,7 @@ clusters, kernels, schedulers, and datamixes.
 
 ---
 
-## Capability 1 — Greenfield
+## Usage 1 — Greenfield
 
 Search the full architecture lattice for the Pareto-front winner under the
 given hardware and constraints. No baseline config required.
@@ -236,7 +242,7 @@ ac-compile \
 
 ---
 
-## Capability 2 — Modifier
+## Usage 2 — Modifier
 
 Holds the architecture *family* fixed (uses the baseline as anchor) and
 searches the local Pareto-frontier of modifications around it.
@@ -245,7 +251,7 @@ searches the local Pareto-frontier of modifications around it.
 ac-compile --baseline-config PATH [OPTIONS]
 
 required
-  --baseline-config  PATH    JSON config emitted by capability 1 or hand-written
+  --baseline-config  PATH    JSON config emitted by usage 1 or hand-written
 
 scoring
   --allow-quality-spending   allow non-zero loss-proxy delta
@@ -269,7 +275,7 @@ state, MoE, MLA, MTP, CP, RoPE, NSA, YOCO).
 
 ---
 
-## Capability 3 — Delta influence
+## Usage 3 — Delta influence
 
 Quantitative effect of one (or a chain of) named transformations against a
 specific baseline architecture. Outputs a one-page Markdown report + JSON
@@ -437,8 +443,6 @@ Llama-2-{7B,13B,70B}   Llama-3-{8B,70B}   Mistral-7B   Gemma-2-9B
 Qwen3-{8B,32B}   DeepSeek-V3   Kimi-K2.5   GLM-5.1
 GPT-OSS-120B   MAI-Base-1
 ```
----
-
 
 ---
 
@@ -537,7 +541,7 @@ FP4/MX modes are available on B200 and Trainium 3.
 | **2:4 structured sparsity** | `sparsity_2_4` per component | (post-search; quality-model only) | NVIDIA H100/B200 |
 | **RMSNorm** | `normalization.type = rmsnorm` | default | Zhang & Sennrich 2019 |
 
-### Delta REGISTRY (capability 3)
+### Delta REGISTRY (usage 3)
 
 | Name | Effect | Legal `--apply-args` |
 |---|---|---|
@@ -571,8 +575,8 @@ GPT-OSS-120B   MAI-Base-1
 ├── pyproject.toml
 ├── ac/                              ← the Python package
 │   ├── __init__.py
-│   ├── cli_compile.py               capabilities 1 + 2 entry point
-│   ├── cli_delta_eval.py            capability 3 entry point
+│   ├── cli_compile.py               usages 1 + 2 entry point
+│   ├── cli_delta_eval.py            usage 3 entry point
 │   ├── cli_stress.py                stress / quality / transition inspection
 │   │
 │   ├── lattice_engine.py            tile-aligned architecture lattice + KNOWN_ARCHITECTURES
