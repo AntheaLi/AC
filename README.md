@@ -623,33 +623,6 @@ Llama-2-{7B,13B,70B}   Llama-3-{8B,70B}   Mistral-7B   Gemma-2-9B
 Qwen3-{8B,32B}   DeepSeek-V3   Kimi-K2.5   GLM-5.1
 GPT-OSS-120B   MAI-Base-1
 ```
-
----
-
-## Caveats
-
-1. **`d_model = n_heads × d_head` is enforced by the schema.** Two of the
-   bundled configs (`gpt_oss_120b`, `mai_thinking_1`) raise d_model to
-   match this invariant and record the real value in
-   `metadata.params.actual_d_model_note`. KV cache and FFN dims are
-   unaffected; only the residual-stream width is overstated.
-
-2. **MoE configs require `parallelism.expert_parallel ≥ 1`.** Without it
-   the throughput model exceeds HBM by `n_experts / ep_degree` and the
-   quality model returns its INFEASIBLE marker.
-
-3. **`--allow-state --state-type ...` searches a single family per run.**
-   Re-launch with a different `--state-type` to compare GLA vs Mamba-2.
-
-4. **`--nsa` / `--yoco` are post-search stamps**, not sweeps. The
-   optimizer picks the lattice point; the emission adds the requested
-   sparse-attention or KV-sharing block on top. Use them when you've
-   already settled the rest of the architecture.
-
-5. **Context parallelism rarely fires below 32k.** `cp_options` defaults
-   to `[1]` when context < 32k. Even at long context, CP > 1 is only
-   picked when comm-bound regimes appear at the chosen lattice point.
-
 ---
 
 ## License
