@@ -7,9 +7,11 @@ AC is a hardware-aware architecture compiler that turns a compute budget, hardwa
 > AC is a compiler for model architecture design under real hardware constraints. Given a target hardware platform, parameter budget, training tokens, serving workload, or an existing baseline architecture, AC searches for Pareto-improving architectures and local modifiers across choices like width/depth, attention layout, GQA/KV configuration, precision policy, MoE structure, and hybrid attention/state ratios. It supports greenfield architecture search, baseline-aware local modification, and delta influence evaluation, making it useful both for designing new models and for understanding whether a proposed architecture change actually improves the quality–latency–memory tradeoff.
 Three composable capabilities, one shared config format:
 
-[] **Greenfield** | Given compute, what's the optimal Pareto-front architecture? | `ac-compile --hardware H --params N --tokens T …` |
-[] **Modifier** | Given compute + a base architecture, what's the best local Pareto modifier? | `ac-compile --baseline-config CONF --hardware H …` |
-[] **Delta influence** | Given compute + base + a delta, quantify the influence. | `ac-delta-eval --baseline-config CONF --apply NAME …` |
+- **Greenfield** | Given compute, what's the optimal Pareto-front architecture? | `ac-compile --hardware H --params N --tokens T …` |
+
+- **Modifier** | Given compute + a base architecture, what's the best local Pareto modifier? | `ac-compile --baseline-config CONF --hardware H …` |
+
+- **Delta influence** | Given compute + base + a delta, quantify the influence. | `ac-delta-eval --baseline-config CONF --apply NAME …` |
 
 
 ---
