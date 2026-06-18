@@ -1,0 +1,330 @@
+rank,selected,is_baseline,changes,risk_label,risk_score,quality_preserving,move_class,quality_risk_pct,tp,d_model,n_layers,n_heads,d_head,n_kv_heads,ffn_dim,ffn_precision,kv_bits,params_B,predicted_loss,training_tps,serving_tbt_ms,serving_ttft_ms,memory_gb,kv_cache_gb,confidence
+1,True,True,baseline,baseline,0.0,True,baseline,0.0,8,4096,36,64,64,8,11520,bf16,16,8.09,1.8455,9525,9.08,42.19,19.91,0.07,medium
+2,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 12672,high,2.75,False,architecture,10.004,8,4096,34,64,64,64,12672,bf16,16,9.21,2.0301,10572,6.62,37.53,2.83,0.531,high
+3,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 12096,medium,1.5,False,architecture,10.026,8,4096,35,64,64,64,12096,bf16,16,9.19,2.0305,10495,6.77,37.82,2.84,0.547,high
+4,False,False,n_kv_heads: 8 -> 64,low,0.25,False,architecture,10.059,8,4096,36,64,64,64,11520,bf16,16,9.15,2.0311,10432,6.91,38.08,2.85,0.562,high
+5,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 12096,medium,2.25,False,architecture,10.113,8,4096,34,64,64,64,12096,bf16,16,8.97,2.0321,10801,6.57,36.74,2.78,0.531,high
+6,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 64,low,1.0,False,architecture,10.14,8,4096,35,64,64,64,11520,bf16,16,8.94,2.0326,10727,6.72,37.02,2.79,0.547,high
+7,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12672,medium,2.0,False,architecture,10.14,8,4096,37,64,64,32,12672,bf16,16,9.26,2.0326,10714,6.87,36.99,2.6,0.289,high
+8,False,False,n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10944,low,0.75,False,architecture,10.18,8,4096,36,64,64,64,10944,bf16,16,8.9,2.0334,10668,6.87,37.25,2.79,0.562,high
+9,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12096,medium,2.25,False,architecture,10.193,8,4096,38,64,64,32,12096,bf16,16,9.2,2.0336,10684,7.01,37.11,2.6,0.297,high
+10,False,False,n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12672,medium,1.25,False,architecture,10.216,8,4096,36,64,64,32,12672,bf16,16,9.06,2.034,11008,6.68,35.99,2.55,0.281,high
+11,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64,medium,1.75,False,architecture,10.228,8,4096,34,64,64,64,11520,bf16,16,8.73,2.0342,11039,6.53,35.96,2.72,0.531,high
+12,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10944,medium,1.5,False,architecture,10.262,8,4096,35,64,64,64,10944,bf16,16,8.69,2.0349,10970,6.68,36.21,2.73,0.547,high
+13,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12096,medium,1.5,False,architecture,10.264,8,4096,37,64,64,32,12096,bf16,16,9.0,2.0349,10970,6.82,36.14,2.54,0.289,high
+14,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12672,medium,2.0,False,architecture,10.298,8,4096,35,64,64,32,12672,bf16,16,8.85,2.0355,11320,6.5,34.99,2.49,0.273,high
+15,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 32,medium,1.75,False,architecture,10.325,8,4096,38,64,64,32,11520,bf16,16,8.93,2.036,10946,6.96,36.24,2.53,0.297,high
+16,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672,high,2.75,False,architecture,10.331,8,4096,38,64,64,16,12672,bf16,16,9.15,2.0361,10605,6.88,37.42,2.44,0.148,high
+17,False,False,n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12096,low,0.75,False,architecture,10.341,8,4096,36,64,64,32,12096,bf16,16,8.8,2.0363,11271,6.64,35.16,2.49,0.281,high
+18,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10944,medium,2.25,False,architecture,10.351,8,4096,34,64,64,64,10944,bf16,16,8.49,2.0365,11289,6.49,35.18,2.66,0.531,high
+19,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12672,high,2.75,False,architecture,10.387,8,4096,34,64,64,32,12672,bf16,16,8.64,2.0372,11649,6.31,33.99,2.43,0.266,high
+20,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 32,low,1.0,False,architecture,10.396,8,4096,37,64,64,32,11520,bf16,16,8.74,2.0373,11239,6.78,35.28,2.48,0.289,high
+21,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672,medium,2.0,False,architecture,10.402,8,4096,37,64,64,16,12672,bf16,16,8.95,2.0374,10888,6.7,36.44,2.39,0.145,high
+22,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12096,medium,1.5,False,architecture,10.423,8,4096,35,64,64,32,12096,bf16,16,8.6,2.0378,11590,6.45,34.18,2.43,0.273,high
+23,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096,medium,2.25,False,architecture,10.464,8,4096,38,64,64,16,12096,bf16,16,8.88,2.0386,10862,6.84,36.55,2.37,0.148,high
+24,False,False,n_kv_heads: 8 -> 32,low,0.25,False,architecture,10.473,8,4096,36,64,64,32,11520,bf16,16,8.55,2.0388,11547,6.59,34.33,2.43,0.281,high
+25,False,False,n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672,medium,1.25,False,architecture,10.478,8,4096,36,64,64,16,12672,bf16,16,8.75,2.0389,11188,6.52,35.45,2.34,0.141,high
+26,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12096,medium,2.25,False,architecture,10.512,8,4096,34,64,64,32,12096,bf16,16,8.4,2.0395,11927,6.27,33.21,2.38,0.266,high
+27,False,False,n_layers: 36 -> 38; ffn_dim: 11520 -> 12672,medium,2.5,False,architecture,10.522,8,4096,38,64,64,8,12672,bf16,16,8.99,2.0397,10615,6.8,37.42,2.32,0.074,high
+28,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096,medium,1.5,False,architecture,10.535,8,4096,37,64,64,16,12096,bf16,16,8.69,2.0399,11153,6.66,35.58,2.32,0.145,high
+29,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10944,medium,1.5,False,architecture,10.537,8,4096,37,64,64,32,10944,bf16,16,8.48,2.0399,11521,6.73,34.43,2.42,0.289,high
+30,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32,low,1.0,False,architecture,10.556,8,4096,35,64,64,32,11520,bf16,16,8.35,2.0403,11873,6.41,33.38,2.37,0.273,high
+31,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672,medium,2.0,False,architecture,10.561,8,4096,35,64,64,16,12672,bf16,16,8.56,2.0404,11504,6.34,34.47,2.29,0.137,high
+32,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 12672,medium,1.75,False,architecture,10.594,8,4096,37,64,64,8,12672,bf16,16,8.8,2.041,10899,6.62,36.44,2.28,0.072,high
+33,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 16,medium,1.75,False,architecture,10.606,8,4096,38,64,64,16,11520,bf16,16,8.61,2.0412,11133,6.79,35.67,2.31,0.148,high
+34,False,False,n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096,low,0.75,False,architecture,10.613,8,4096,36,64,64,16,12096,bf16,16,8.5,2.0413,11459,6.48,34.62,2.28,0.141,high
+35,False,False,n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10944,low,0.75,False,architecture,10.614,8,4096,36,64,64,32,10944,bf16,16,8.29,2.0414,11837,6.55,33.5,2.37,0.281,high
+36,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32,medium,1.75,False,architecture,10.645,8,4096,34,64,64,32,11520,bf16,16,8.16,2.0419,12219,6.23,32.42,2.32,0.266,high
+37,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672,high,2.75,False,architecture,10.65,8,4096,34,64,64,16,12672,bf16,16,8.36,2.042,11838,6.16,33.48,2.24,0.133,high
+38,False,False,n_layers: 36 -> 38; ffn_dim: 11520 -> 12096,medium,2.0,False,architecture,10.661,8,4096,38,64,64,8,12096,bf16,16,8.72,2.0422,10874,6.75,36.55,2.26,0.074,high
+39,False,False,ffn_dim: 11520 -> 12672,low,1.0,False,architecture,10.671,8,4096,36,64,64,8,12672,bf16,16,8.6,2.0424,11199,6.44,35.45,2.23,0.07,high
+40,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 16,low,1.0,False,architecture,10.678,8,4096,37,64,64,16,11520,bf16,16,8.43,2.0425,11431,6.61,34.73,2.26,0.145,high
+41,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096,medium,1.5,False,architecture,10.695,8,4096,35,64,64,16,12096,bf16,16,8.31,2.0429,11783,6.3,33.66,2.23,0.137,high
+42,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10944,medium,1.5,False,architecture,10.697,8,4096,35,64,64,32,10944,bf16,16,8.11,2.0429,12171,6.37,32.57,2.32,0.273,high
+43,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 12096,medium,1.25,False,architecture,10.733,8,4096,37,64,64,8,12096,bf16,16,8.53,2.0435,11164,6.57,35.58,2.22,0.072,high
+44,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12672,medium,1.75,False,architecture,10.754,8,4096,35,64,64,8,12672,bf16,16,8.41,2.0439,11515,6.26,34.47,2.18,0.068,high
+45,False,False,n_kv_heads: 8 -> 16,low,0.25,False,architecture,10.755,8,4096,36,64,64,16,11520,bf16,16,8.24,2.044,11744,6.43,33.79,2.22,0.141,high
+46,False,False,n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10368,medium,1.25,False,architecture,10.765,8,4096,36,64,64,32,10368,bf16,16,8.04,2.0441,12142,6.5,32.67,2.31,0.281,high
+47,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096,medium,2.25,False,architecture,10.785,8,4096,34,64,64,16,12096,bf16,16,8.12,2.0445,12125,6.12,32.7,2.18,0.133,high
+48,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10944,medium,2.25,False,architecture,10.787,8,4096,34,64,64,32,10944,bf16,16,7.92,2.0446,12525,6.18,31.64,2.27,0.266,high
+49,False,False,n_layers: 36 -> 38,medium,1.5,False,architecture,10.808,8,4096,38,64,64,8,11520,bf16,16,8.45,2.0449,11145,6.7,35.67,2.2,0.074,high
+50,False,False,ffn_dim: 11520 -> 12096,low,0.5,False,architecture,10.81,8,4096,36,64,64,8,12096,bf16,16,8.35,2.045,11471,6.4,34.62,2.17,0.07,high
+51,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10944,medium,1.5,False,architecture,10.83,8,4096,37,64,64,16,10944,bf16,16,8.17,2.0453,11722,6.56,33.88,2.2,0.145,high
+52,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16,low,1.0,False,architecture,10.839,8,4096,35,64,64,16,11520,bf16,16,8.06,2.0455,12076,6.25,32.86,2.17,0.137,high
+53,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12672,medium,2.5,False,architecture,10.843,8,4096,34,64,64,8,12672,bf16,16,8.22,2.0456,11850,6.08,33.48,2.14,0.066,high
+54,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10368,medium,2.0,False,architecture,10.849,8,4096,35,64,64,32,10368,bf16,16,7.86,2.0457,12484,6.32,31.77,2.26,0.273,high
+55,False,False,n_layers: 36 -> 37,low,0.75,False,architecture,10.881,8,4096,37,64,64,8,11520,bf16,16,8.27,2.0463,11443,6.53,34.73,2.15,0.072,high
+56,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12096,medium,1.25,False,architecture,10.893,8,4096,35,64,64,8,12096,bf16,16,8.16,2.0465,11795,6.22,33.66,2.13,0.068,high
+57,False,False,n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10944,low,0.75,False,architecture,10.908,8,4096,36,64,64,16,10944,bf16,16,7.99,2.0468,12044,6.39,32.97,2.16,0.141,high
+58,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16,medium,1.75,False,architecture,10.929,8,4096,34,64,64,16,11520,bf16,16,7.88,2.0472,12427,6.07,31.92,2.12,0.133,high
+59,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10368,high,2.75,False,architecture,10.939,8,4096,34,64,64,32,10368,bf16,16,7.68,2.0474,12847,6.14,30.86,2.21,0.266,high
+60,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12096,medium,2.0,False,architecture,10.983,8,4096,34,64,64,8,12096,bf16,16,7.98,2.0482,12138,6.04,32.7,2.08,0.066,high
+61,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10944,medium,1.5,False,architecture,10.992,8,4096,35,64,64,16,10944,bf16,16,7.81,2.0483,12384,6.21,32.05,2.11,0.137,high
+62,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 10944,medium,1.25,False,architecture,11.039,8,4096,37,64,64,8,10944,bf16,16,8.01,2.0492,11735,6.48,33.88,2.09,0.072,high
+63,False,False,n_layers: 36 -> 35,low,0.75,False,architecture,11.043,8,4096,35,64,64,8,11520,bf16,16,7.91,2.0493,12089,6.18,32.86,2.07,0.068,high
+64,False,False,n_layers: 36 -> 38; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,high,3.0,False,precision,11.069,8,4096,38,64,64,8,12672,bf16,8,8.99,2.0498,10615,6.77,37.42,2.29,0.037,high
+65,False,False,n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10368,medium,1.25,False,architecture,11.072,8,4096,36,64,64,16,10368,bf16,16,7.74,2.0498,12360,6.34,32.14,2.1,0.141,high
+66,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10944,medium,2.25,False,architecture,11.082,8,4096,34,64,64,16,10944,bf16,16,7.64,2.05,12744,6.03,31.13,2.07,0.133,high
+67,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,3.25,False,precision,11.097,8,4096,34,64,64,64,12672,fp8,16,9.21,2.0503,19785,5.94,18.99,1.68,0.531,high
+68,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,11.118,8,4096,35,64,64,64,12096,fp8,16,9.19,2.0507,19599,6.09,19.19,1.69,0.547,high
+69,False,False,ffn_dim: 11520 -> 10944,low,0.5,False,architecture,11.118,8,4096,36,64,64,8,10944,bf16,16,7.84,2.0507,12057,6.31,32.97,2.05,0.07,high
+70,False,False,n_layers: 36 -> 34,medium,1.5,False,architecture,11.133,8,4096,34,64,64,8,11520,bf16,16,7.74,2.0509,12440,6.0,31.92,2.02,0.066,high
+71,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,medium,2.25,False,precision,11.141,8,4096,37,64,64,8,12672,bf16,8,8.8,2.0511,10899,6.59,36.44,2.24,0.036,high
+72,False,False,n_kv_heads: 8 -> 64; ffn_precision: bf16 -> fp8,low,0.75,False,precision,11.151,8,4096,36,64,64,64,11520,fp8,16,9.15,2.0513,19437,6.24,19.38,1.71,0.562,high
+73,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10368,medium,2.0,False,architecture,11.156,8,4096,35,64,64,16,10368,bf16,16,7.57,2.0514,12708,6.17,31.24,2.05,0.137,high
+74,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10944,medium,1.25,False,architecture,11.202,8,4096,35,64,64,8,10944,bf16,16,7.67,2.0522,12398,6.13,32.05,2.01,0.068,high
+75,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,2.75,False,precision,11.206,8,4096,34,64,64,64,12096,fp8,16,8.97,2.0523,20164,5.92,18.65,1.65,0.531,high
+76,False,False,n_layers: 36 -> 38; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,medium,2.5,False,precision,11.208,8,4096,38,64,64,8,12096,bf16,8,8.72,2.0523,10874,6.72,36.55,2.22,0.037,high
+77,False,False,ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,medium,1.5,False,precision,11.218,8,4096,36,64,64,8,12672,bf16,8,8.6,2.0525,11199,6.42,35.45,2.19,0.035,high
+78,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,11.232,8,4096,37,64,64,32,12672,fp8,16,9.26,2.0528,19638,6.19,19.13,1.45,0.289,high
+79,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 64; ffn_precision: bf16 -> fp8,medium,1.5,False,precision,11.234,8,4096,35,64,64,64,11520,fp8,16,8.94,2.0528,19982,6.07,18.84,1.67,0.547,high
+80,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10368,high,2.75,False,architecture,11.247,8,4096,34,64,64,16,10368,bf16,16,7.4,2.053,13078,5.99,30.35,2.01,0.133,high
+81,False,False,n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,1.25,False,precision,11.274,8,4096,36,64,64,64,10944,fp8,16,8.9,2.0535,19825,6.22,19.02,1.68,0.562,high
+82,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,medium,1.75,False,precision,11.28,8,4096,37,64,64,8,12096,bf16,8,8.53,2.0537,11164,6.55,35.58,2.18,0.036,high
+83,False,False,ffn_dim: 11520 -> 10368,low,1.0,False,architecture,11.288,8,4096,36,64,64,8,10368,bf16,16,7.58,2.0538,12373,6.26,32.14,1.99,0.07,high
+84,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10944,medium,2.0,False,architecture,11.293,8,4096,34,64,64,8,10944,bf16,16,7.49,2.0539,12758,5.96,31.13,1.97,0.066,high
+85,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,medium,2.25,False,precision,11.302,8,4096,35,64,64,8,12672,bf16,8,8.41,2.054,11515,6.24,34.47,2.15,0.034,high
+86,False,False,n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,11.309,8,4096,36,64,64,32,12672,fp8,16,9.06,2.0542,20173,6.02,18.62,1.41,0.281,high
+87,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64; ffn_precision: bf16 -> fp8,medium,2.25,False,precision,11.323,8,4096,34,64,64,64,11520,fp8,16,8.73,2.0544,20558,5.9,18.3,1.63,0.531,high
+88,False,False,n_layers: 36 -> 38; kv_cache_bits: 16 -> 8,medium,2.0,False,precision,11.356,8,4096,38,64,64,8,11520,bf16,8,8.45,2.0551,11145,6.68,35.67,2.16,0.037,high
+89,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,11.357,8,4096,35,64,64,64,10944,fp8,16,8.69,2.0551,20380,6.05,18.49,1.64,0.547,high
+90,False,False,ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,low,1.0,False,precision,11.358,8,4096,36,64,64,8,12096,bf16,8,8.35,2.0551,11471,6.37,34.62,2.14,0.035,high
+91,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10368,medium,1.75,False,architecture,11.373,8,4096,35,64,64,8,10368,bf16,16,7.42,2.0554,12723,6.09,31.24,1.95,0.068,high
+92,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,high,3.0,False,precision,11.391,8,4096,34,64,64,8,12672,bf16,8,8.22,2.0557,11850,6.06,33.48,2.1,0.033,high
+93,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,11.392,8,4096,35,64,64,32,12672,fp8,16,8.85,2.0557,20738,5.85,18.1,1.38,0.273,high
+94,False,False,n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,11.404,8,4096,36,64,64,64,10368,fp8,16,8.64,2.0559,20228,6.2,18.66,1.65,0.562,high
+95,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,3.25,False,precision,11.423,8,4096,38,64,64,16,12672,fp8,16,9.15,2.0563,19452,6.21,19.37,1.29,0.148,high
+96,False,False,n_layers: 36 -> 37; kv_cache_bits: 16 -> 8,medium,1.25,False,precision,11.429,8,4096,37,64,64,8,11520,bf16,8,8.27,2.0564,11443,6.5,34.73,2.12,0.036,high
+97,False,False,n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,1.25,False,precision,11.435,8,4096,36,64,64,32,12096,fp8,16,8.8,2.0565,20591,6.0,18.26,1.38,0.281,high
+98,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,medium,1.75,False,precision,11.442,8,4096,35,64,64,8,12096,bf16,8,8.16,2.0566,11795,6.19,33.66,2.09,0.034,high
+99,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,high,2.75,False,precision,11.446,8,4096,34,64,64,64,10944,fp8,16,8.49,2.0567,20968,5.88,17.96,1.6,0.531,high
+100,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10368,medium,2.5,False,architecture,11.465,8,4096,34,64,64,8,10368,bf16,16,7.25,2.0571,13092,5.91,30.35,1.91,0.066,high
+101,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,3.25,False,precision,11.481,8,4096,34,64,64,32,12672,fp8,16,8.64,2.0574,21335,5.69,17.58,1.35,0.266,high
+102,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,11.488,8,4096,35,64,64,64,10368,fp8,16,8.45,2.0575,20795,6.03,18.14,1.61,0.547,high
+103,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,11.495,8,4096,37,64,64,16,12672,fp8,16,8.95,2.0576,19967,6.05,18.86,1.26,0.145,high
+104,False,False,kv_cache_bits: 16 -> 8,low,0.5,False,precision,11.508,8,4096,36,64,64,8,11520,bf16,8,8.09,2.0578,11757,6.32,33.79,2.08,0.035,high
+105,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,11.518,8,4096,35,64,64,32,12096,fp8,16,8.6,2.058,21167,5.83,17.75,1.35,0.273,high
+106,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,medium,2.5,False,precision,11.532,8,4096,34,64,64,8,12096,bf16,8,7.98,2.0583,12138,6.02,32.7,2.05,0.033,high
+107,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,2.75,False,precision,11.557,8,4096,38,64,64,16,12096,fp8,16,8.88,2.0588,19862,6.19,18.99,1.26,0.148,high
+108,False,False,n_kv_heads: 8 -> 32; ffn_precision: bf16 -> fp8,low,0.75,False,precision,11.568,8,4096,36,64,64,32,11520,fp8,16,8.55,2.059,21027,5.98,17.9,1.35,0.281,high
+109,False,False,n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,11.573,8,4096,36,64,64,16,12672,fp8,16,8.75,2.0591,20511,5.89,18.35,1.24,0.141,high
+110,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 64; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,high,3.25,False,precision,11.577,8,4096,34,64,64,64,10368,fp8,16,8.25,2.0591,21394,5.85,17.62,1.57,0.531,high
+111,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 8,medium,1.75,False,precision,11.588,8,4096,37,64,64,8,10944,bf16,8,8.01,2.0593,11735,6.45,33.88,2.06,0.036,high
+112,False,False,n_layers: 36 -> 35; kv_cache_bits: 16 -> 8,medium,1.25,False,precision,11.592,8,4096,35,64,64,8,11520,bf16,8,7.91,2.0594,12089,6.15,32.86,2.03,0.034,high
+113,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,2.75,False,precision,11.608,8,4096,34,64,64,32,12096,fp8,16,8.4,2.0597,21777,5.66,17.24,1.32,0.266,high
+114,False,False,n_layers: 36 -> 38; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,3.0,False,precision,11.615,8,4096,38,64,64,8,12672,fp8,16,8.99,2.0598,19487,6.14,19.37,1.2,0.074,medium
+115,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,11.63,8,4096,37,64,64,16,12096,fp8,16,8.69,2.0601,20388,6.03,18.49,1.23,0.145,high
+116,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_precision: bf16 -> fp8,medium,1.5,False,precision,11.652,8,4096,35,64,64,32,11520,fp8,16,8.35,2.0605,21615,5.81,17.4,1.32,0.273,high
+117,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,11.656,8,4096,35,64,64,16,12672,fp8,16,8.56,2.0606,21085,5.72,17.84,1.21,0.137,high
+118,False,False,ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 8,low,1.0,False,precision,11.667,8,4096,36,64,64,8,10944,bf16,8,7.84,2.0608,12057,6.28,32.97,2.02,0.035,high
+119,False,False,n_layers: 36 -> 34; kv_cache_bits: 16 -> 8,medium,2.0,False,precision,11.683,8,4096,34,64,64,8,11520,bf16,8,7.74,2.0611,12440,5.97,31.92,1.99,0.033,high
+120,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,2.25,False,precision,11.688,8,4096,37,64,64,8,12672,fp8,16,8.8,2.0612,20004,5.98,18.86,1.17,0.072,medium
+121,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 16; ffn_precision: bf16 -> fp8,medium,2.25,False,precision,11.701,8,4096,38,64,64,16,11520,fp8,16,8.61,2.0614,20290,6.17,18.61,1.23,0.148,high
+122,False,False,n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,1.25,False,precision,11.708,8,4096,36,64,64,16,12096,fp8,16,8.5,2.0615,20943,5.86,17.99,1.21,0.141,high
+123,False,False,n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,1.25,False,precision,11.711,8,4096,36,64,64,32,10944,fp8,16,8.29,2.0616,21481,5.95,17.54,1.32,0.281,high
+124,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_precision: bf16 -> fp8,medium,2.25,False,precision,11.742,8,4096,34,64,64,32,11520,fp8,16,8.16,2.0622,22237,5.64,16.9,1.29,0.266,high
+125,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,3.25,False,precision,11.746,8,4096,34,64,64,16,12672,fp8,16,8.36,2.0622,21692,5.56,17.33,1.18,0.133,high
+126,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 8,medium,1.75,False,precision,11.752,8,4096,35,64,64,8,10944,bf16,8,7.67,2.0624,12398,6.1,32.05,1.98,0.034,high
+127,False,False,n_layers: 36 -> 38; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,11.755,8,4096,38,64,64,8,12096,fp8,16,8.72,2.0624,19899,6.12,18.99,1.17,0.074,medium
+128,False,False,ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,1.5,False,precision,11.766,8,4096,36,64,64,8,12672,fp8,16,8.6,2.0626,20549,5.82,18.35,1.15,0.07,medium
+129,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 16; ffn_precision: bf16 -> fp8,medium,1.5,False,precision,11.774,8,4096,37,64,64,16,11520,fp8,16,8.43,2.0628,20827,6.0,18.12,1.2,0.145,high
+130,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,11.792,8,4096,35,64,64,16,12096,fp8,16,8.31,2.0631,21529,5.7,17.49,1.18,0.137,high
+131,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,11.795,8,4096,35,64,64,32,10944,fp8,16,8.11,2.0632,22082,5.79,17.05,1.3,0.273,high
+132,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,11.828,8,4096,37,64,64,8,12096,fp8,16,8.53,2.0638,20426,5.96,18.49,1.14,0.072,medium
+133,False,False,ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 8,medium,1.5,False,precision,11.839,8,4096,36,64,64,8,10368,bf16,8,7.58,2.064,12373,6.23,32.14,1.96,0.035,high
+134,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 8,medium,2.5,False,precision,11.844,8,4096,34,64,64,8,10944,bf16,8,7.49,2.0641,12758,5.93,31.13,1.93,0.033,high
+135,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,medium,2.25,False,precision,11.849,8,4096,35,64,64,8,12672,fp8,16,8.41,2.0642,21124,5.66,17.84,1.13,0.068,medium
+136,False,False,n_kv_heads: 8 -> 16; ffn_precision: bf16 -> fp8,low,0.75,False,precision,11.852,8,4096,36,64,64,16,11520,fp8,16,8.24,2.0642,21394,5.84,17.63,1.18,0.141,high
+137,False,False,n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,11.863,8,4096,36,64,64,32,10368,fp8,16,8.04,2.0644,21955,5.93,17.18,1.3,0.281,high
+138,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,2.75,False,precision,11.882,8,4096,34,64,64,16,12096,fp8,16,8.12,2.0648,22149,5.54,16.99,1.16,0.133,high
+139,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,high,2.75,False,precision,11.886,8,4096,34,64,64,32,10944,fp8,16,7.92,2.0648,22717,5.62,16.56,1.27,0.266,high
+140,False,False,n_layers: 36 -> 38; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,11.904,8,4096,38,64,64,8,11520,fp8,16,8.45,2.0652,20329,6.09,18.61,1.14,0.074,medium
+141,False,False,ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,low,1.0,False,precision,11.906,8,4096,36,64,64,8,12096,fp8,16,8.35,2.0652,20982,5.8,17.99,1.12,0.07,medium
+142,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 8,medium,2.25,False,precision,11.924,8,4096,35,64,64,8,10368,bf16,8,7.42,2.0655,12723,6.06,31.24,1.92,0.034,high
+143,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,11.927,8,4096,37,64,64,16,10944,fp8,16,8.17,2.0656,21285,5.98,17.75,1.17,0.145,high
+144,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_precision: bf16 -> fp8,medium,1.5,False,precision,11.937,8,4096,35,64,64,16,11520,fp8,16,8.06,2.0658,21992,5.68,17.14,1.15,0.137,high
+145,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,3.0,False,precision,11.94,8,4096,34,64,64,8,12672,fp8,16,8.22,2.0658,21732,5.5,17.33,1.1,0.066,medium
+146,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,11.947,8,4096,35,64,64,32,10368,fp8,16,7.86,2.066,22569,5.77,16.7,1.27,0.273,high
+147,False,False,n_layers: 36 -> 37; ffn_precision: bf16 -> fp8,medium,1.25,False,precision,11.977,8,4096,37,64,64,8,11520,fp8,16,8.27,2.0665,20867,5.93,18.12,1.11,0.072,medium
+148,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,11.991,8,4096,35,64,64,8,12096,fp8,16,8.16,2.0668,21569,5.64,17.49,1.1,0.068,medium
+149,False,False,n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,1.25,False,precision,12.006,8,4096,36,64,64,16,10944,fp8,16,7.99,2.0671,21864,5.82,17.27,1.15,0.141,high
+150,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 8,high,3.0,False,precision,12.016,8,4096,34,64,64,8,10368,bf16,8,7.25,2.0672,13092,5.89,30.35,1.88,0.033,high
+151,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_precision: bf16 -> fp8,medium,2.25,False,precision,12.027,8,4096,34,64,64,16,11520,fp8,16,7.88,2.0674,22625,5.52,16.65,1.13,0.133,high
+152,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 32; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,high,3.25,False,precision,12.039,8,4096,34,64,64,32,10368,fp8,16,7.68,2.0677,23218,5.6,16.22,1.24,0.266,high
+153,False,False,ffn_precision: bf16 -> fp8,low,0.5,False,precision,12.056,8,4096,36,64,64,8,11520,fp8,16,8.09,2.068,21435,5.77,17.63,1.09,0.07,medium
+154,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,12.081,8,4096,34,64,64,8,12096,fp8,16,7.98,2.0684,22190,5.47,16.99,1.07,0.066,medium
+155,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,12.091,8,4096,35,64,64,16,10944,fp8,16,7.81,2.0686,22475,5.66,16.79,1.12,0.137,high
+156,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,12.137,8,4096,37,64,64,8,10944,fp8,16,8.01,2.0695,21327,5.91,17.75,1.08,0.072,medium
+157,False,False,n_layers: 36 -> 35; ffn_precision: bf16 -> fp8,medium,1.25,False,precision,12.141,8,4096,35,64,64,8,11520,fp8,16,7.91,2.0695,22034,5.61,17.14,1.07,0.068,medium
+158,False,False,n_layers: 36 -> 38; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.5,False,precision,12.162,8,4096,38,64,64,8,12672,fp8,8,8.99,2.0699,19487,6.11,19.37,1.16,0.037,medium
+159,False,False,n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,12.171,8,4096,36,64,64,16,10368,fp8,16,7.74,2.0701,22356,5.8,16.91,1.12,0.141,high
+160,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,high,2.75,False,precision,12.183,8,4096,34,64,64,16,10944,fp8,16,7.64,2.0703,23122,5.5,16.31,1.1,0.133,high
+161,False,False,ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,low,1.0,False,precision,12.217,8,4096,36,64,64,8,10944,fp8,16,7.84,2.0709,21907,5.75,17.27,1.06,0.07,medium
+162,False,False,n_layers: 36 -> 34; ffn_precision: bf16 -> fp8,medium,2.0,False,precision,12.232,8,4096,34,64,64,8,11520,fp8,16,7.74,2.0712,22668,5.45,16.65,1.05,0.066,medium
+163,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,2.75,False,precision,12.235,8,4096,37,64,64,8,12672,fp8,8,8.8,2.0713,20004,5.95,18.86,1.14,0.036,medium
+164,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,12.257,8,4096,35,64,64,16,10368,fp8,16,7.57,2.0717,22980,5.63,16.44,1.1,0.137,high
+165,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,1.75,False,precision,12.302,8,4096,35,64,64,8,10944,fp8,16,7.67,2.0725,22519,5.59,16.79,1.04,0.068,medium
+166,False,False,n_layers: 36 -> 38; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.0,False,precision,12.302,8,4096,38,64,64,8,12096,fp8,8,8.72,2.0725,19899,6.09,18.99,1.13,0.037,medium
+167,False,False,ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,2.0,False,precision,12.313,8,4096,36,64,64,8,12672,fp8,8,8.6,2.0727,20549,5.79,18.35,1.11,0.035,medium
+168,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 16; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,high,3.25,False,precision,12.349,8,4096,34,64,64,16,10368,fp8,16,7.4,2.0734,23641,5.47,15.97,1.07,0.133,high
+169,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,2.25,False,precision,12.375,8,4096,37,64,64,8,12096,fp8,8,8.53,2.0739,20426,5.93,18.49,1.11,0.036,medium
+170,False,False,ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,medium,1.5,False,precision,12.389,8,4096,36,64,64,8,10368,fp8,16,7.58,2.0741,22401,5.73,16.91,1.03,0.07,medium
+171,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,12.394,8,4096,34,64,64,8,10944,fp8,16,7.49,2.0742,23167,5.43,16.31,1.02,0.066,medium
+172,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,2.75,False,precision,12.397,8,4096,35,64,64,8,12672,fp8,8,8.41,2.0743,21124,5.63,17.84,1.09,0.034,medium
+173,False,False,n_layers: 36 -> 38; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,2.5,False,precision,12.452,8,4096,38,64,64,8,11520,fp8,8,8.45,2.0753,20329,6.07,18.61,1.1,0.037,medium
+174,False,False,ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,1.5,False,precision,12.454,8,4096,36,64,64,8,12096,fp8,8,8.35,2.0753,20982,5.77,17.99,1.09,0.035,medium
+175,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,medium,2.25,False,precision,12.475,8,4096,35,64,64,8,10368,fp8,16,7.42,2.0757,23026,5.57,16.44,1.01,0.068,medium
+176,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.5,False,precision,12.488,8,4096,34,64,64,8,12672,fp8,8,8.22,2.0759,21732,5.47,17.33,1.07,0.033,medium
+177,False,False,n_layers: 36 -> 37; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,1.75,False,precision,12.526,8,4096,37,64,64,8,11520,fp8,8,8.27,2.0766,20867,5.91,18.12,1.08,0.036,medium
+178,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,2.25,False,precision,12.539,8,4096,35,64,64,8,12096,fp8,8,8.16,2.0769,21569,5.61,17.49,1.06,0.034,medium
+179,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672,high,4.5,False,architecture,12.546,8,4096,38,64,64,1,12672,bf16,16,8.85,2.077,10625,6.8,37.42,2.23,0.009,medium
+180,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,high,3.0,False,precision,12.567,8,4096,34,64,64,8,10368,fp8,16,7.25,2.0774,23688,5.41,15.97,0.99,0.066,medium
+181,False,False,ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,low,1.0,False,precision,12.605,8,4096,36,64,64,8,11520,fp8,8,8.09,2.0781,21435,5.75,17.63,1.06,0.035,medium
+182,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672,high,3.75,False,architecture,12.619,8,4096,37,64,64,1,12672,bf16,16,8.66,2.0784,10909,6.62,36.44,2.18,0.009,medium
+183,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.0,False,precision,12.63,8,4096,34,64,64,8,12096,fp8,8,7.98,2.0786,22190,5.45,16.99,1.04,0.033,medium
+184,False,False,n_layers: 36 -> 37; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,2.25,False,precision,12.686,8,4096,37,64,64,8,10944,fp8,8,8.01,2.0796,21327,5.88,17.75,1.05,0.036,medium
+185,False,False,n_layers: 36 -> 35; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,1.75,False,precision,12.69,8,4096,35,64,64,8,11520,fp8,8,7.91,2.0797,22034,5.59,17.14,1.03,0.034,medium
+186,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096,high,4.0,False,architecture,12.691,8,4096,38,64,64,1,12096,bf16,16,8.58,2.0797,10883,6.75,36.55,2.16,0.009,medium
+187,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672,high,3.0,False,architecture,12.698,8,4096,36,64,64,1,12672,bf16,16,8.47,2.0798,11209,6.44,35.45,2.14,0.009,medium
+188,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096,high,3.25,False,architecture,12.765,8,4096,37,64,64,1,12096,bf16,16,8.4,2.0811,11174,6.57,35.58,2.12,0.009,medium
+189,False,False,ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,1.5,False,precision,12.766,8,4096,36,64,64,8,10944,fp8,8,7.84,2.0811,21907,5.72,17.27,1.03,0.035,medium
+190,False,False,n_layers: 36 -> 34; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,2.5,False,precision,12.782,8,4096,34,64,64,8,11520,fp8,8,7.74,2.0814,22668,5.43,16.65,1.01,0.033,medium
+191,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672,high,3.75,False,architecture,12.783,8,4096,35,64,64,1,12672,bf16,16,8.28,2.0814,11525,6.26,34.47,2.09,0.009,medium
+192,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096,medium,2.5,False,architecture,12.844,8,4096,36,64,64,1,12096,bf16,16,8.22,2.0825,11481,6.4,34.62,2.08,0.009,medium
+193,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,2.25,False,precision,12.852,8,4096,35,64,64,8,10944,fp8,8,7.67,2.0827,22519,5.57,16.79,1.0,0.034,medium
+194,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672,high,4.5,False,architecture,12.874,8,4096,34,64,64,1,12672,bf16,16,8.09,2.0831,11860,6.08,33.48,2.05,0.008,medium
+195,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1,high,2.75,False,architecture,12.921,8,4096,37,64,64,1,11520,bf16,16,8.14,2.0839,11453,6.53,34.73,2.06,0.009,medium
+196,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096,high,3.25,False,architecture,12.929,8,4096,35,64,64,1,12096,bf16,16,8.03,2.0841,11806,6.22,33.66,2.04,0.009,medium
+197,False,False,ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,medium,2.0,False,precision,12.939,8,4096,36,64,64,8,10368,fp8,8,7.58,2.0843,22401,5.7,16.91,1.0,0.035,medium
+198,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.0,False,precision,12.944,8,4096,34,64,64,8,10944,fp8,8,7.49,2.0844,23167,5.41,16.31,0.98,0.033,medium
+199,False,False,n_kv_heads: 8 -> 1,medium,2.0,False,architecture,13.001,8,4096,36,64,64,1,11520,bf16,16,7.96,2.0854,11768,6.35,33.79,2.02,0.009,medium
+200,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096,high,4.0,False,architecture,13.021,8,4096,34,64,64,1,12096,bf16,16,7.85,2.0858,12149,6.04,32.7,1.99,0.008,medium
+201,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,2.75,False,precision,13.025,8,4096,35,64,64,8,10368,fp8,8,7.42,2.0859,23026,5.54,16.44,0.98,0.034,medium
+202,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1,high,2.75,False,architecture,13.086,8,4096,35,64,64,1,11520,bf16,16,7.79,2.087,12100,6.18,32.86,1.98,0.009,medium
+203,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,high,5.0,False,precision,13.092,8,4096,38,64,64,1,12672,bf16,8,8.85,2.0871,10625,6.77,37.42,2.22,0.005,medium
+204,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.5,False,precision,13.118,8,4096,34,64,64,8,10368,fp8,8,7.25,2.0876,23688,5.39,15.97,0.96,0.033,medium
+205,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,high,4.25,False,precision,13.166,8,4096,37,64,64,1,12672,bf16,8,8.66,2.0885,10909,6.59,36.44,2.18,0.005,medium
+206,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944,medium,2.5,False,architecture,13.168,8,4096,36,64,64,1,10944,bf16,16,7.71,2.0885,12069,6.31,32.97,1.96,0.009,medium
+207,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1,high,3.5,False,architecture,13.179,8,4096,34,64,64,1,11520,bf16,16,7.61,2.0887,12451,6.0,31.92,1.94,0.008,medium
+208,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,high,4.5,False,precision,13.238,8,4096,38,64,64,1,12096,bf16,8,8.58,2.0898,10883,6.72,36.55,2.16,0.005,medium
+209,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,high,3.5,False,precision,13.245,8,4096,36,64,64,1,12672,bf16,8,8.47,2.0899,11209,6.42,35.45,2.13,0.004,medium
+210,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944,high,3.25,False,architecture,13.254,8,4096,35,64,64,1,10944,bf16,16,7.54,2.0901,12409,6.13,32.05,1.92,0.009,medium
+211,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,high,3.75,False,precision,13.313,8,4096,37,64,64,1,12096,bf16,8,8.4,2.0912,11174,6.55,35.58,2.12,0.005,medium
+212,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,high,4.25,False,precision,13.331,8,4096,35,64,64,1,12672,bf16,8,8.28,2.0915,11525,6.24,34.47,2.09,0.004,medium
+213,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944,high,4.0,False,architecture,13.347,8,4096,34,64,64,1,10944,bf16,16,7.37,2.0918,12770,5.96,31.13,1.88,0.008,medium
+214,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368,high,3.0,False,architecture,13.348,8,4096,36,64,64,1,10368,bf16,16,7.45,2.0918,12385,6.26,32.14,1.9,0.009,medium
+215,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,high,3.0,False,precision,13.393,8,4096,36,64,64,1,12096,bf16,8,8.22,2.0926,11481,6.37,34.62,2.07,0.004,medium
+216,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 8,high,5.0,False,precision,13.423,8,4096,34,64,64,1,12672,bf16,8,8.09,2.0932,11860,6.06,33.48,2.04,0.004,medium
+217,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368,high,3.75,False,architecture,13.435,8,4096,35,64,64,1,10368,bf16,16,7.29,2.0934,12735,6.09,31.24,1.86,0.009,medium
+218,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 8,high,3.25,False,precision,13.469,8,4096,37,64,64,1,11520,bf16,8,8.14,2.0941,11453,6.5,34.73,2.06,0.005,medium
+219,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,high,3.75,False,precision,13.478,8,4096,35,64,64,1,12096,bf16,8,8.03,2.0942,11806,6.19,33.66,2.03,0.004,medium
+220,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368,high,4.5,False,architecture,13.528,8,4096,34,64,64,1,10368,bf16,16,7.13,2.0951,13105,5.91,30.35,1.82,0.008,medium
+221,False,False,n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 8,medium,2.5,False,precision,13.55,8,4096,36,64,64,1,11520,bf16,8,7.96,2.0955,11768,6.32,33.79,2.01,0.004,medium
+222,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 8,high,4.5,False,precision,13.571,8,4096,34,64,64,1,12096,bf16,8,7.85,2.0959,12149,6.02,32.7,1.99,0.004,medium
+223,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 8,high,3.25,False,precision,13.636,8,4096,35,64,64,1,11520,bf16,8,7.79,2.0971,12100,6.15,32.86,1.97,0.004,medium
+224,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,5.0,False,precision,13.639,8,4096,38,64,64,1,12672,fp8,16,8.85,2.0972,19519,6.14,19.37,1.12,0.009,medium
+225,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,4.25,False,precision,13.713,8,4096,37,64,64,1,12672,fp8,16,8.66,2.0986,20036,5.98,18.86,1.1,0.009,medium
+226,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 8,high,3.0,False,precision,13.718,8,4096,36,64,64,1,10944,bf16,8,7.71,2.0986,12069,6.28,32.97,1.96,0.004,medium
+227,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 8,high,4.0,False,precision,13.729,8,4096,34,64,64,1,11520,bf16,8,7.61,2.0988,12451,5.97,31.92,1.93,0.004,medium
+228,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,4.5,False,precision,13.786,8,4096,38,64,64,1,12096,fp8,16,8.58,2.0999,19932,6.12,18.99,1.09,0.009,medium
+229,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,3.5,False,precision,13.793,8,4096,36,64,64,1,12672,fp8,16,8.47,2.1,20582,5.82,18.35,1.07,0.009,medium
+230,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 8,high,3.75,False,precision,13.805,8,4096,35,64,64,1,10944,bf16,8,7.54,2.1002,12409,6.1,32.05,1.92,0.004,medium
+231,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,3.75,False,precision,13.861,8,4096,37,64,64,1,12096,fp8,16,8.4,2.1013,20460,5.96,18.49,1.06,0.009,medium
+232,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,4.25,False,precision,13.879,8,4096,35,64,64,1,12672,fp8,16,8.28,2.1016,21158,5.66,17.84,1.05,0.009,medium
+233,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 8,high,3.5,False,precision,13.898,8,4096,36,64,64,1,10368,bf16,8,7.45,2.102,12385,6.23,32.14,1.9,0.004,medium
+234,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 8,high,4.5,False,precision,13.898,8,4096,34,64,64,1,10944,bf16,8,7.37,2.102,12770,5.93,31.13,1.88,0.004,medium
+235,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,3.0,False,precision,13.941,8,4096,36,64,64,1,12096,fp8,16,8.22,2.1028,21017,5.8,17.99,1.04,0.009,medium
+236,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8,high,5.0,False,precision,13.971,8,4096,34,64,64,1,12672,fp8,16,8.09,2.1033,21767,5.5,17.33,1.03,0.008,medium
+237,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 8,high,4.25,False,precision,13.986,8,4096,35,64,64,1,10368,bf16,8,7.29,2.1036,12735,6.06,31.24,1.86,0.004,medium
+238,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8,high,3.25,False,precision,14.018,8,4096,37,64,64,1,11520,fp8,16,8.14,2.1042,20902,5.93,18.12,1.03,0.009,medium
+239,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,3.75,False,precision,14.027,8,4096,35,64,64,1,12096,fp8,16,8.03,2.1044,21605,5.64,17.49,1.02,0.009,medium
+240,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 8,high,5.0,False,precision,14.08,8,4096,34,64,64,1,10368,bf16,8,7.13,2.1053,13105,5.89,30.35,1.82,0.004,medium
+241,False,False,n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8,medium,2.5,False,precision,14.099,8,4096,36,64,64,1,11520,fp8,16,7.96,2.1057,21471,5.77,17.63,1.01,0.009,medium
+242,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8,high,4.5,False,precision,14.12,8,4096,34,64,64,1,12096,fp8,16,7.85,2.1061,22226,5.47,16.99,1.0,0.008,medium
+243,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8,high,3.25,False,precision,14.186,8,4096,35,64,64,1,11520,fp8,16,7.79,2.1073,22071,5.61,17.14,0.99,0.009,medium
+244,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,5.5,False,precision,14.186,8,4096,38,64,64,1,12672,fp8,8,8.85,2.1073,19519,6.11,19.37,1.11,0.005,medium
+245,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.75,False,precision,14.261,8,4096,37,64,64,1,12672,fp8,8,8.66,2.1087,20036,5.95,18.86,1.09,0.005,medium
+246,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,high,3.0,False,precision,14.268,8,4096,36,64,64,1,10944,fp8,16,7.71,2.1088,21944,5.75,17.27,0.98,0.009,medium
+247,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8,high,4.0,False,precision,14.279,8,4096,34,64,64,1,11520,fp8,16,7.61,2.109,22706,5.45,16.65,0.97,0.008,medium
+248,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,5.0,False,precision,14.333,8,4096,38,64,64,1,12096,fp8,8,8.58,2.11,19932,6.09,18.99,1.08,0.005,medium
+249,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.0,False,precision,14.341,8,4096,36,64,64,1,12672,fp8,8,8.47,2.1101,20582,5.79,18.35,1.07,0.004,medium
+250,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,high,3.75,False,precision,14.355,8,4096,35,64,64,1,10944,fp8,16,7.54,2.1104,22558,5.59,16.79,0.96,0.009,medium
+251,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.25,False,precision,14.409,8,4096,37,64,64,1,12096,fp8,8,8.4,2.1114,20460,5.93,18.49,1.06,0.005,medium
+252,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.75,False,precision,14.427,8,4096,35,64,64,1,12672,fp8,8,8.28,2.1117,21158,5.63,17.84,1.05,0.004,medium
+253,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,high,3.5,False,precision,14.449,8,4096,36,64,64,1,10368,fp8,16,7.45,2.1121,22440,5.73,16.91,0.95,0.009,medium
+254,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8,high,4.5,False,precision,14.449,8,4096,34,64,64,1,10944,fp8,16,7.37,2.1121,23206,5.43,16.31,0.94,0.008,medium
+255,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.5,False,precision,14.489,8,4096,36,64,64,1,12096,fp8,8,8.22,2.1129,21017,5.77,17.99,1.04,0.004,medium
+256,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,5.5,False,precision,14.52,8,4096,34,64,64,1,12672,fp8,8,8.09,2.1134,21767,5.47,17.33,1.02,0.004,medium
+257,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,high,4.25,False,precision,14.537,8,4096,35,64,64,1,10368,fp8,16,7.29,2.1138,23067,5.57,16.44,0.94,0.009,medium
+258,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.75,False,precision,14.567,8,4096,37,64,64,1,11520,fp8,8,8.14,2.1143,20902,5.91,18.12,1.03,0.005,medium
+259,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.25,False,precision,14.576,8,4096,35,64,64,1,12096,fp8,8,8.03,2.1145,21605,5.61,17.49,1.02,0.004,medium
+260,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8,high,5.0,False,precision,14.632,8,4096,34,64,64,1,10368,fp8,16,7.13,2.1155,23729,5.41,15.97,0.92,0.008,medium
+261,False,False,n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.0,False,precision,14.648,8,4096,36,64,64,1,11520,fp8,8,7.96,2.1158,21471,5.75,17.63,1.01,0.004,medium
+262,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,5.0,False,precision,14.67,8,4096,34,64,64,1,12096,fp8,8,7.85,2.1162,22226,5.45,16.99,1.0,0.004,medium
+263,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.75,False,precision,14.735,8,4096,35,64,64,1,11520,fp8,8,7.79,2.1174,22071,5.59,17.14,0.99,0.004,medium
+264,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,3.5,False,precision,14.817,8,4096,36,64,64,1,10944,fp8,8,7.71,2.1189,21944,5.72,17.27,0.98,0.004,medium
+265,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.5,False,precision,14.829,8,4096,34,64,64,1,11520,fp8,8,7.61,2.1191,22706,5.43,16.65,0.97,0.004,medium
+266,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.25,False,precision,14.905,8,4096,35,64,64,1,10944,fp8,8,7.54,2.1206,22558,5.57,16.79,0.96,0.004,medium
+267,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.0,False,precision,14.999,8,4096,36,64,64,1,10368,fp8,8,7.45,2.1223,22440,5.7,16.91,0.95,0.004,medium
+268,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,5.0,False,precision,15.0,8,4096,34,64,64,1,10944,fp8,8,7.37,2.1223,23206,5.41,16.31,0.94,0.004,medium
+269,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,4.75,False,precision,15.088,8,4096,35,64,64,1,10368,fp8,8,7.29,2.1239,23067,5.54,16.44,0.93,0.004,medium
+270,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 8,high,5.5,False,precision,15.183,8,4096,34,64,64,1,10368,fp8,8,7.13,2.1257,23729,5.39,15.97,0.91,0.004,medium
+271,False,False,kv_cache_bits: 16 -> 4,medium,1.5,False,precision,17.544,8,4096,36,64,64,8,11520,bf16,4,8.09,2.1692,11757,6.31,33.79,2.06,0.018,medium
+272,False,False,n_layers: 36 -> 35; kv_cache_bits: 16 -> 4,medium,2.25,False,precision,17.633,8,4096,35,64,64,8,11520,bf16,4,7.91,2.1709,12089,6.14,32.86,2.02,0.017,medium
+273,False,False,ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 4,medium,2.0,False,precision,17.711,8,4096,36,64,64,8,10944,bf16,4,7.84,2.1723,12057,6.27,32.97,2.0,0.018,medium
+274,False,False,ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,medium,2.5,False,precision,18.483,8,4096,36,64,64,8,12096,fp8,4,8.35,2.1866,20982,5.76,17.99,1.07,0.018,low
+275,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,3.25,False,precision,18.573,8,4096,35,64,64,8,12096,fp8,4,8.16,2.1882,21569,5.6,17.49,1.05,0.017,low
+276,False,False,ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,medium,2.0,False,precision,18.641,8,4096,36,64,64,8,11520,fp8,4,8.09,2.1895,21435,5.73,17.63,1.04,0.018,low
+277,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,4.0,False,precision,18.67,8,4096,34,64,64,8,12096,fp8,4,7.98,2.19,22190,5.44,16.99,1.02,0.017,low
+278,False,False,n_layers: 36 -> 35; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,2.75,False,precision,18.732,8,4096,35,64,64,8,11520,fp8,4,7.91,2.1912,22034,5.57,17.14,1.02,0.017,low
+279,False,False,ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,medium,2.5,False,precision,18.81,8,4096,36,64,64,8,10944,fp8,4,7.84,2.1926,21907,5.71,17.27,1.01,0.018,low
+280,False,False,n_layers: 36 -> 34; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,3.5,False,precision,18.829,8,4096,34,64,64,8,11520,fp8,4,7.74,2.193,22668,5.42,16.65,1.0,0.017,low
+281,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,3.25,False,precision,18.901,8,4096,35,64,64,8,10944,fp8,4,7.67,2.1943,22519,5.55,16.79,0.99,0.017,low
+282,False,False,ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,3.0,False,precision,18.991,8,4096,36,64,64,8,10368,fp8,4,7.58,2.196,22401,5.69,16.91,0.98,0.018,low
+283,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,4.0,False,precision,19.0,8,4096,34,64,64,8,10944,fp8,4,7.49,2.1961,23167,5.39,16.31,0.97,0.017,low
+284,False,False,n_layers: 36 -> 35; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,3.75,False,precision,19.083,8,4096,35,64,64,8,10368,fp8,4,7.42,2.1977,23026,5.53,16.44,0.96,0.017,low
+285,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 4,high,6.0,False,precision,19.108,8,4096,38,64,64,1,12672,bf16,4,8.85,2.1981,10625,6.76,37.42,2.22,0.002,medium
+286,False,False,n_layers: 36 -> 34; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,4.5,False,precision,19.182,8,4096,34,64,64,8,10368,fp8,4,7.25,2.1995,23688,5.37,15.97,0.94,0.017,low
+287,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 4,high,5.25,False,precision,19.187,8,4096,37,64,64,1,12672,bf16,4,8.66,2.1996,10909,6.58,36.44,2.18,0.002,medium
+288,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 4,high,5.5,False,precision,19.261,8,4096,38,64,64,1,12096,bf16,4,8.58,2.2009,10883,6.71,36.55,2.16,0.002,medium
+289,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 4,high,4.5,False,precision,19.271,8,4096,36,64,64,1,12672,bf16,4,8.47,2.2011,11209,6.4,35.45,2.13,0.002,medium
+290,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 4,high,4.75,False,precision,19.34,8,4096,37,64,64,1,12096,bf16,4,8.4,2.2024,11174,6.53,35.58,2.11,0.002,medium
+291,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 4,high,5.25,False,precision,19.362,8,4096,35,64,64,1,12672,bf16,4,8.28,2.2028,11525,6.22,34.47,2.09,0.002,medium
+292,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 4,high,5.0,False,precision,19.424,8,4096,38,64,64,1,11520,bf16,4,8.31,2.204,11155,6.66,35.67,2.09,0.002,medium
+293,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 4,high,4.0,False,precision,19.425,8,4096,36,64,64,1,12096,bf16,4,8.22,2.204,11481,6.36,34.62,2.07,0.002,medium
+294,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; kv_cache_bits: 16 -> 4,high,6.0,False,precision,19.459,8,4096,34,64,64,1,12672,bf16,4,8.09,2.2046,11860,6.05,33.48,2.04,0.002,medium
+295,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 4,high,4.25,False,precision,19.504,8,4096,37,64,64,1,11520,bf16,4,8.14,2.2054,11453,6.49,34.73,2.05,0.002,medium
+296,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 4,high,4.75,False,precision,19.516,8,4096,35,64,64,1,12096,bf16,4,8.03,2.2057,11806,6.18,33.66,2.03,0.002,medium
+297,False,False,n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 4,high,3.5,False,precision,19.59,8,4096,36,64,64,1,11520,bf16,4,7.96,2.207,11768,6.31,33.79,2.01,0.002,medium
+298,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; kv_cache_bits: 16 -> 4,high,5.5,False,precision,19.614,8,4096,34,64,64,1,12096,bf16,4,7.85,2.2075,12149,6.0,32.7,1.99,0.002,medium
+299,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 4,high,4.75,False,precision,19.68,8,4096,37,64,64,1,10944,bf16,4,7.88,2.2087,11746,6.44,33.88,1.99,0.002,medium
+300,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 4,high,4.25,False,precision,19.682,8,4096,35,64,64,1,11520,bf16,4,7.79,2.2087,12100,6.14,32.86,1.97,0.002,medium
+301,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 4,high,4.0,False,precision,19.766,8,4096,36,64,64,1,10944,bf16,4,7.71,2.2103,12069,6.27,32.97,1.95,0.002,medium
+302,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; kv_cache_bits: 16 -> 4,high,5.0,False,precision,19.78,8,4096,34,64,64,1,11520,bf16,4,7.61,2.2105,12451,5.96,31.92,1.93,0.002,medium
+303,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 4,high,4.75,False,precision,19.858,8,4096,35,64,64,1,10944,bf16,4,7.54,2.212,12409,6.09,32.05,1.91,0.002,medium
+304,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 4,high,4.5,False,precision,19.955,8,4096,36,64,64,1,10368,bf16,4,7.45,2.2137,12385,6.22,32.14,1.89,0.002,medium
+305,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; kv_cache_bits: 16 -> 4,high,5.5,False,precision,19.958,8,4096,34,64,64,1,10944,bf16,4,7.37,2.2138,12770,5.92,31.13,1.87,0.002,medium
+306,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 4,high,5.25,False,precision,20.048,8,4096,35,64,64,1,10368,bf16,4,7.29,2.2155,12735,6.05,31.24,1.86,0.002,medium
+307,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; kv_cache_bits: 16 -> 4,high,6.0,False,precision,20.148,8,4096,34,64,64,1,10368,bf16,4,7.13,2.2173,13105,5.88,30.35,1.82,0.002,medium
+308,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,6.5,False,precision,20.202,8,4096,38,64,64,1,12672,fp8,4,8.85,2.2183,19519,6.1,19.37,1.11,0.002,low
+309,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.75,False,precision,20.281,8,4096,37,64,64,1,12672,fp8,4,8.66,2.2198,20036,5.94,18.86,1.09,0.002,low
+310,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,6.0,False,precision,20.356,8,4096,38,64,64,1,12096,fp8,4,8.58,2.2211,19932,6.08,18.99,1.08,0.002,low
+311,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.0,False,precision,20.367,8,4096,36,64,64,1,12672,fp8,4,8.47,2.2213,20582,5.78,18.35,1.07,0.002,low
+312,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.25,False,precision,20.436,8,4096,37,64,64,1,12096,fp8,4,8.4,2.2226,20460,5.92,18.49,1.06,0.002,low
+313,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.75,False,precision,20.458,8,4096,35,64,64,1,12672,fp8,4,8.28,2.223,21158,5.62,17.84,1.04,0.002,low
+314,False,False,n_layers: 36 -> 38; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.5,False,precision,20.521,8,4096,38,64,64,1,11520,fp8,4,8.31,2.2242,20363,6.05,18.61,1.05,0.002,low
+315,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,4.5,False,precision,20.522,8,4096,36,64,64,1,12096,fp8,4,8.22,2.2242,21017,5.76,17.99,1.04,0.002,low
+316,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12672; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,6.5,False,precision,20.556,8,4096,34,64,64,1,12672,fp8,4,8.09,2.2248,21767,5.46,17.33,1.02,0.002,low
+317,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,4.75,False,precision,20.601,8,4096,37,64,64,1,11520,fp8,4,8.14,2.2257,20902,5.89,18.12,1.03,0.002,low
+318,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.25,False,precision,20.614,8,4096,35,64,64,1,12096,fp8,4,8.03,2.2259,21605,5.6,17.49,1.02,0.002,low
+319,False,False,n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,4.0,False,precision,20.688,8,4096,36,64,64,1,11520,fp8,4,7.96,2.2273,21471,5.73,17.63,1.01,0.002,low
+320,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 12096; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,6.0,False,precision,20.713,8,4096,34,64,64,1,12096,fp8,4,7.85,2.2277,22226,5.44,16.99,0.99,0.002,low
+321,False,False,n_layers: 36 -> 37; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.25,False,precision,20.778,8,4096,37,64,64,1,10944,fp8,4,7.88,2.2289,21364,5.87,17.75,1.0,0.002,low
+322,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,4.75,False,precision,20.781,8,4096,35,64,64,1,11520,fp8,4,7.79,2.229,22071,5.57,17.14,0.99,0.002,low
+323,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,4.5,False,precision,20.866,8,4096,36,64,64,1,10944,fp8,4,7.71,2.2306,21944,5.71,17.27,0.98,0.002,low
+324,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.5,False,precision,20.88,8,4096,34,64,64,1,11520,fp8,4,7.61,2.2308,22706,5.42,16.65,0.97,0.002,low
+325,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.25,False,precision,20.959,8,4096,35,64,64,1,10944,fp8,4,7.54,2.2323,22558,5.55,16.79,0.96,0.002,low
+326,False,False,n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.0,False,precision,21.056,8,4096,36,64,64,1,10368,fp8,4,7.45,2.2341,22440,5.69,16.91,0.95,0.002,low
+327,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10944; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,6.0,False,precision,21.059,8,4096,34,64,64,1,10944,fp8,4,7.37,2.2341,23206,5.39,16.31,0.94,0.002,low
+328,False,False,n_layers: 36 -> 35; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,5.75,False,precision,21.15,8,4096,35,64,64,1,10368,fp8,4,7.29,2.2358,23067,5.53,16.44,0.93,0.002,low
+329,False,False,n_layers: 36 -> 34; n_kv_heads: 8 -> 1; ffn_dim: 11520 -> 10368; ffn_precision: bf16 -> fp8; kv_cache_bits: 16 -> 4,high,6.5,False,precision,21.251,8,4096,34,64,64,1,10368,fp8,4,7.13,2.2377,23729,5.37,15.97,0.91,0.002,low

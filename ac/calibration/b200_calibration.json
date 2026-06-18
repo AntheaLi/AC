@@ -1,0 +1,179 @@
+{
+  "hardware": "b200",
+  "source": "public_estimate",
+  "notes": "Initialized from NVIDIA Blackwell whitepaper, MLPerf Inference v4.1/v5.0 reported B200 numbers, and Hopper→Blackwell scaling priors (FA-3, NVLink5). Peak values match v0-throughput/hardware_specs/b200.json (DGX-B200 SKU: BF16 1125 TF, FP8 2250 TF, FP4 4500 TF, HBM3e 8 TB/s). Replace with measured kernels when B200 hardware access is available.",
+  "gemm_shapes": [
+    {
+      "m_bucket": 1024, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 620, "peak_tflops": 1125,
+      "efficiency": 0.55,
+      "notes": "Small-M decode-like GEMM, memory-bound. Slightly better than H100 due to HBM3e bandwidth uplift (8 vs 3.35 TB/s)."
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 765, "peak_tflops": 1125,
+      "efficiency": 0.68,
+      "notes": "Square GEMM, typical attention projection. cuBLAS Blackwell kernels mature similarly to Hopper at this shape."
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 11008, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 832, "peak_tflops": 1125,
+      "efficiency": 0.74,
+      "notes": "FFN up/gate projection shape"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 11008,
+      "precision": "bf16",
+      "achieved_tflops": 820, "peak_tflops": 1125,
+      "efficiency": 0.73,
+      "notes": "FFN down projection shape"
+    },
+    {
+      "m_bucket": 8192, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 877, "peak_tflops": 1125,
+      "efficiency": 0.78,
+      "notes": "Large-batch training GEMM, near tile-saturation"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "fp8_e4m3",
+      "achieved_tflops": 1395, "peak_tflops": 2250,
+      "efficiency": 0.62,
+      "notes": "FP8 GEMM, attention projection. Blackwell Transformer Engine 2nd-gen modestly improves on H100 FP8 utilization."
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 11008, "k_bucket": 4096,
+      "precision": "fp8_e4m3",
+      "achieved_tflops": 1597, "peak_tflops": 2250,
+      "efficiency": 0.71,
+      "notes": "FP8 FFN up/gate projection"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "fp4_e2m1",
+      "achieved_tflops": 2475, "peak_tflops": 4500,
+      "efficiency": 0.55,
+      "notes": "FP4 GEMM, Blackwell-only. Lower efficiency than FP8 because kernels and numerics are early-generation."
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 11008, "k_bucket": 4096,
+      "precision": "fp4_e2m1",
+      "achieved_tflops": 2925, "peak_tflops": 4500,
+      "efficiency": 0.65,
+      "notes": "FP4 FFN up/gate projection"
+    },
+    {
+      "m_bucket": 32, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 56, "peak_tflops": 1125,
+      "efficiency": 0.05,
+      "notes": "Single-batch decode GEMM, heavily memory-bound (efficiency ratio similar to H100 because both are HBM-bound at this shape)."
+    }
+  ],
+  "attention_prefill": [
+    {
+      "batch": 1, "seq_len": 2048, "n_heads": 32, "d_head": 128,
+      "latency_ms": 0.17,
+      "effective_bandwidth_tbps": 6.6,
+      "notes": "Short-context single-batch, FlashAttention-3 on Blackwell"
+    },
+    {
+      "batch": 8, "seq_len": 8192, "n_heads": 32, "d_head": 128,
+      "latency_ms": 5.1,
+      "effective_bandwidth_tbps": 6.3,
+      "notes": "Typical long-context prefill, FA-3. ~2.5x speedup over H100 driven by HBM3e."
+    },
+    {
+      "batch": 1, "seq_len": 32768, "n_heads": 32, "d_head": 128,
+      "latency_ms": 11.5,
+      "effective_bandwidth_tbps": 5.9,
+      "notes": "Very long context, single batch"
+    },
+    {
+      "batch": 8, "seq_len": 8192, "n_heads": 8, "d_head": 128,
+      "latency_ms": 1.55,
+      "effective_bandwidth_tbps": 6.1,
+      "notes": "GQA-4 prefill (8 KV heads from 32 query heads), FA-3"
+    }
+  ],
+  "decode_kv": [
+    {
+      "batch": 1, "context": 2048, "n_kv_heads": 32, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.0034,
+      "effective_bandwidth_tbps": 6.8,
+      "notes": "MHA short context, bf16 KV"
+    },
+    {
+      "batch": 32, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.019,
+      "effective_bandwidth_tbps": 6.4,
+      "notes": "GQA-4, long context, bf16 KV"
+    },
+    {
+      "batch": 32, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "int8",
+      "latency_ms": 0.010,
+      "effective_bandwidth_tbps": 6.1,
+      "notes": "GQA-4, long context, INT8 KV (quantized)"
+    },
+    {
+      "batch": 32, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "int4",
+      "latency_ms": 0.0058,
+      "effective_bandwidth_tbps": 5.6,
+      "notes": "GQA-4, long context, INT4 KV (quantized)"
+    },
+    {
+      "batch": 64, "context": 8192, "n_kv_heads": 32, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.145,
+      "effective_bandwidth_tbps": 6.6,
+      "notes": "MHA, large batch, long context — decode KV bandwidth dominated"
+    },
+    {
+      "batch": 64, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "int8",
+      "latency_ms": 0.020,
+      "effective_bandwidth_tbps": 6.0,
+      "notes": "GQA-4 + INT8 KV, large batch — optimal decode config"
+    }
+  ],
+  "all_reduce": [
+    {
+      "tp": 2, "message_size_mb": 16,
+      "latency_ms": 0.006, "bandwidth_gbps": 1500,
+      "notes": "NVLink5 intra-node, small message (DGX-B200 8-GPU)"
+    },
+    {
+      "tp": 4, "message_size_mb": 32,
+      "latency_ms": 0.014, "bandwidth_gbps": 1400,
+      "notes": "NVLink5 intra-node, medium message"
+    },
+    {
+      "tp": 8, "message_size_mb": 64,
+      "latency_ms": 0.033, "bandwidth_gbps": 1300,
+      "notes": "Full NVLink5 mesh, large message (8-GPU DGX-B200)"
+    },
+    {
+      "tp": 8, "message_size_mb": 8,
+      "latency_ms": 0.008, "bandwidth_gbps": 800,
+      "notes": "Full NVLink5 mesh, small message (latency-dominated)"
+    },
+    {
+      "tp": 16, "message_size_mb": 128,
+      "latency_ms": 0.075, "bandwidth_gbps": 1700,
+      "notes": "NVL72 fabric, beyond single DGX node — only valid when nvlink_domain_size >= 16"
+    },
+    {
+      "tp": 32, "message_size_mb": 256,
+      "latency_ms": 0.150, "bandwidth_gbps": 1700,
+      "notes": "NVL72 fabric, large TP. Only realistic for NVL72 SKU; cross-DGX falls back to inter-node BW."
+    }
+  ]
+}

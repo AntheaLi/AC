@@ -1,0 +1,155 @@
+{
+  "hardware": "h100_sxm",
+  "source": "public_estimate",
+  "notes": "Initialized from published benchmarks (NVIDIA, MLPerf). Replace with local measurements when H100 access is available.",
+  "gemm_shapes": [
+    {
+      "m_bucket": 1024, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 520, "peak_tflops": 989,
+      "efficiency": 0.53,
+      "notes": "Small-M GEMM (decode-like), memory-bound"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 680, "peak_tflops": 989,
+      "efficiency": 0.69,
+      "notes": "Square GEMM, typical attention projection"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 11008, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 740, "peak_tflops": 989,
+      "efficiency": 0.75,
+      "notes": "FFN up/gate projection shape"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 11008,
+      "precision": "bf16",
+      "achieved_tflops": 730, "peak_tflops": 989,
+      "efficiency": 0.74,
+      "notes": "FFN down projection shape"
+    },
+    {
+      "m_bucket": 8192, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 780, "peak_tflops": 989,
+      "efficiency": 0.79,
+      "notes": "Large-batch training GEMM"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "fp8_e4m3",
+      "achieved_tflops": 1200, "peak_tflops": 1979,
+      "efficiency": 0.61,
+      "notes": "FP8 GEMM, typical attention projection"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 11008, "k_bucket": 4096,
+      "precision": "fp8_e4m3",
+      "achieved_tflops": 1380, "peak_tflops": 1979,
+      "efficiency": 0.70,
+      "notes": "FP8 FFN up/gate projection"
+    },
+    {
+      "m_bucket": 32, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 45, "peak_tflops": 989,
+      "efficiency": 0.05,
+      "notes": "Single-batch decode GEMM, heavily memory-bound"
+    }
+  ],
+  "attention_prefill": [
+    {
+      "batch": 1, "seq_len": 2048, "n_heads": 32, "d_head": 128,
+      "latency_ms": 0.42,
+      "effective_bandwidth_tbps": 2.8,
+      "notes": "Short-context single-batch, FlashAttention-2"
+    },
+    {
+      "batch": 8, "seq_len": 8192, "n_heads": 32, "d_head": 128,
+      "latency_ms": 12.5,
+      "effective_bandwidth_tbps": 2.6,
+      "notes": "Typical long-context prefill, FlashAttention-2"
+    },
+    {
+      "batch": 1, "seq_len": 32768, "n_heads": 32, "d_head": 128,
+      "latency_ms": 28.0,
+      "effective_bandwidth_tbps": 2.4,
+      "notes": "Very long context, single batch"
+    },
+    {
+      "batch": 8, "seq_len": 8192, "n_heads": 8, "d_head": 128,
+      "latency_ms": 3.8,
+      "effective_bandwidth_tbps": 2.5,
+      "notes": "GQA-4 prefill (8 KV heads from 32 query heads)"
+    }
+  ],
+  "decode_kv": [
+    {
+      "batch": 1, "context": 2048, "n_kv_heads": 32, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.008,
+      "effective_bandwidth_tbps": 2.9,
+      "notes": "MHA short context, bf16 KV"
+    },
+    {
+      "batch": 32, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.045,
+      "effective_bandwidth_tbps": 2.7,
+      "notes": "GQA-4, long context, bf16 KV"
+    },
+    {
+      "batch": 32, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "int8",
+      "latency_ms": 0.024,
+      "effective_bandwidth_tbps": 2.6,
+      "notes": "GQA-4, long context, INT8 KV (quantized)"
+    },
+    {
+      "batch": 32, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "int4",
+      "latency_ms": 0.014,
+      "effective_bandwidth_tbps": 2.4,
+      "notes": "GQA-4, long context, INT4 KV (quantized)"
+    },
+    {
+      "batch": 64, "context": 8192, "n_kv_heads": 32, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.35,
+      "effective_bandwidth_tbps": 2.8,
+      "notes": "MHA, large batch, long context — decode KV bandwidth dominated"
+    },
+    {
+      "batch": 64, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "int8",
+      "latency_ms": 0.048,
+      "effective_bandwidth_tbps": 2.5,
+      "notes": "GQA-4 + INT8 KV, large batch — optimal decode config"
+    }
+  ],
+  "all_reduce": [
+    {
+      "tp": 2, "message_size_mb": 16,
+      "latency_ms": 0.012, "bandwidth_gbps": 750,
+      "notes": "NVLink intra-node, small message"
+    },
+    {
+      "tp": 4, "message_size_mb": 32,
+      "latency_ms": 0.028, "bandwidth_gbps": 700,
+      "notes": "NVLink intra-node, medium message"
+    },
+    {
+      "tp": 8, "message_size_mb": 64,
+      "latency_ms": 0.065, "bandwidth_gbps": 650,
+      "notes": "Full NVLink mesh, large message"
+    },
+    {
+      "tp": 8, "message_size_mb": 8,
+      "latency_ms": 0.015, "bandwidth_gbps": 400,
+      "notes": "Full NVLink mesh, small message (latency-dominated)"
+    }
+  ]
+}

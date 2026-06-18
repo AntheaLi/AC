@@ -1,0 +1,153 @@
+{
+  "hardware": "tpu_v5p",
+  "source": "public_estimate",
+  "notes": "Initialized from Google TPU v5p datasheet, published PaLM-2 / Gemini training MFU reports, and Pallas/Splash Attention micro-benchmarks. Peak values match v0-throughput/hardware_specs/tpu_v5p.json (BF16 459 TF, INT8 918 TF, HBM3 2.77 TB/s, ICI 800 GB/s single-axis). Replace with measured kernels when TPU v5p access is available.",
+  "gemm_shapes": [
+    {
+      "m_bucket": 1024, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 234, "peak_tflops": 459,
+      "efficiency": 0.51,
+      "notes": "Small-M decode-like GEMM. MXU 128x128 systolic underfills at M=1024; mostly HBM-bound."
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 326, "peak_tflops": 459,
+      "efficiency": 0.71,
+      "notes": "Square GEMM. Systolic 128x128 achieves high utilization on tile-aligned shapes."
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 11008, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 358, "peak_tflops": 459,
+      "efficiency": 0.78,
+      "notes": "FFN up/gate projection — large-N favors MXU."
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 11008,
+      "precision": "bf16",
+      "achieved_tflops": 349, "peak_tflops": 459,
+      "efficiency": 0.76,
+      "notes": "FFN down projection shape"
+    },
+    {
+      "m_bucket": 8192, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 372, "peak_tflops": 459,
+      "efficiency": 0.81,
+      "notes": "Large-batch training GEMM, near MXU saturation. Aligns with reported PaLM-2 MFU on v5p (~60% end-to-end including overhead)."
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "int8",
+      "achieved_tflops": 624, "peak_tflops": 918,
+      "efficiency": 0.68,
+      "notes": "INT8 GEMM, typical attention/weight quantization path"
+    },
+    {
+      "m_bucket": 4096, "n_bucket": 11008, "k_bucket": 4096,
+      "precision": "int8",
+      "achieved_tflops": 707, "peak_tflops": 918,
+      "efficiency": 0.77,
+      "notes": "INT8 FFN up/gate projection"
+    },
+    {
+      "m_bucket": 32, "n_bucket": 4096, "k_bucket": 4096,
+      "precision": "bf16",
+      "achieved_tflops": 23, "peak_tflops": 459,
+      "efficiency": 0.05,
+      "notes": "Single-batch decode GEMM, MXU heavily underfilled — HBM-bound."
+    }
+  ],
+  "attention_prefill": [
+    {
+      "batch": 1, "seq_len": 2048, "n_heads": 32, "d_head": 128,
+      "latency_ms": 0.48,
+      "effective_bandwidth_tbps": 2.30,
+      "notes": "Short-context single-batch, Splash Attention on v5p. HBM 2.77 TB/s ≈ H100 (3.35 TB/s) so latency close to H100."
+    },
+    {
+      "batch": 8, "seq_len": 8192, "n_heads": 32, "d_head": 128,
+      "latency_ms": 14.0,
+      "effective_bandwidth_tbps": 2.20,
+      "notes": "Typical long-context prefill, Splash/Pallas attention"
+    },
+    {
+      "batch": 1, "seq_len": 32768, "n_heads": 32, "d_head": 128,
+      "latency_ms": 32.5,
+      "effective_bandwidth_tbps": 2.05,
+      "notes": "Very long context, single batch. Softmax reduction cost slightly higher than GPU FA-2."
+    },
+    {
+      "batch": 8, "seq_len": 8192, "n_heads": 8, "d_head": 128,
+      "latency_ms": 4.3,
+      "effective_bandwidth_tbps": 2.10,
+      "notes": "GQA-4 prefill (8 KV heads from 32 query heads)"
+    }
+  ],
+  "decode_kv": [
+    {
+      "batch": 1, "context": 2048, "n_kv_heads": 32, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.0094,
+      "effective_bandwidth_tbps": 2.45,
+      "notes": "MHA short context, bf16 KV"
+    },
+    {
+      "batch": 32, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.054,
+      "effective_bandwidth_tbps": 2.25,
+      "notes": "GQA-4, long context, bf16 KV"
+    },
+    {
+      "batch": 32, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "int8",
+      "latency_ms": 0.029,
+      "effective_bandwidth_tbps": 2.10,
+      "notes": "GQA-4, long context, INT8 KV (quantized)"
+    },
+    {
+      "batch": 64, "context": 8192, "n_kv_heads": 32, "d_head": 128,
+      "kv_dtype": "bf16",
+      "latency_ms": 0.420,
+      "effective_bandwidth_tbps": 2.35,
+      "notes": "MHA, large batch, long context — decode KV bandwidth dominated"
+    },
+    {
+      "batch": 64, "context": 8192, "n_kv_heads": 8, "d_head": 128,
+      "kv_dtype": "int8",
+      "latency_ms": 0.058,
+      "effective_bandwidth_tbps": 2.05,
+      "notes": "GQA-4 + INT8 KV, large batch — optimal decode config on v5p"
+    }
+  ],
+  "all_reduce": [
+    {
+      "tp": 2, "message_size_mb": 16,
+      "latency_ms": 0.020, "bandwidth_gbps": 640,
+      "notes": "ICI single-axis, small message — 800 GB/s × 0.80 efficiency"
+    },
+    {
+      "tp": 4, "message_size_mb": 32,
+      "latency_ms": 0.048, "bandwidth_gbps": 620,
+      "notes": "ICI single-axis, medium message"
+    },
+    {
+      "tp": 8, "message_size_mb": 64,
+      "latency_ms": 0.108, "bandwidth_gbps": 600,
+      "notes": "ICI single-axis, large message (8 chips along one torus axis)"
+    },
+    {
+      "tp": 16, "message_size_mb": 128,
+      "latency_ms": 0.230, "bandwidth_gbps": 580,
+      "notes": "ICI single-axis full domain (16 chips per torus axis on v5p)"
+    },
+    {
+      "tp": 32, "message_size_mb": 128,
+      "latency_ms": 0.560, "bandwidth_gbps": 240,
+      "notes": "Cross-axis ICI traversal — 2.5× penalty when EP/TP spans more than one torus dimension"
+    }
+  ]
+}

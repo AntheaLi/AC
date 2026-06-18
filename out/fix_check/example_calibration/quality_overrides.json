@@ -1,0 +1,12 @@
+{
+  "uncertainty": {
+    "calibration_multiplier": 1.0,
+    "calibration_source": "ac-auto-calibrate 2026-06-18T15:27:34+00:00",
+    "calibration_target_coverage": 0.9,
+    "calibration_n": 2,
+    "calibration_coverage_before": 1.0,
+    "calibration_coverage_after": 1.0,
+    "calibration_median_bias_pct": 2.879879,
+    "calibration_abs_error_p90_pct": 3.213338
+  }
+}

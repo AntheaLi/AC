@@ -1,0 +1,236 @@
+{
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "v0.3.0",
+    "generated_at": "2026-06-18T14:40:57+00:00",
+    "input_hardware": "b200",
+    "input_constraints": {
+      "target_params": "1.0B",
+      "training_tokens": "0.2T",
+      "context_length": 2048,
+      "serving_tbt_ms": 100.0,
+      "serving_ttft_ms": null,
+      "serving_batch": 4,
+      "allow_moe": false,
+      "max_total_params_b": null,
+      "allow_state": false
+    },
+    "predicted": {
+      "quality_rank_score": -3.1557,
+      "predicted_loss": 3.1557,
+      "training_throughput_tokens_per_sec": 86661,
+      "serving_tbt_ms": 2.1,
+      "serving_ttft_ms": 4.1,
+      "memory_per_gpu_gb": 0.8,
+      "active_params_b": 1.04,
+      "total_params_b": 1.04,
+      "moe_style": "dense",
+      "ep_degree": 1,
+      "confidence": "medium",
+      "scaling_spine_loss": 2.3367,
+      "spine_active_params_b": 0.911,
+      "total_residual_pct": 35.05,
+      "architecture_residual_pct": 0.046,
+      "precision_residual_pct": 35.0,
+      "risk_uncertainty_pct": 0.0,
+      "total_penalty_pct": 35.05,
+      "dominant_penalty": "weight_precision",
+      "uncertainty_low_pct": 20.83,
+      "uncertainty_high_pct": 49.26,
+      "uncertainty_total_pct": 14.53,
+      "uncertainty_breakdown": {
+        "scale_law": 3.0,
+        "architecture": 0.012,
+        "precision": 14.213,
+        "moe": 0.0,
+        "state": 0.0,
+        "risk": 0.0,
+        "data_quality": 0.0
+      },
+      "quality_model_version": "quality_v1_modular_backbone",
+      "quality_terms": {
+        "spine": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 3.0,
+          "confidence": "high",
+          "source": "Hoffmann_et_al_2022_placeholder_defaults",
+          "notes": [
+            "Scaling-law spine over active non-embedding compute proxy and effective training tokens."
+          ],
+          "features": {
+            "N_active": 1041833984,
+            "M_active_non_embedding_proxy": 910761984,
+            "N_total": 1041833984,
+            "D_effective": 200000000000,
+            "tokens_per_active_param": 219.59634186927153,
+            "L_inf": 1.69
+          }
+        },
+        "architecture_residual": {
+          "value_pct": 0.0464,
+          "uncertainty_pct": 0.0116,
+          "confidence": "medium",
+          "source": "coupled_width_depth_attention_residual",
+          "notes": [
+            "Query heads are a weak, saturating prior derived from width, not a monotonic quality law.",
+            "KV heads are modeled as a direct memory/latency tradeoff; the uncertain quality term is GQA sharing."
+          ],
+          "features": {
+            "d_model": 2048,
+            "n_layers": 18,
+            "n_query_heads": 16,
+            "n_query_heads_default": 16,
+            "d_head": 128,
+            "n_kv_heads": 16,
+            "gqa_group_size": 1.0,
+            "ffn_ratio": 2.6875,
+            "mlp_to_attention_param_ratio": 2.0156,
+            "depth_width_ratio": 0.0087890625,
+            "attention_param_ratio": 0.3316,
+            "kv_bytes_per_token_per_layer_bf16": 8192,
+            "attention_bottleneck_risk": false,
+            "subterms": {
+              "width_depth": 0.000464,
+              "mlp_attention_ratio": 0.0,
+              "d_head": 0.0,
+              "attn_kernel_underrun": 0.0,
+              "query_heads": 0.0,
+              "kv_heads": 0.0,
+              "gqa_sharing": 0.0,
+              "attention_bottleneck": 0.0,
+              "attention_long_context": 0.0,
+              "attention_mla": 0.0,
+              "attention_nsa": 0.0,
+              "sparsity_2_4": 0.0,
+              "yoco_sharing": 0.0
+            },
+            "attn_long_context_ref_ctx": 32768,
+            "attn_long_context_effective_ctx": 2048,
+            "attention_fraction": 1.0
+          }
+        },
+        "precision_residual": {
+          "value_pct": 35.0,
+          "uncertainty_pct": 14.2127,
+          "confidence": "low",
+          "source": "component_precision_sensitivity_with_hardware_feasibility",
+          "notes": [
+            "ffn=fp4 risk=medium",
+            "attention_qkv=fp4 risk=high",
+            "attention_o=fp4 risk=high",
+            "lm_head=fp4 risk=high"
+          ],
+          "features": {
+            "ffn": "fp4",
+            "attention_qkv": "fp4",
+            "attention_o": "fp4",
+            "lm_head": "fp4",
+            "embedding": "fp4",
+            "kv_cache": "bf16"
+          }
+        },
+        "risk_residual": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 0.0,
+          "confidence": "high",
+          "source": "compiler_attention_and_architecture_risk_prior",
+          "notes": [],
+          "features": {
+            "gqa_group_size": 1.0,
+            "attention_bottleneck_risk": false,
+            "d_head": 128
+          }
+        },
+        "feasibility": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 0.0,
+          "confidence": "high",
+          "source": "hard_constraint",
+          "notes": [],
+          "features": {}
+        }
+      },
+      "binding_serving_regime": "decode-heavy",
+      "binding_constraints": [
+        "compute_bound",
+        "decode_kv_bandwidth"
+      ]
+    },
+    "search_stats": {
+      "candidates_generated": 30,
+      "candidates_feasible": 30,
+      "pareto_size": 15,
+      "search_time_sec": 0.03
+    }
+  },
+  "parallelism": {
+    "tensor_parallel": 1,
+    "pipeline_parallel": 1,
+    "data_parallel": 1,
+    "expert_parallel": 1,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 2048,
+    "n_layers": 18,
+    "vocab_size": 32000,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 500000,
+      "scaling": null
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "type": "transformer_block",
+        "attention": {
+          "type": "full",
+          "n_heads": 16,
+          "n_kv_heads": 16,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {
+            "qk": "bf16",
+            "v": "fp4",
+            "output": "fp4"
+          }
+        },
+        "ffn": {
+          "type": "swiglu",
+          "ffn_dim": 5504,
+          "precision": "fp4"
+        },
+        "normalization": {
+          "type": "rmsnorm",
+          "eps": 1e-05,
+          "precision": "bf16"
+        },
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ],
+    "n_dense_ffn_layers": 0
+  }
+}

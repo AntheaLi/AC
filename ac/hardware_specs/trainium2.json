@@ -1,0 +1,59 @@
+{
+  "vendor": "aws",
+  "accelerator_family": "trainium",
+  "accelerator_name": "AWS Trainium 2",
+  "compute_units": 8,
+  "compute_unit_type": "NeuronCore-v3",
+
+  "hbm_capacity_gb": 96,
+  "hbm_bandwidth_tb_s": 2.9,
+
+  "peak_flops_tf": {
+    "bf16": 650,
+    "fp16": 650,
+    "fp8":  1300,
+    "int8": 1300
+  },
+
+  "bytes_per_element": {
+    "bf16": 2,
+    "fp16": 2,
+    "fp8":  1,
+    "int8": 1
+  },
+
+  "supported_precisions": ["bf16", "fp16", "fp8", "int8"],
+
+  "fused_attention_efficiency": {
+    "bf16": 0.74,
+    "fp8":  0.71
+  },
+  "fused_attention_kernel": "NKI fused attention",
+
+  "interconnect": {
+    "type": "neuronlink-v3",
+    "intra_node_bw_gb_s": 1280,
+    "inter_node_bw_gb_s": 400,
+    "topology": "16 chips per Trn2 instance, 64 per UltraServer"
+  },
+
+  "gpus_per_node": 16,
+  "chips_per_host": 16,
+  "nvlink_domain_size": 16,
+
+  "calibration": {
+    "kernel_launch_overhead_us": 6.0,
+    "kernels_per_layer": 11,
+    "optimizer_bytes_per_param": 12,
+    "training_system_efficiency": 0.40,
+    "decode_system_efficiency": 0.43,
+    "prefill_system_efficiency": 0.58
+  },
+
+  "notes": {
+    "source": "public_estimate from AWS re:Invent 2024 announcements + Anthropic-internal Trainium 2 docs",
+    "compute_units_note": "Trn2 chip has 8 NeuronCores-v3, each with ~80 TF bf16",
+    "hbm_bw_source": "AWS Trainium 2 datasheet: 2.9 TB/s HBM3",
+    "topology_note": "Trn2 UltraServer connects 4 Trn2 instances (64 chips) via NeuronLink-v3"
+  }
+}

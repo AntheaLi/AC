@@ -1,0 +1,295 @@
+{
+  "baseline_name": "gpt-oss-120b",
+  "binding_axes_baseline": [
+    "hbm_bw_decode"
+  ],
+  "binding_axes_introduced": [],
+  "binding_axes_relieved": [],
+  "delta_args": {
+    "latent_dim": 256
+  },
+  "delta_name": "swap_attention_to_mla",
+  "feasible": true,
+  "field_changes": [
+    {
+      "baseline": 8,
+      "candidate": 1,
+      "field": "n_kv_heads"
+    },
+    {
+      "baseline": 8.09,
+      "candidate": 7.96,
+      "field": "total_params_b"
+    }
+  ],
+  "hardware": "h100",
+  "justification": "Baseline binding stresses: HBM-BW-decode=3.86 violated. Applying MLA drops HBM-BW-decode by 0.01; no binding axis was relieved. Quality cost: +0.0179 attention, -0.0001 shape-law (+0.0178 total residual change).",
+  "metrics": {
+    "kv_cache_gb": {
+      "baseline": 0.017578125,
+      "candidate": 0.002197265625,
+      "delta": -0.015380859375,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "kv_cache_gb",
+      "pct_change": -87.5
+    },
+    "memory_per_gpu_gb": {
+      "baseline": 19.85614776611328,
+      "candidate": 19.81000518798828,
+      "delta": -0.046142578125,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "memory_per_gpu_gb",
+      "pct_change": -0.23238434095332142
+    },
+    "predicted_loss": {
+      "baseline": 1.8454804441707162,
+      "candidate": 1.8805944304565996,
+      "delta": 0.03511398628588336,
+      "direction": "worsens",
+      "lower_is_better": true,
+      "name": "predicted_loss",
+      "pct_change": 1.9027016188005261
+    },
+    "prefill_time_ms": {
+      "baseline": 42.18503976461296,
+      "candidate": 42.18503976461296,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "prefill_time_ms",
+      "pct_change": 0.0
+    },
+    "quality_architecture_residual": {
+      "baseline": 0.016910339591221873,
+      "candidate": 0.03468246714741347,
+      "delta": 0.0177721275561916,
+      "direction": "worsens",
+      "lower_is_better": true,
+      "name": "quality_architecture_residual",
+      "pct_change": 105.09621915231719
+    },
+    "quality_data_quality": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_data_quality",
+      "pct_change": 0.0
+    },
+    "quality_feasibility": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_feasibility",
+      "pct_change": 0.0
+    },
+    "quality_moe_residual": {
+      "baseline": -0.07624618986159398,
+      "candidate": -0.07624618986159398,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_moe_residual",
+      "pct_change": 0.0
+    },
+    "quality_precision_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_precision_residual",
+      "pct_change": 0.0
+    },
+    "quality_risk_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_risk_residual",
+      "pct_change": 0.0
+    },
+    "quality_spine": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_spine",
+      "pct_change": 0.0
+    },
+    "quality_state_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_state_residual",
+      "pct_change": 0.0
+    },
+    "serving_tbt_ms": {
+      "baseline": 9.037068008528784,
+      "candidate": 9.037068008528784,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "serving_tbt_ms",
+      "pct_change": 0.0
+    },
+    "total_params_b": {
+      "baseline": 8.09,
+      "candidate": 7.96,
+      "delta": -0.1299999999999999,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "total_params_b",
+      "pct_change": -1.6069221260815807
+    },
+    "training_tps": {
+      "baseline": 9524.727793719954,
+      "candidate": 9531.81562612819,
+      "delta": 7.087832408235045,
+      "direction": "improves",
+      "lower_is_better": false,
+      "name": "training_tps",
+      "pct_change": 0.07441506530935556
+    }
+  },
+  "pareto_axes": [
+    "predicted_loss",
+    "memory_per_gpu_gb",
+    "training_tps"
+  ],
+  "pareto_distance": 0.015866171038947254,
+  "pareto_dominated_count": 0,
+  "pareto_dominates_count": 0,
+  "pareto_frontier_size": 336,
+  "pareto_position": "ON_FRONTIER",
+  "quality_delta": {
+    "attention_residual": 0.017853,
+    "context_extrapolation": 0.0,
+    "fa_underrun": 0.0,
+    "moe_residual": 0.0,
+    "precision_loss": 0.0,
+    "shape_law_loss": -8.099999999999948e-05,
+    "state_residual": 0.0
+  },
+  "quality_delta_total": 0.017772000000000003,
+  "reason_if_infeasible": "",
+  "severe_stress_regression": false,
+  "stress_baseline": {
+    "all_reduce": 0.0014024236287449746,
+    "all_to_all": 0.0017530295359312182,
+    "arch_name": "gpt-oss-120b",
+    "bands": {
+      "all_reduce": "relaxed",
+      "all_to_all": "relaxed",
+      "hbm_bw_decode": "violated",
+      "hbm_bw_prefill": "relaxed",
+      "hbm_capacity": "relaxed",
+      "kv_footprint": "relaxed",
+      "sram_tile_fit": "relaxed",
+      "tc_util_decode": "relaxed",
+      "tc_util_prefill": "relaxed",
+      "training_mem": "relaxed"
+    },
+    "binding_axes": [
+      "hbm_bw_decode"
+    ],
+    "hardware_id": "h100",
+    "hbm_bw_decode": 3.8605597696167835,
+    "hbm_bw_prefill": 0.27465987413322634,
+    "hbm_capacity": 0.24820184707641602,
+    "intermediates": {
+      "a2a_per_layer_bytes": 71680.0,
+      "act_bytes": 167772160,
+      "ar_per_layer_bytes": 57344.0,
+      "decode_flops": 1764753408,
+      "decode_layer_time_s": 4.543246009950249e-05,
+      "decode_step_s": 0.0016355685635820896,
+      "grad_bytes": 2023432192.0,
+      "hbm_bw_bytes_s": 3350000000000.0,
+      "hbm_cap_bytes": 85899345920,
+      "kv_bytes": 18874368,
+      "link_bw_ep_bytes_s": 900000000000.0,
+      "link_bw_tp_bytes_s": 900000000000.0,
+      "opt_bytes": 12140593152.0,
+      "peak_flops_s": 495000000000000.0,
+      "prefill_flops": 3614214979584,
+      "prefill_step_s": 0.023151023858767775,
+      "state_bytes_decode": 0.0,
+      "train_act_bytes": 671088640,
+      "weight_bytes": 21133729792.0
+    },
+    "kv_footprint": 0.0002197265625,
+    "notes": [],
+    "phase": "decode",
+    "schema_version": 1,
+    "sram_tile_fit": 0.021739130434782594,
+    "tc_util_decode": 0.0021797670115350463,
+    "tc_util_prefill": 0.31538321794069557,
+    "training_mem": 0.4187324523925781,
+    "workload_id": "85fe53608a33"
+  },
+  "stress_candidate": {
+    "all_reduce": 0.0014024236287449746,
+    "all_to_all": 0.0017530295359312182,
+    "arch_name": "gpt-oss-120b+swap_attention_to_mla",
+    "bands": {
+      "all_reduce": "relaxed",
+      "all_to_all": "relaxed",
+      "hbm_bw_decode": "violated",
+      "hbm_bw_prefill": "relaxed",
+      "hbm_capacity": "relaxed",
+      "kv_footprint": "relaxed",
+      "sram_tile_fit": "relaxed",
+      "tc_util_decode": "relaxed",
+      "tc_util_prefill": "relaxed",
+      "training_mem": "relaxed"
+    },
+    "binding_axes": [
+      "hbm_bw_decode"
+    ],
+    "hardware_id": "h100",
+    "hbm_bw_decode": 3.8545314411827754,
+    "hbm_bw_prefill": 0.2742339860801639,
+    "hbm_capacity": 0.247817325592041,
+    "intermediates": {
+      "a2a_per_layer_bytes": 71680.0,
+      "act_bytes": 167772160,
+      "ar_per_layer_bytes": 57344.0,
+      "decode_flops": 1764753408,
+      "decode_layer_time_s": 4.543246009950249e-05,
+      "decode_step_s": 0.0016355685635820896,
+      "grad_bytes": 1990402048.0,
+      "hbm_bw_bytes_s": 3350000000000.0,
+      "hbm_cap_bytes": 85899345920,
+      "kv_bytes": 18874368,
+      "link_bw_ep_bytes_s": 900000000000.0,
+      "link_bw_tp_bytes_s": 900000000000.0,
+      "opt_bytes": 11942412288.0,
+      "peak_flops_s": 495000000000000.0,
+      "prefill_flops": 3614214979584,
+      "prefill_step_s": 0.023151023858767775,
+      "state_bytes_decode": 0.0,
+      "train_act_bytes": 671088640,
+      "weight_bytes": 21100699648.0
+    },
+    "kv_footprint": 0.0002197265625,
+    "notes": [],
+    "phase": "decode",
+    "schema_version": 1,
+    "sram_tile_fit": 0.021739130434782594,
+    "tc_util_decode": 0.0021797670115350463,
+    "tc_util_prefill": 0.31538321794069557,
+    "training_mem": 0.41565628051757814,
+    "workload_id": "85fe53608a33"
+  },
+  "stress_relief_score": 0.0060283284340081345
+}
