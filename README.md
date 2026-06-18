@@ -183,7 +183,7 @@ No external runtime dependencies beyond Python ≥ 3.10 and PyYAML.
 │   ├── lattice_engine.py            tile-aligned architecture lattice + KNOWN_ARCHITECTURES
 │   ├── throughput_model.py          roofline throughput + MoE all-to-all + state-hybrid + MLA
 │   ├── quality_model.py             modular scaling-law backbone + residual hooks
-│   ├── auto_calibrate.py            lab-local calibration pack fitter
+│   ├── auto_calibrate.py            local calibration pack fitter
 │   ├── penalties.py                 quality-side penalty primitives
 │   ├── sram_derivation.py           SRAM-derived state-block sizing
 │   ├── schema.py                    schema 0.3 emit/validate
@@ -260,7 +260,7 @@ ac-delta-eval \
 
 ## Auto-calibration
 
-Use `ac-auto-calibrate` to fit lab-local uncertainty and hardware-efficiency
+Use `ac-auto-calibrate` to fit local uncertainty and hardware-efficiency
 overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible
 field names.
 
