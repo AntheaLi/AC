@@ -7,138 +7,10 @@ AC is a hardware-aware architecture compiler that turns a compute budget, hardwa
 > AC is a compiler for model architecture design under real hardware constraints. Given a target hardware platform, parameter budget, training tokens, serving workload, or an existing baseline architecture, AC searches for Pareto-improving architectures and local modifiers across choices like width/depth, attention layout, GQA/KV configuration, precision policy, MoE structure, and hybrid attention/state ratios. It supports greenfield architecture search, baseline-aware local modification, and delta influence evaluation, making it useful both for designing new models and for understanding whether a proposed architecture change actually improves the quality–latency–memory tradeoff.
 Three composable capabilities, one shared config format:
 
-| Capability | Question | Command |
-|---|---|---|
-| **Greenfield** | Given compute, what's the optimal Pareto-front architecture? | `ac-compile --hardware H --params N --tokens T …` |
-| **Modifier** | Given compute + a base architecture, what's the best local Pareto modifier? | `ac-compile --baseline-config CONF --hardware H …` |
-| **Delta influence** | Given compute + base + a delta, quantify the influence. | `ac-delta-eval --baseline-config CONF --apply NAME …` |
+[] **Greenfield** | Given compute, what's the optimal Pareto-front architecture? | `ac-compile --hardware H --params N --tokens T …` |
+[] **Modifier** | Given compute + a base architecture, what's the best local Pareto modifier? | `ac-compile --baseline-config CONF --hardware H …` |
+[] **Delta influence** | Given compute + base + a delta, quantify the influence. | `ac-delta-eval --baseline-config CONF --apply NAME …` |
 
----
-
-## Supported components
-
-### Hardware targets
-
-| Target | Peak BF16 / FP8 / FP4 (TF) | HBM | Interconnect | Tile path | Calibrated |
-|---|---|---:|---|---|:---:|
-| **NVIDIA H100 SXM** | 990 / 1980 / — | 80 GB | NVLink 4 (900 GB/s) | wmma 16×16 | ✓ |
-| **NVIDIA B200** | 2 250 / 4 500 / 4 500 (MXFP4) | 192 GB | NVLink 5 (1.8 TB/s) | wmma + MX | ✓ |
-| **TPU v5p** | 459 BF16 / — / — | 95 GB | ICI mesh | MXU 128×128 | ✓ |
-| **TPU v5e** | 197 BF16 / — / — | 16 GB | ICI mesh | MXU 128×128 | — |
-| **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128 | spec |
-| **AWS Trainium 3** | 1 300 / 2 600 / 5 200 (MX) | 192 GB | NeuronLink v4 (2.4 TB/s) | NCv4 + FP4 | spec |
-
-### Attention mechanisms
-
-| Mechanism | `attention.type` | Greenfield flag | Delta name | Source |
-|---|---|---|---|---|
-| Full / MHA / GQA / MQA | `full` | (default; n_kv_heads sweeps) | `swap_attention_to_gqa` | — |
-| **MLA** (Multi-head Latent Attention) | `mla` | `--allow-mla --mla-kv-latent --mla-q-latent` | `swap_attention_to_mla` | DeepSeek-V2/V3 |
-| **NSA** (Native Sparse Attention) | `nsa` | `--nsa --nsa-{compress,select,window}-*` | — | DeepSeek 2025 |
-| **SWA** (Sliding Window Attention) | `full` + window | (via state-hybrid `--state-type sliding_window`) | `swap_attention_to_swa` | Mistral / Longformer |
-| **YOCO** (You Only Cache Once) | `architecture.yoco` | `--yoco --yoco-n-self-attn-layers --yoco-share-pattern` | — | Sun et al. 2024 (Microsoft) |
-
-### FFN families
-
-| Family | `ffn.type` | Greenfield flag | Delta name |
-|---|---|---|---|
-| **SwiGLU dense** | `swiglu` | default | — |
-| **MoE** (top-k softmax router, optional shared expert, capacity factor) | `moe` | `--allow-moe --moe-n-experts --moe-top-k --ep-options` | `change_moe_topology` |
-| **First-K-dense MoE prefix** (DeepSeek-V3 / Qwen3-MoE) | `moe` + 2 layer_configs | `--dense-ffn-layers` | `densify_first_k` |
-
-### State / hybrid families
-
-Hybrid layers replace a fraction of attention with a state mixer; the
-family controls which residual-quality term fires.
-
-| Family | `--state-type` aliases | Residual family | Source |
-|---|---|---|---|
-| **Mamba-2** / Mamba / S4 / S5 / S6 | `mamba2`, `mamba`, `s4`, `s5`, `s6` | `mamba_sequential` | Gu & Dao 2024 |
-| **GLA** / **KDA** / DeltaNet / Gated DeltaNet | `gla`, `kda`, `deltanet`, `gated_deltanet` | `gated_delta_or_kda_linear` | Yang 2024 / Kimi 2024 |
-| **RWKV-7** / RetNet / generic linear attention | `rwkv7`, `retnet`, `linear_attention` | `generic_linear_attention` | BlinkDL 2024 / Sun 2023 |
-| Parallel-heads (MoH / Hydra) | `parallel_heads`, `moh`, `hydra` | `parallel_hybrid_heads` | Jin 2024 |
-| Sliding-window / local recurrent | `swa`, `sliding_window`, `local_recurrent` | `recurrent_local_attention` | Beltagy 2020 |
-
-Placement: `--placement-strategy first_periodic_last,interleaved,periodic`.
-State sizing (`d_state`) is SRAM-derived per hardware target.
-
-### Parallelism axes
-
-| Axis | Schema field | Greenfield flag |
-|---|---|---|
-| Tensor (TP) | `parallelism.tensor_parallel` | `--tp` |
-| Pipeline (PP) | `parallelism.pipeline_parallel` | `--pp` |
-| Data (DP) | `parallelism.data_parallel` | `--dp` |
-| **Expert (EP)** | `parallelism.expert_parallel` | `--ep-options` |
-| **Context (CP)** — Ring / Ulysses | `parallelism.context_parallel`, `cp_method` | `--cp --cp-method --cp-options` |
-
-### Positional encoding
-
-| Method | `positional_encoding.scaling.method` | Multiplier on long-ctx degradation | Source |
-|---|---|---:|---|
-| None | `none` | 1.00 | baseline |
-| **PI** (Position Interpolation) | `pi` | 0.85 | Chen 2023 |
-| **NTK**-aware | `ntk` | 0.65 | NousResearch 2023 |
-| **YaRN** | `yarn` | 0.45 | Peng 2024 |
-| **LongRoPE** | `longrope` | 0.40 | Ding 2024 |
-
-Enabled via `--allow-rope-scaling --rope-original-max-position N
---rope-scaling-methods …`. Beyond the trained extension range the
-multiplier snaps to 1.0.
-
-### Precision
-
-| Format | Weights / FFN | KV cache | Hardware (peak path) |
-|---|:---:|:---:|---|
-| BF16 / FP16 | ✓ | ✓ (16-bit) | all |
-| **FP8** (E4M3 / E5M2) | ✓ | ✓ (8-bit) | H100, B200, Trn2, Trn3 |
-| INT8 | — | ✓ (8-bit) | all (KV only) |
-| **FP4** (E2M1) | ✓ | ✓ (4-bit) | B200, Trn3 |
-| INT4 | — | ✓ (4-bit) | all (KV only) |
-| **MXFP4** (OCP microscaling) | ✓ | — | B200, Trn3 |
-| **MXFP6** | ✓ | — | B200, Trn3 |
-
-Greenfield: `--precision-modes bf16,fp8_ffn,fp8,fp4,mxfp4,mxfp6` and
-`--kv-dtypes bf16,fp8,int8,fp4,int4`. Hardware-specific filtering applies:
-FP4/MX modes are available on B200 and Trainium 3.
-
-### Other architectural primitives
-
-| Primitive | Schema location | Greenfield flag | Source |
-|---|---|---|---|
-| **MTP** (Multi-Token Prediction) | `architecture.mtp` | `--allow-mtp --mtp-depths` | DeepSeek-V3 §2.2 |
-| **2:4 structured sparsity** | `sparsity_2_4` per component | (post-search; quality-model only) | NVIDIA H100/B200 |
-| **RMSNorm** | `normalization.type = rmsnorm` | default | Zhang & Sennrich 2019 |
-
-### Delta REGISTRY (capability 3)
-
-| Name | Effect | Legal `--apply-args` |
-|---|---|---|
-| `swap_attention_to_gqa` | n_kv_heads ← n_heads / group_size | `group_size` |
-| `swap_attention_to_mla` | full → MLA at `latent_dim` | `latent_dim` |
-| `swap_attention_to_swa` | full → sliding window | `window_size` |
-| `add_state_layers` | replace fraction of attention with a state mixer | `ratio`, `state_type` |
-| `densify_first_k` | first K MoE layers → dense | `k` |
-| `change_moe_topology` | reshape an MoE block | `n_experts`, `top_k` |
-| `change_precision_per_component` | per-component weight / KV precision | `weight`, `kv` |
-| `change_parallelism` | swap TP / PP / EP / CP | `tp`, `pp`, `ep`, `cp` |
-| `scale_d_model` | shift `d_model`, aligned to `align` | `delta`, `align` |
-| `scale_n_layers` | shift `n_layers` | `delta` |
-
-### Known reference architectures (`ac-stress --known …`)
-
-```
-Llama-2-{7B, 13B, 70B}   Llama-3-{8B, 70B}   Mistral-7B   Gemma-2-9B
-Qwen3-{8B, 32B}   DeepSeek-V3   Kimi-K2.5   GLM-5.1
-GPT-OSS-120B   MAI-Base-1
-```
-
-### Validation posture
-
-13 / 14 public-benchmark pack PASS within ±25%
-(Llama-3-8B/70B, Mistral-7B, Mixtral, dbrx, DeepSeek-V2/V3,
-Jamba-1.5-Mini, Granite-3-MoE × H100 / B200 / TPU v5p). The one
-CALIBRATE is a synthetic TPU Mixtral MoE with no ground truth.
 
 ---
 
@@ -168,68 +40,6 @@ No external runtime dependencies beyond Python ≥ 3.10 and PyYAML.
 
 ---
 
-## Repository layout
-
-```
-.
-├── README.md
-├── pyproject.toml
-├── ac/                              ← the Python package
-│   ├── __init__.py
-│   ├── cli_compile.py               capabilities 1 + 2 entry point
-│   ├── cli_delta_eval.py            capability 3 entry point
-│   ├── cli_stress.py                stress / quality / transition inspection
-│   │
-│   ├── lattice_engine.py            tile-aligned architecture lattice + KNOWN_ARCHITECTURES
-│   ├── throughput_model.py          roofline throughput + MoE all-to-all + state-hybrid + MLA
-│   ├── quality_model.py             modular scaling-law backbone + residual hooks
-│   ├── auto_calibrate.py            local calibration pack fitter
-│   ├── penalties.py                 quality-side penalty primitives
-│   ├── sram_derivation.py           SRAM-derived state-block sizing
-│   ├── schema.py                    schema 0.3 emit/validate
-│   │
-│   ├── optimizer.py                 candidate enumeration + Pareto search
-│   ├── baseline.py                  base-config ingestion
-│   ├── modifier.py                  baseline-aware local Pareto search
-│   ├── baseline_delta.py            modifier report generation
-│   ├── justification.py             prose justification + model card + assumptions
-│   ├── shadow_prices.py             dual-variable interpretation
-│   │
-│   ├── stress.py                    10-axis StressVector
-│   ├── quality_stress.py            7-axis QualityStressVector
-│   ├── delta_engine.py              named transformation engine
-│   ├── transition.py                pre/post stress diff
-│   ├── rank.py                      transition ranking
-│   ├── justify_transition.py        transition justifier
-│   ├── optimizer_bridge.py          glue: CandidateArch ↔ ArchConfig
-│   │
-│   ├── evaluator.py                 capability-3 evaluator
-│   ├── pareto_position.py           6-class Pareto verdict
-│   ├── report.py                    delta-eval Markdown / JSON / CSV renderer
-│   │
-│   ├── deltas/                      10 named transformations
-│   │   ├── base.py
-│   │   ├── swap_attention_to_{gqa,mla,swa}.py
-│   │   ├── add_state_layers.py
-│   │   ├── densify_first_k.py
-│   │   ├── change_moe_topology.py
-│   │   ├── change_parallelism.py
-│   │   ├── change_precision_per_component.py
-│   │   ├── scale_{d_model,n_layers}.py
-│   │   └── __init__.py              exports REGISTRY
-│   │
-│   ├── hardware_specs/              h100, b200, tpu_v5p, tpu_v5e, trainium2, trainium3
-│   ├── calibration/                 h100, b200, tpu_v5p calibration jsons
-│   └── quality_defaults.yaml        modular scaling-law constants
-│
-└── configs/                         reference base-model configs
-    ├── mistral_7b.json              dense + GQA
-    ├── gpt_oss_120b.json            MoE 128 × top-4
-    └── mai_thinking_1.json          MoE + MLA + MTP + LongRoPE
-```
-
----
-
 ## Quickstart
 
 ```bash
@@ -255,6 +65,7 @@ ac-delta-eval \
   --apply swap_attention_to_gqa --apply-args group_size=8 \
   --out out/mistral_delta_gqa
 ```
+
 
 ---
 
@@ -624,6 +435,192 @@ Llama-2-{7B,13B,70B}   Llama-3-{8B,70B}   Mistral-7B   Gemma-2-9B
 Qwen3-{8B,32B}   DeepSeek-V3   Kimi-K2.5   GLM-5.1
 GPT-OSS-120B   MAI-Base-1
 ```
+---
+
+
+---
+
+## Supported components
+
+### Hardware targets
+
+| Target | Peak BF16 / FP8 / FP4 (TF) | HBM | Interconnect | Tile path | Calibrated |
+|---|---|---:|---|---|:---:|
+| **NVIDIA H100 SXM** | 990 / 1980 / — | 80 GB | NVLink 4 (900 GB/s) | wmma 16×16 | ✓ |
+| **NVIDIA B200** | 2 250 / 4 500 / 4 500 (MXFP4) | 192 GB | NVLink 5 (1.8 TB/s) | wmma + MX | ✓ |
+| **TPU v5p** | 459 BF16 / — / — | 95 GB | ICI mesh | MXU 128×128 | ✓ |
+| **TPU v5e** | 197 BF16 / — / — | 16 GB | ICI mesh | MXU 128×128 | — |
+| **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128 | spec |
+| **AWS Trainium 3** | 1 300 / 2 600 / 5 200 (MX) | 192 GB | NeuronLink v4 (2.4 TB/s) | NCv4 + FP4 | spec |
+
+### Attention mechanisms
+
+| Mechanism | `attention.type` | Greenfield flag | Delta name | Source |
+|---|---|---|---|---|
+| Full / MHA / GQA / MQA | `full` | (default; n_kv_heads sweeps) | `swap_attention_to_gqa` | — |
+| **MLA** (Multi-head Latent Attention) | `mla` | `--allow-mla --mla-kv-latent --mla-q-latent` | `swap_attention_to_mla` | DeepSeek-V2/V3 |
+| **NSA** (Native Sparse Attention) | `nsa` | `--nsa --nsa-{compress,select,window}-*` | — | DeepSeek 2025 |
+| **SWA** (Sliding Window Attention) | `full` + window | (via state-hybrid `--state-type sliding_window`) | `swap_attention_to_swa` | Mistral / Longformer |
+| **YOCO** (You Only Cache Once) | `architecture.yoco` | `--yoco --yoco-n-self-attn-layers --yoco-share-pattern` | — | Sun et al. 2024 (Microsoft) |
+
+### FFN families
+
+| Family | `ffn.type` | Greenfield flag | Delta name |
+|---|---|---|---|
+| **SwiGLU dense** | `swiglu` | default | — |
+| **MoE** (top-k softmax router, optional shared expert, capacity factor) | `moe` | `--allow-moe --moe-n-experts --moe-top-k --ep-options` | `change_moe_topology` |
+| **First-K-dense MoE prefix** (DeepSeek-V3 / Qwen3-MoE) | `moe` + 2 layer_configs | `--dense-ffn-layers` | `densify_first_k` |
+
+### State / hybrid families
+
+Hybrid layers replace a fraction of attention with a state mixer; the
+family controls which residual-quality term fires.
+
+| Family | `--state-type` aliases | Residual family | Source |
+|---|---|---|---|
+| **Mamba-2** / Mamba / S4 / S5 / S6 | `mamba2`, `mamba`, `s4`, `s5`, `s6` | `mamba_sequential` | Gu & Dao 2024 |
+| **GLA** / **KDA** / DeltaNet / Gated DeltaNet | `gla`, `kda`, `deltanet`, `gated_deltanet` | `gated_delta_or_kda_linear` | Yang 2024 / Kimi 2024 |
+| **RWKV-7** / RetNet / generic linear attention | `rwkv7`, `retnet`, `linear_attention` | `generic_linear_attention` | BlinkDL 2024 / Sun 2023 |
+| Parallel-heads (MoH / Hydra) | `parallel_heads`, `moh`, `hydra` | `parallel_hybrid_heads` | Jin 2024 |
+| Sliding-window / local recurrent | `swa`, `sliding_window`, `local_recurrent` | `recurrent_local_attention` | Beltagy 2020 |
+
+Placement: `--placement-strategy first_periodic_last,interleaved,periodic`.
+State sizing (`d_state`) is SRAM-derived per hardware target.
+
+### Parallelism axes
+
+| Axis | Schema field | Greenfield flag |
+|---|---|---|
+| Tensor (TP) | `parallelism.tensor_parallel` | `--tp` |
+| Pipeline (PP) | `parallelism.pipeline_parallel` | `--pp` |
+| Data (DP) | `parallelism.data_parallel` | `--dp` |
+| **Expert (EP)** | `parallelism.expert_parallel` | `--ep-options` |
+| **Context (CP)** — Ring / Ulysses | `parallelism.context_parallel`, `cp_method` | `--cp --cp-method --cp-options` |
+
+### Positional encoding
+
+| Method | `positional_encoding.scaling.method` | Multiplier on long-ctx degradation | Source |
+|---|---|---:|---|
+| None | `none` | 1.00 | baseline |
+| **PI** (Position Interpolation) | `pi` | 0.85 | Chen 2023 |
+| **NTK**-aware | `ntk` | 0.65 | NousResearch 2023 |
+| **YaRN** | `yarn` | 0.45 | Peng 2024 |
+| **LongRoPE** | `longrope` | 0.40 | Ding 2024 |
+
+Enabled via `--allow-rope-scaling --rope-original-max-position N
+--rope-scaling-methods …`. Beyond the trained extension range the
+multiplier snaps to 1.0.
+
+### Precision
+
+| Format | Weights / FFN | KV cache | Hardware (peak path) |
+|---|:---:|:---:|---|
+| BF16 / FP16 | ✓ | ✓ (16-bit) | all |
+| **FP8** (E4M3 / E5M2) | ✓ | ✓ (8-bit) | H100, B200, Trn2, Trn3 |
+| INT8 | — | ✓ (8-bit) | all (KV only) |
+| **FP4** (E2M1) | ✓ | ✓ (4-bit) | B200, Trn3 |
+| INT4 | — | ✓ (4-bit) | all (KV only) |
+| **MXFP4** (OCP microscaling) | ✓ | — | B200, Trn3 |
+| **MXFP6** | ✓ | — | B200, Trn3 |
+
+Greenfield: `--precision-modes bf16,fp8_ffn,fp8,fp4,mxfp4,mxfp6` and
+`--kv-dtypes bf16,fp8,int8,fp4,int4`. Hardware-specific filtering applies:
+FP4/MX modes are available on B200 and Trainium 3.
+
+### Other architectural primitives
+
+| Primitive | Schema location | Greenfield flag | Source |
+|---|---|---|---|
+| **MTP** (Multi-Token Prediction) | `architecture.mtp` | `--allow-mtp --mtp-depths` | DeepSeek-V3 §2.2 |
+| **2:4 structured sparsity** | `sparsity_2_4` per component | (post-search; quality-model only) | NVIDIA H100/B200 |
+| **RMSNorm** | `normalization.type = rmsnorm` | default | Zhang & Sennrich 2019 |
+
+### Delta REGISTRY (capability 3)
+
+| Name | Effect | Legal `--apply-args` |
+|---|---|---|
+| `swap_attention_to_gqa` | n_kv_heads ← n_heads / group_size | `group_size` |
+| `swap_attention_to_mla` | full → MLA at `latent_dim` | `latent_dim` |
+| `swap_attention_to_swa` | full → sliding window | `window_size` |
+| `add_state_layers` | replace fraction of attention with a state mixer | `ratio`, `state_type` |
+| `densify_first_k` | first K MoE layers → dense | `k` |
+| `change_moe_topology` | reshape an MoE block | `n_experts`, `top_k` |
+| `change_precision_per_component` | per-component weight / KV precision | `weight`, `kv` |
+| `change_parallelism` | swap TP / PP / EP / CP | `tp`, `pp`, `ep`, `cp` |
+| `scale_d_model` | shift `d_model`, aligned to `align` | `delta`, `align` |
+| `scale_n_layers` | shift `n_layers` | `delta` |
+
+### Known reference architectures (`ac-stress --known …`)
+
+```
+Llama-2-{7B, 13B, 70B}   Llama-3-{8B, 70B}   Mistral-7B   Gemma-2-9B
+Qwen3-{8B, 32B}   DeepSeek-V3   Kimi-K2.5   GLM-5.1
+GPT-OSS-120B   MAI-Base-1
+```
+
+---
+
+
+## Repository layout
+
+```
+.
+├── README.md
+├── pyproject.toml
+├── ac/                              ← the Python package
+│   ├── __init__.py
+│   ├── cli_compile.py               capabilities 1 + 2 entry point
+│   ├── cli_delta_eval.py            capability 3 entry point
+│   ├── cli_stress.py                stress / quality / transition inspection
+│   │
+│   ├── lattice_engine.py            tile-aligned architecture lattice + KNOWN_ARCHITECTURES
+│   ├── throughput_model.py          roofline throughput + MoE all-to-all + state-hybrid + MLA
+│   ├── quality_model.py             modular scaling-law backbone + residual hooks
+│   ├── auto_calibrate.py            local calibration pack fitter
+│   ├── penalties.py                 quality-side penalty primitives
+│   ├── sram_derivation.py           SRAM-derived state-block sizing
+│   ├── schema.py                    schema 0.3 emit/validate
+│   │
+│   ├── optimizer.py                 candidate enumeration + Pareto search
+│   ├── baseline.py                  base-config ingestion
+│   ├── modifier.py                  baseline-aware local Pareto search
+│   ├── baseline_delta.py            modifier report generation
+│   ├── justification.py             prose justification + model card + assumptions
+│   ├── shadow_prices.py             dual-variable interpretation
+│   │
+│   ├── stress.py                    10-axis StressVector
+│   ├── quality_stress.py            7-axis QualityStressVector
+│   ├── delta_engine.py              named transformation engine
+│   ├── transition.py                pre/post stress diff
+│   ├── rank.py                      transition ranking
+│   ├── justify_transition.py        transition justifier
+│   ├── optimizer_bridge.py          glue: CandidateArch ↔ ArchConfig
+│   │
+│   ├── evaluator.py                 capability-3 evaluator
+│   ├── pareto_position.py           6-class Pareto verdict
+│   ├── report.py                    delta-eval Markdown / JSON / CSV renderer
+│   │
+│   ├── deltas/                      10 named transformations
+│   │   ├── base.py
+│   │   ├── swap_attention_to_{gqa,mla,swa}.py
+│   │   ├── add_state_layers.py
+│   │   ├── densify_first_k.py
+│   │   ├── change_moe_topology.py
+│   │   ├── change_parallelism.py
+│   │   ├── change_precision_per_component.py
+│   │   ├── scale_{d_model,n_layers}.py
+│   │   └── __init__.py              exports REGISTRY
+│   │
+│   ├── hardware_specs/              h100, b200, tpu_v5p, tpu_v5e, trainium2, trainium3
+│   ├── calibration/                 h100, b200, tpu_v5p calibration jsons
+│   └── quality_defaults.yaml        modular scaling-law constants
+│
+└── configs/                         reference base-model configs
+    ├── mistral_7b.json              dense + GQA
+    ├── gpt_oss_120b.json            MoE 128 × top-4
+    └── mai_thinking_1.json          MoE + MLA + MTP + LongRoPE
+```
+
 ---
 
 ## License
