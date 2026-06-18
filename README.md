@@ -2,10 +2,9 @@
 
 ![算模AC - ArchCalc](assets/image.png)
 
-AC is the architecture compiler that takes your hardware, workload, and quality target, and tells you the model architecture that would be pareto optimal on multiple optimization axis.
+AC is a hardware-aware architecture compiler that turns a compute budget, hardware target, and optional base model into Pareto-front model architectures and architecture deltas.
 
-> The Architecture Compiler (AC) maps hardware, workload, and quality targets to optimal Transformer architectures across dense, MoE, and hybrid state-attention families. Built on a tile-aligned lattice, a calibrated throughput model, and a hardware-aware quality model, AC supports three workflows: greenfield compile enumerates the Pareto frontier of architectures for a fresh design; baseline modify finds the best local improvements to an existing model; and delta evaluation quantifies the impact of a specific architectural change. 
-
+> AC is a compiler for model architecture design under real hardware constraints. Given a target hardware platform, parameter budget, training tokens, serving workload, or an existing baseline architecture, AC searches for Pareto-improving architectures and local modifiers across choices like width/depth, attention layout, GQA/KV configuration, precision policy, MoE structure, and hybrid attention/state ratios. It supports greenfield architecture search, baseline-aware local modification, and delta influence evaluation, making it useful both for designing new models and for understanding whether a proposed architecture change actually improves the quality–latency–memory tradeoff.
 Three composable capabilities, one shared config format:
 
 | Capability | Question | Command |
@@ -625,33 +624,6 @@ Llama-2-{7B,13B,70B}   Llama-3-{8B,70B}   Mistral-7B   Gemma-2-9B
 Qwen3-{8B,32B}   DeepSeek-V3   Kimi-K2.5   GLM-5.1
 GPT-OSS-120B   MAI-Base-1
 ```
-
----
-
-## Caveats
-
-1. **`d_model = n_heads × d_head` is enforced by the schema.** Two of the
-   bundled configs (`gpt_oss_120b`, `mai_thinking_1`) raise d_model to
-   match this invariant and record the real value in
-   `metadata.params.actual_d_model_note`. KV cache and FFN dims are
-   unaffected; only the residual-stream width is overstated.
-
-2. **MoE configs require `parallelism.expert_parallel ≥ 1`.** Without it
-   the throughput model exceeds HBM by `n_experts / ep_degree` and the
-   quality model returns its INFEASIBLE marker.
-
-3. **`--allow-state --state-type ...` searches a single family per run.**
-   Re-launch with a different `--state-type` to compare GLA vs Mamba-2.
-
-4. **`--nsa` / `--yoco` are post-search stamps**, not sweeps. The
-   optimizer picks the lattice point; the emission adds the requested
-   sparse-attention or KV-sharing block on top. Use them when you've
-   already settled the rest of the architecture.
-
-5. **Context parallelism rarely fires below 32k.** `cp_options` defaults
-   to `[1]` when context < 32k. Even at long context, CP > 1 is only
-   picked when comm-bound regimes appear at the chosen lattice point.
-
 ---
 
 ## License
