@@ -1,7 +1,8 @@
 # 算模 AC — Architecture Compiler
 
-> Hardware-aware Transformer-architecture compiler.
-> Maps `(hardware, workload, quality budget)` → recommended architecture.
+AC is the architecture compiler that takes your hardware, workload, and quality target, and tells you the model architecture that would be pareto optimal on multiple optimization axis.
+
+> The Architecture Compiler (AC) maps hardware, workload, and quality targets to optimal Transformer architectures across dense, MoE, and hybrid state-attention families. Built on a tile-aligned lattice, a calibrated throughput model, and a hardware-aware quality model, AC supports three workflows: greenfield compile enumerates the Pareto frontier of architectures for a fresh design; baseline modify finds the best local improvements to an existing model; and delta evaluation quantifies the impact of a specific architectural change. 
 
 Three composable capabilities, one shared config format:
 
