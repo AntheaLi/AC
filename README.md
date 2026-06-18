@@ -1,9 +1,8 @@
 # 算模 AC — Architecture Compiler
 
-AC is the architecture compiler that takes your hardware, workload, and quality target, and tells you the model architecture that would be pareto optimal on multiple optimization axis.
+AC is a hardware-aware architecture compiler that turns a compute budget, hardware target, and optional base model into Pareto-front model architectures and architecture deltas.
 
-> The Architecture Compiler (AC) maps hardware, workload, and quality targets to optimal Transformer architectures across dense, MoE, and hybrid state-attention families. Built on a tile-aligned lattice, a calibrated throughput model, and a hardware-aware quality model, AC supports three workflows: greenfield compile enumerates the Pareto frontier of architectures for a fresh design; baseline modify finds the best local improvements to an existing model; and delta evaluation quantifies the impact of a specific architectural change. 
-
+> AC is a compiler for model architecture design under real hardware constraints. Given a target hardware platform, parameter budget, training tokens, serving workload, or an existing baseline architecture, AC searches for Pareto-improving architectures and local modifiers across choices like width/depth, attention layout, GQA/KV configuration, precision policy, MoE structure, and hybrid attention/state ratios. It supports greenfield architecture search, baseline-aware local modification, and delta influence evaluation, making it useful both for designing new models and for understanding whether a proposed architecture change actually improves the quality–latency–memory tradeoff.
 Three composable capabilities, one shared config format:
 
 | Capability | Question | Command |
