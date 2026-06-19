@@ -489,7 +489,6 @@ family controls which residual-quality term fires.
 |---|---|---|---|
 | **Mamba-2** / Mamba / S4 / S5 / S6 | `mamba2`, `mamba`, `s4`, `s5`, `s6` | `mamba_sequential` | Gu & Dao 2024 |
 | **GLA** / **KDA** / DeltaNet / Gated DeltaNet | `gla`, `kda`, `deltanet`, `gated_deltanet` | `gated_delta_or_kda_linear` | Yang 2024 / Kimi 2024 |
-| **RWKV-7** / RetNet / generic linear attention | `rwkv7`, `retnet`, `linear_attention` | `generic_linear_attention` | BlinkDL 2024 / Sun 2023 |
 | Parallel-heads (MoH / Hydra) | `parallel_heads`, `moh`, `hydra` | `parallel_hybrid_heads` | Jin 2024 |
 | Sliding-window / local recurrent | `swa`, `sliding_window`, `local_recurrent` | `recurrent_local_attention` | Beltagy 2020 |
 
