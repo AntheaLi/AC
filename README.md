@@ -284,7 +284,7 @@ Pareto position.
 
 ---
 
-## Base-model config format
+### Base-model config format
 
 Schema version 0.3. JSON. One `layer_configs` entry per uniform layer
 band. A first-K-dense MoE config uses two entries (first K layers dense,
@@ -363,13 +363,13 @@ every rank and the quality model will return its INFEASIBLE marker.**
 
 ---
 
-### stress diagnostic layer
+### Stress diagnostic layer
 
 `ac-stress` gives you the 10-axis stress vector for any architecture: HBM bandwidth, KV footprint, tensor-core utilization, SRAM tile fit, all-reduce pressure, all-to-all pressure, training memory, and more. ac-stress transition ranks every named architectural change by binding-axis relief. The justification output names the constraint explicitly — "Selected MLA because HBM-BW-decode is binding at 0.94; MLA relieves to 0.46. Cost: +0.008 attention residual" — not just the change.
 
 ---
 
-## Auto-calibration
+### Auto-calibration
 
 Use `ac-auto-calibrate` to fit local uncertainty and hardware-efficiency overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible field names.
 
