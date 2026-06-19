@@ -22,7 +22,7 @@ Three composable capabilities, one shared config format:
 
 `ac-delta-eval --baseline-config CONF --apply NAME …`
 
-Also check out the [AC-Harness](https://github.com/AntheaLi/AC-harness), which is a loop scaffold that 
+Also check out the [AC-Harness](https://github.com/AntheaLi/AC-harness), which is a loop scaffold 
 built to automate the process. It can also exist as a thin layer that sits beside existing training, eval, and benchmarking stack. 
 
 ---
