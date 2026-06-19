@@ -35,6 +35,7 @@ pip install -e .
 python ac/cli_compile.py --help
 python ac/cli_delta_eval.py --help
 python ac/cli_stress.py --help
+python ac/auto_calibrate.py --help
 ```
 
 After install the console scripts are on your `PATH`:
@@ -43,6 +44,7 @@ After install the console scripts are on your `PATH`:
 ac-compile        --help
 ac-delta-eval     --help
 ac-stress         --help
+ac-auto-calibrate --help
 ```
 
 No external runtime dependencies beyond Python ≥ 3.10 and PyYAML.
