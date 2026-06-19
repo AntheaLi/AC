@@ -422,33 +422,6 @@ every rank and the quality model will return its INFEASIBLE marker.**
 
 ---
 
-## Auxiliary inspection — `ac-stress`
-
-Useful before reaching for delta-eval. Doesn't write files.
-
-```bash
-# Quick StressVector for a known model
-ac-stress stress --known Mistral-7B --hw h100 --batch 32 --decode-kv 32768 --tp 8
-
-# QualityStressVector
-ac-stress quality --known Llama-3-70B \
-    --tokens 15000000000000 --prefill-seq 4096 --decode-kv 4096
-
-# Apply every delta with default params, rank by relief score
-ac-stress transition --known GPT-OSS-120B --hw h100 \
-    --batch 16 --decode-kv 8192 --tp 8
-```
-
-Known model names (use exactly as written):
-
-```
-Llama-2-{7B,13B,70B}   Llama-3-{8B,70B}   Mistral-7B   Gemma-2-9B
-Qwen3-{8B,32B}   DeepSeek-V3   Kimi-K2.5   GLM-5.1
-GPT-OSS-120B   MAI-Base-1
-```
-
----
-
 ## Supported components
 
 ### Hardware targets
