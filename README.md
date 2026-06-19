@@ -142,7 +142,7 @@ clusters, kernels, schedulers, and datamixes.
 
 ---
 
-## Usage 1 — Greenfield
+### Greenfield
 
 Search the full architecture lattice for the Pareto-front winner under the
 given hardware and constraints. No baseline config required.
@@ -227,7 +227,7 @@ outputs (paths)
   --quiet                   suppress progress logs
 ```
 
-### Frontier-model example: MAI-Thinking-1-ish
+#### example: MAI-Thinking-1-ish
 
 ```bash
 ac-compile \
@@ -245,7 +245,7 @@ ac-compile \
 
 ---
 
-## Usage 2 — Modifier
+### Modifier
 
 Holds the architecture *family* fixed (uses the baseline as anchor) and
 searches the local Pareto-frontier of modifications around it.
@@ -254,7 +254,7 @@ searches the local Pareto-frontier of modifications around it.
 ac-compile --baseline-config PATH [OPTIONS]
 
 required
-  --baseline-config  PATH    JSON config emitted by usage 1 or hand-written
+  --baseline-config  PATH    JSON config emitted by greenfield or any existing model stripped in the format 
 
 scoring
   --allow-quality-spending   allow non-zero loss-proxy delta
@@ -278,7 +278,7 @@ state, MoE, MLA, MTP, CP, RoPE, NSA, YOCO).
 
 ---
 
-## Usage 3 — Delta influence
+### Delta influence
 
 Quantitative effect of one (or a chain of) named transformations against a
 specific baseline architecture. Outputs a one-page Markdown report + JSON
@@ -327,7 +327,7 @@ Available delta names (REGISTRY):
 Unknown delta names or kwarg keys fail fast with a structured error
 before any evaluation runs.
 
-### Sequence example
+#### Sequence example
 
 ```bash
 # What if we run both MLA *and* add state layers on GPT-OSS-120B?
@@ -419,6 +419,12 @@ The baseline loader threads `parallelism.expert_parallel` and
 MoE configs to evaluate correctly. **If you hand-write an MoE config and
 forget `expert_parallel`, the throughput model will place all experts on
 every rank and the quality model will return its INFEASIBLE marker.**
+
+---
+
+### stress diagnostic layer
+
+`ac-stress` gives you the 10-axis stress vector for any architecture: HBM bandwidth, KV footprint, tensor-core utilization, SRAM tile fit, all-reduce pressure, all-to-all pressure, training memory, and more. ac-stress transition ranks every named architectural change by binding-axis relief. The justification output names the constraint explicitly — "Selected MLA because HBM-BW-decode is binding at 0.94; MLA relieves to 0.46. Cost: +0.008 attention residual" — not just the change.
 
 ---
 
@@ -516,7 +522,7 @@ FP4/MX modes are available on B200 and Trainium 3.
 | **2:4 structured sparsity** | `sparsity_2_4` per component | (post-search; quality-model only) | NVIDIA H100/B200 |
 | **RMSNorm** | `normalization.type = rmsnorm` | default | Zhang & Sennrich 2019 |
 
-### Delta REGISTRY (usage 3)
+### Delta REGISTRY
 
 | Name | Effect | Legal `--apply-args` |
 |---|---|---|
@@ -550,8 +556,8 @@ GPT-OSS-120B   MAI-Base-1
 ├── pyproject.toml
 ├── ac/                              ← the Python package
 │   ├── __init__.py
-│   ├── cli_compile.py               usages 1 + 2 entry point
-│   ├── cli_delta_eval.py            usage 3 entry point
+│   ├── cli_compile.py               greenfield + modifier point
+│   ├── cli_delta_eval.py            delta influence entry point
 │   ├── cli_stress.py                stress / quality / transition inspection
 │   │
 │   ├── lattice_engine.py            tile-aligned architecture lattice + KNOWN_ARCHITECTURES
