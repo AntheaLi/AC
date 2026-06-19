@@ -11,13 +11,16 @@ check out demo here: [ac-demo](https://antheali.github.io/ac-demo/)
 Three composable capabilities, one shared config format:
 
 - **Greenfield**  Given compute, what's the optimal Pareto-front architecture? 
- `ac-compile --hardware H --params N --tokens T …` |
+
+`ac-compile --hardware H --params N --tokens T …` 
 
 - **Modifier**  Given compute + a base architecture, what's the best local Pareto modifier? 
- `ac-compile --baseline-config CONF --hardware H …` |
+
+`ac-compile --baseline-config CONF --hardware H …` 
 
 - **Delta influence**  Given compute + base + a delta, quantify the influence. 
- `ac-delta-eval --baseline-config CONF --apply NAME …` |
+
+`ac-delta-eval --baseline-config CONF --apply NAME …` 
 
 
 ---
