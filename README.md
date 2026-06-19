@@ -531,7 +531,7 @@ FP4/MX modes are available on B200 and Trainium 3.
 | `scale_d_model` | shift `d_model`, aligned to `align` | `delta`, `align` |
 | `scale_n_layers` | shift `n_layers` | `delta` |
 
-### Known reference architectures (`ac-stress --known …`)
+#### given reference architectures 
 
 ```
 Llama-2-{7B, 13B, 70B}   Llama-3-{8B, 70B}   Mistral-7B   Gemma-2-9B
