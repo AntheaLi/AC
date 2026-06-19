@@ -2,7 +2,7 @@
 
 ![算模AC - ArchCalc](assets/image.png)
 
-AC is a hardware-aware architecture compiler that turns a compute budget, hardware target, and optional base model into Pareto-front model architectures and architecture deltas. It serves as a quantitative **pre-flight** check, it does NOT replace training. 
+AC is a hardware-aware architecture compiler that turns a compute budget, hardware target, and optional base model into multi-objective Pareto-front model architectures and architecture deltas. AC sits between compute hardware and scaling laws. It serves as a quantitative **pre-flight** check, it does NOT replace training. 
 
 > AC is a compiler for model architecture design under real hardware constraints. Given a target hardware platform, parameter budget, training tokens, serving workload, or an existing baseline architecture, AC searches for Pareto-improving architectures and local modifiers across choices like width/depth, attention layout, GQA/KV configuration, precision policy, MoE structure, and hybrid attention/state ratios. It supports greenfield architecture search, baseline-aware local modification, and delta influence evaluation, making it useful both for designing new models and for understanding whether a proposed architecture change actually improves the quality–latency–memory tradeoff.
 
