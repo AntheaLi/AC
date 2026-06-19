@@ -79,67 +79,6 @@ ac-delta-eval \
   --out out/mistral_delta_gqa
 ```
 
-
----
-
-## Auto-calibration
-
-Use `ac-auto-calibrate` to fit local uncertainty and hardware-efficiency overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible field names.
-
-Minimal row:
-
-```json
-{
-  "id": "h100_mistral_7b_decode",
-  "hardware": "h100",
-  "predicted_loss": 2.03,
-  "observed_loss": 2.08,
-  "predicted_uncertainty_total_pct": 3.1,
-  "predicted_training_tps": 11800,
-  "observed_training_tps": 10400,
-  "predicted_serving_tbt_ms": 6.2,
-  "observed_serving_tbt_ms": 7.1,
-  "predicted_prefill_time_ms": 34.0,
-  "observed_prefill_time_ms": 39.0
-}
-```
-
-Fit a pack:
-
-```bash
-ac-auto-calibrate fit \
-  --measurements lab_measurements.jsonl \
-  --out out/lab_calibration \
-  --target-coverage 0.90
-```
-
-An editable starter file is included at
-`examples/lab_measurements.example.jsonl`.
-
-Outputs:
-
-```
-out/lab_calibration/
-  calibration_pack.json      full fit summary
-  quality_overrides.json     overlay for quality uncertainty calibration
-  hardware_specs/*.json      copied + tuned hardware specs
-  report.md                  human-readable calibration report
-```
-
-Use the pack without editing source files:
-
-```bash
-AC_QUALITY_DEFAULTS=out/lab_calibration/quality_overrides.json \
-AC_HARDWARE_SPEC_DIR=out/lab_calibration/hardware_specs \
-ac-compile --hardware h100 --params 7 --tokens 2 ...
-```
-
-Quality calibration scales uncertainty intervals; it does not bias-correct the
-loss point estimate. Hardware calibration adjusts `training_system_efficiency`,
-`decode_system_efficiency`, and `prefill_system_efficiency` from median
-observed/predicted ratios. Keep separate packs for materially different
-clusters, kernels, schedulers, and datamixes.
-
 ---
 
 ### Greenfield
@@ -420,11 +359,73 @@ MoE configs to evaluate correctly. **If you hand-write an MoE config and
 forget `expert_parallel`, the throughput model will place all experts on
 every rank and the quality model will return its INFEASIBLE marker.**
 
+
+
 ---
 
 ### stress diagnostic layer
 
 `ac-stress` gives you the 10-axis stress vector for any architecture: HBM bandwidth, KV footprint, tensor-core utilization, SRAM tile fit, all-reduce pressure, all-to-all pressure, training memory, and more. ac-stress transition ranks every named architectural change by binding-axis relief. The justification output names the constraint explicitly — "Selected MLA because HBM-BW-decode is binding at 0.94; MLA relieves to 0.46. Cost: +0.008 attention residual" — not just the change.
+
+---
+
+## Auto-calibration
+
+Use `ac-auto-calibrate` to fit local uncertainty and hardware-efficiency overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible field names.
+
+Minimal row:
+
+```json
+{
+  "id": "h100_mistral_7b_decode",
+  "hardware": "h100",
+  "predicted_loss": 2.03,
+  "observed_loss": 2.08,
+  "predicted_uncertainty_total_pct": 3.1,
+  "predicted_training_tps": 11800,
+  "observed_training_tps": 10400,
+  "predicted_serving_tbt_ms": 6.2,
+  "observed_serving_tbt_ms": 7.1,
+  "predicted_prefill_time_ms": 34.0,
+  "observed_prefill_time_ms": 39.0
+}
+```
+
+Fit a pack:
+
+```bash
+ac-auto-calibrate fit \
+  --measurements lab_measurements.jsonl \
+  --out out/lab_calibration \
+  --target-coverage 0.90
+```
+
+An editable starter file is included at
+`examples/lab_measurements.example.jsonl`.
+
+Outputs:
+
+```
+out/lab_calibration/
+  calibration_pack.json      full fit summary
+  quality_overrides.json     overlay for quality uncertainty calibration
+  hardware_specs/*.json      copied + tuned hardware specs
+  report.md                  human-readable calibration report
+```
+
+Use the pack without editing source files:
+
+```bash
+AC_QUALITY_DEFAULTS=out/lab_calibration/quality_overrides.json \
+AC_HARDWARE_SPEC_DIR=out/lab_calibration/hardware_specs \
+ac-compile --hardware h100 --params 7 --tokens 2 ...
+```
+
+Quality calibration scales uncertainty intervals; it does not bias-correct the
+loss point estimate. Hardware calibration adjusts `training_system_efficiency`,
+`decode_system_efficiency`, and `prefill_system_efficiency` from median
+observed/predicted ratios. Keep separate packs for materially different
+clusters, kernels, schedulers, and datamixes.
 
 ---
 
