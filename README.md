@@ -20,8 +20,7 @@ Three composable capabilities, one shared config format:
 
 - **Delta influence**  Given compute + base + a delta, quantify the influence. 
 
-`ac-delta-eval --baseline-config CONF --apply NAME …` 
-
+`ac-delta-eval --baseline-config CONF --apply NAME …`
 
 ---
 
@@ -48,6 +47,9 @@ ac-auto-calibrate --help
 ```
 
 No external runtime dependencies beyond Python ≥ 3.10 and PyYAML.
+
+Also check out the [AC-Harness](https://github.com/AntheaLi/AC-harness), which is a loop scaffold that 
+built to automate the process. It can also exist as a thin layer that sits beside existing training, eval, and benchmarking stack. 
 
 ---
 
@@ -82,9 +84,7 @@ ac-delta-eval \
 
 ## Auto-calibration
 
-Use `ac-auto-calibrate` to fit local uncertainty and hardware-efficiency
-overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible
-field names.
+Use `ac-auto-calibrate` to fit local uncertainty and hardware-efficiency overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible field names.
 
 Minimal row:
 
