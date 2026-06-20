@@ -12,9 +12,9 @@ Three composable capabilities, one shared config format:
 
 - **Greenfield**  Given compute -> architecture | `ac-compile --hardware H --params N --tokens T …` 
 
-- **Modifier**  Given compute + a base architecture -> modifier? `ac-compile --baseline-config CONF --hardware H …` 
+- **Modifier**  Given compute + a base architecture -> modifier? `ac-compile --baseline-config CONF …` 
 
-- **Delta influence**  Given compute + base + delta -> influence. `ac-delta-eval --baseline-config CONF --apply NAME …`
+- **Delta influence**  Given compute + base + delta -> influence. `ac-delta-eval --baseline-config CONF …`
 
 Also check out the [AC-Harness](https://github.com/AntheaLi/AC-harness), which is a loop scaffold 
 built to automate the process. It can also exist as a thin layer that sits beside existing training, eval, and benchmarking stack. 
@@ -423,9 +423,9 @@ clusters, kernels, schedulers, and datamixes.
 
 ---
 
-## Supported components
+### Supported components
 
-### Hardware targets
+#### Hardware targets
 
 | Target | Peak BF16 / FP8 / FP4 (TF) | HBM | Interconnect | Tile path |
 |---|---|---:|---|---|:---:|
@@ -436,7 +436,7 @@ clusters, kernels, schedulers, and datamixes.
 | **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128  |
 | **AWS Trainium 3** | 1 300 / 2 600 / 5 200 (MX) | 192 GB | NeuronLink v4 (2.4 TB/s) | NCv4 + FP4 |
 
-### Attention mechanisms
+#### attention + cache
 
 | Mechanism | `attention.type` | Greenfield flag | Delta name | Source |
 |---|---|---|---|---|
@@ -446,7 +446,7 @@ clusters, kernels, schedulers, and datamixes.
 | **SWA** (Sliding Window Attention) | `full` + window | (via state-hybrid `--state-type sliding_window`) | `swap_attention_to_swa` | Mistral / Longformer |
 | **YOCO** (You Only Cache Once) | `architecture.yoco` | `--yoco --yoco-n-self-attn-layers --yoco-share-pattern` | — | Sun et al. 2024 (Microsoft) |
 
-### FFN families
+#### FFN families
 
 | Family | `ffn.type` | Greenfield flag | Delta name |
 |---|---|---|---|
@@ -454,7 +454,7 @@ clusters, kernels, schedulers, and datamixes.
 | **MoE** (top-k softmax router, optional shared expert, capacity factor) | `moe` | `--allow-moe --moe-n-experts --moe-top-k --ep-options` | `change_moe_topology` |
 | **First-K-dense MoE prefix** (DeepSeek-V3 / Qwen3-MoE) | `moe` + 2 layer_configs | `--dense-ffn-layers` | `densify_first_k` |
 
-### State / hybrid families
+#### State / hybrid families
 
 Hybrid layers replace a fraction of attention with a state mixer; the
 family controls which residual-quality term fires.
@@ -469,7 +469,7 @@ family controls which residual-quality term fires.
 Placement: `--placement-strategy first_periodic_last,interleaved,periodic`.
 State sizing (`d_state`) is SRAM-derived per hardware target.
 
-### Parallelism axes
+#### Parallelism axes
 
 | Axis | Schema field | Greenfield flag |
 |---|---|---|
@@ -479,7 +479,7 @@ State sizing (`d_state`) is SRAM-derived per hardware target.
 | **Expert (EP)** | `parallelism.expert_parallel` | `--ep-options` |
 | **Context (CP)** — Ring / Ulysses | `parallelism.context_parallel`, `cp_method` | `--cp --cp-method --cp-options` |
 
-### Positional encoding
+#### Positional encoding
 
 | Method | `positional_encoding.scaling.method` | Multiplier on long-ctx degradation | Source |
 |---|---|---:|---|
@@ -493,7 +493,7 @@ Enabled via `--allow-rope-scaling --rope-original-max-position N
 --rope-scaling-methods …`. Beyond the trained extension range the
 multiplier snaps to 1.0.
 
-### Precision
+#### Precision
 
 | Format | Weights / FFN | KV cache | Hardware (peak path) |
 |---|:---:|:---:|---|
@@ -517,7 +517,7 @@ FP4/MX modes are available on B200 and Trainium 3.
 | **2:4 structured sparsity** | `sparsity_2_4` per component | (post-search; quality-model only) | NVIDIA H100/B200 |
 | **RMSNorm** | `normalization.type = rmsnorm` | default | Zhang & Sennrich 2019 |
 
-### Delta REGISTRY
+#### Delta REGISTRY
 
 | Name | Effect | Legal `--apply-args` |
 |---|---|---|
@@ -532,7 +532,7 @@ FP4/MX modes are available on B200 and Trainium 3.
 | `scale_d_model` | shift `d_model`, aligned to `align` | `delta`, `align` |
 | `scale_n_layers` | shift `n_layers` | `delta` |
 
-#### given reference architectures 
+##### given reference architectures 
 
 ```
 Llama-2-{7B, 13B, 70B}   Llama-3-{8B, 70B}   Mistral-7B   Gemma-2-9B
