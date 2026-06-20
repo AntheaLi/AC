@@ -222,7 +222,7 @@ def _kv_cache_bytes_total(arch: ArchConfig, kv_len: int, tp_degree: int = 1) -> 
     n_attn_layers = arch.n_layers
     if arch.layer_type_list:
         n_attn_layers = sum(1 for lt in arch.layer_type_list if lt == "attention")
-    kv_heads_per_gpu = max(1, arch.n_kv_heads // max(1, tp_degree))
+    kv_heads_per_gpu = max(1, math.ceil(arch.n_kv_heads / max(1, tp_degree)))
     per_layer = 2 * kv_heads_per_gpu * arch.d_head * kv_len * arch.batch_size * kv_bpe
     return per_layer * n_attn_layers
 
@@ -322,7 +322,7 @@ def _decode_flops_useful(arch: ArchConfig, kv_len: int, tp_degree: int = 1) -> f
     dh = arch.d_head
     ffn = arch.ffn_dim
     heads_per_gpu = nh // max(1, tp_degree)
-    kv_heads_per_gpu = max(1, nkv // max(1, tp_degree))
+    kv_heads_per_gpu = max(1, math.ceil(nkv / max(1, tp_degree)))
     ffn_per_gpu = ffn // max(1, tp_degree)
     n_attn_layers = arch.n_layers
     if arch.layer_type_list:
@@ -359,7 +359,7 @@ def _prefill_flops_useful(arch: ArchConfig, tp_degree: int = 1) -> float:
     dh = arch.d_head
     ffn = arch.ffn_dim
     heads_per_gpu = nh // max(1, tp_degree)
-    kv_heads_per_gpu = max(1, nkv // max(1, tp_degree))
+    kv_heads_per_gpu = max(1, math.ceil(nkv / max(1, tp_degree)))
     ffn_per_gpu = ffn // max(1, tp_degree)
     n_attn_layers = arch.n_layers
     if arch.layer_type_list:
@@ -455,7 +455,7 @@ def _dominant_matmul_shape(arch: ArchConfig, phase: str,
     nkv = arch.n_kv_heads
     dh = arch.d_head
     heads_per_gpu = nh // max(1, tp_degree)
-    kv_heads_per_gpu = max(1, nkv // max(1, tp_degree))
+    kv_heads_per_gpu = max(1, math.ceil(nkv / max(1, tp_degree)))
     ffn_per_gpu = ffn // max(1, tp_degree)
     if phase == "decode":
         qkv_N = (heads_per_gpu + 2 * kv_heads_per_gpu) * dh
@@ -560,6 +560,7 @@ def compute_throughput_stress(
             arch, hardware,
             tp_degree=tp_degree, pp_degree=pp_degree,
             decode_kv_len=workload.decode_kv_len,
+            prefill_seq_len=workload.prefill_seq_len,
             ep_degree=ep_degree,
         )
     else:

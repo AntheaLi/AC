@@ -32,6 +32,7 @@ Pareto position vocabulary:
 The Pareto axes are:
     predicted_loss   (lower is better)
     serving_tbt_ms   (lower is better)
+    prefill_time_ms  (lower is better)
     memory_per_gpu_gb (lower is better)
     -training_tps    (lower is better, negated so all axes are "lower better")
 """
@@ -83,6 +84,7 @@ PARETO_POSITION_KIND = (
 PARETO_AXES: Tuple[Tuple[str, str, bool], ...] = (
     ("predicted_loss",    "predicted_loss",    True),
     ("serving_tbt_ms",    "serving_tbt_ms",    True),
+    ("prefill_time_ms",   "throughput.prefill_time_ms", True),
     ("memory_per_gpu_gb", "memory_per_gpu_gb", True),
     ("training_tps",      "training_tps",      False),  # higher is better
 )
@@ -240,7 +242,7 @@ def _scales_from_frontier(frontier_vecs: List[Tuple[float, ...]]
     """Per-axis range = max-min (with a floor) so distance is dimensionless.
 
     Infers axis count from the first vector so this function works for
-    arbitrary-dimension inputs (production uses len(PARETO_AXES)=4; tests may
+    arbitrary-dimension inputs (production uses len(PARETO_AXES); tests may
     pass 2-D toy vectors).
     """
     if not frontier_vecs:

@@ -515,12 +515,22 @@ def build_config(
 
 def _normalize_moe_ffn(moe: Dict[str, Any], default_precision: str = "bf16") -> Dict[str, Any]:
     """Fill in MoE defaults so partial dicts validate. Returns a fresh dict."""
+    shared = moe.get("shared_expert")
+    if shared is True:
+        shared_dim = moe.get("shared_dim", moe.get("expert_dim"))
+        shared = {
+            "ffn_dim": int(shared_dim),
+            "precision": moe.get("precision", default_precision),
+        }
+    elif not isinstance(shared, dict):
+        shared = None
+
     out = {
         "type": "moe",
         "n_experts": int(moe["n_experts"]),
         "top_k": int(moe["top_k"]),
         "expert_dim": int(moe["expert_dim"]),
-        "shared_expert": moe.get("shared_expert"),  # dict or None
+        "shared_expert": shared,
         "router": moe.get("router") or {
             "precision": "bf16",
             "load_balance_loss_coef": 0.01,

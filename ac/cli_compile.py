@@ -37,6 +37,7 @@ from optimizer import optimize, result_to_config, result_to_pareto_csv, Deployme
 from shadow_prices import compute_shadow_prices, shadow_prices_to_json
 from justification import generate_justification, generate_assumptions, generate_model_card
 from schema import save_config
+from implementation_generator import save_pytorch_implementation
 from baseline import BaselineUnsupportedError, load_baseline_model
 from modifier import (
     modifier_pareto_to_csv,
@@ -173,6 +174,11 @@ def parse_args(argv=None):
                    help="Concurrent serving requests (default: 256)")
     p.add_argument("--scheduler", choices=["continuous", "static", "chunked"],
                    default="continuous", help="Serving scheduler type (default: continuous)")
+    p.add_argument("--objective-profile",
+                   choices=["balanced", "quality", "research_quality", "loss_only",
+                            "latency", "serving_cost", "training_cost"],
+                   default="research_quality",
+                   help="Tradeoff preset for choosing the displayed optimal point from the Pareto frontier")
 
     # Parallelism
     p.add_argument("--tp", type=int, default=8,
@@ -205,6 +211,10 @@ def parse_args(argv=None):
                    help="Output assumptions markdown path (default: not written)")
     p.add_argument("--output-model-card", default=None,
                    help="Output model card markdown path (default: not written)")
+    p.add_argument("--output-implementation", default=None,
+                   help="Output generated PyTorch architecture implementation path (greenfield mode)")
+    p.add_argument("--implementation-class-name", default="ACGeneratedModel",
+                   help="Class name for --output-implementation (default: ACGeneratedModel)")
 
     # Baseline modifier mode
     p.add_argument("--baseline-config", default=None,
@@ -349,6 +359,7 @@ def main(argv=None):
         output_len=args.output_len,
         concurrency=args.concurrency,
         scheduler=args.scheduler,
+        objective_profile=args.objective_profile,
         precision_configs=args.precision_modes,
         kv_bits_options=args.kv_dtypes,
         # v2 state/hybrid
@@ -450,6 +461,18 @@ def main(argv=None):
     config = result_to_config(result, nsa=nsa_block, yoco=yoco_block)
     save_config(config, args.output_config)
     log(f"[arch-compiler] Wrote {args.output_config}")
+    if args.output_implementation:
+        try:
+            save_pytorch_implementation(
+                config,
+                args.output_implementation,
+                class_name=args.implementation_class_name,
+                source_name=args.output_config,
+            )
+        except ValueError as exc:
+            print(f"ERROR: Could not generate implementation: {exc}", file=sys.stderr)
+            return 2
+        log(f"[arch-compiler] Wrote {args.output_implementation}")
 
     # 2. Justification
     md = generate_justification(result, shadow_report)
@@ -534,6 +557,7 @@ def _run_modifier_mode(args, log):
         output_len=args.output_len,
         concurrency=args.concurrency,
         scheduler=args.scheduler,
+        objective_profile=args.objective_profile,
         precision_configs=args.precision_modes,
         kv_bits_options=args.kv_dtypes,
     )

@@ -39,6 +39,25 @@ class BaselineModel:
         return self.candidate.total_params / 1e9
 
 
+def _normalize_shared_expert(ffn: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Accept canonical dicts and legacy boolean shared-expert flags."""
+    shared = ffn.get("shared_expert")
+    if isinstance(shared, dict):
+        return {
+            "ffn_dim": int(shared["ffn_dim"]),
+            "precision": shared.get("precision", ffn.get("precision", "bf16")),
+        }
+    if shared is True:
+        shared_dim = ffn.get("shared_dim", ffn.get("expert_dim", ffn.get("ffn_dim")))
+        if shared_dim is None:
+            return None
+        return {
+            "ffn_dim": int(shared_dim),
+            "precision": ffn.get("precision", "bf16"),
+        }
+    return None
+
+
 def load_baseline_model(path: str) -> BaselineModel:
     """Load a baseline config from compiler JSON.
 
@@ -118,7 +137,7 @@ def load_baseline_model(path: str) -> BaselineModel:
             "n_experts": int(ffn.get("n_experts", 0)),
             "top_k": int(ffn.get("top_k", 1)),
             "expert_dim": ffn_dim,
-            "shared_expert": ffn.get("shared_expert"),
+            "shared_expert": _normalize_shared_expert(ffn),
             "router": ffn.get("router", {}),
             "capacity_factor": float(ffn.get("capacity_factor", 1.25)),
             "precision": ffn.get("precision", "bf16"),

@@ -15,7 +15,7 @@ import json
 import math
 import os
 import sys
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from typing import List, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -515,7 +515,7 @@ def _attention_cost(
     Uses analytical IO model from Dao 2022.
     """
     heads_per_gpu = n_heads // tp_degree
-    kv_heads_per_gpu = max(1, n_kv_heads // tp_degree)
+    kv_heads_per_gpu = max(1, math.ceil(n_kv_heads / max(1, tp_degree)))
     bpe = hw.bytes_per_elem(precision)
 
     # Compute: QK^T and softmax×V
@@ -915,7 +915,7 @@ def compute_crossover_seq_len(
     state_d_head = int(sc.get("d_head", 64))
 
     heads_per_gpu = state_n_heads // tp_degree
-    kv_heads_per_gpu = max(1, arch.n_kv_heads // tp_degree)
+    kv_heads_per_gpu = max(1, math.ceil(arch.n_kv_heads / max(1, tp_degree)))
 
     # State weight bytes per layer (loaded at decode):
     # Input projection: d * state_expansion * d / tp
@@ -1172,7 +1172,7 @@ def compute_layer_time(
     prec = arch.precision
 
     heads_per_gpu = nh // tp_degree
-    kv_heads_per_gpu = max(1, nkv // tp_degree)
+    kv_heads_per_gpu = max(1, math.ceil(nkv / max(1, tp_degree)))
 
     # v2: branch on layer type
     if layer_type == "state" and arch.state_config is not None:
@@ -1482,6 +1482,7 @@ def throughput(
     pp_degree: int = 1,
     microbatches: int = 1,
     decode_kv_len: int = 1024,
+    prefill_seq_len: Optional[int] = None,
     lattice_hw_override: str = None,
     ep_degree: int = 1,                # v1 MoE: expert-parallel degree
     ep_topology: str = "single_axis",  # v1 MoE: TPU torus axis layout
@@ -1499,6 +1500,9 @@ def throughput(
         pp_degree: Pipeline parallelism degree.
         microbatches: Number of microbatches for pipeline parallelism.
         decode_kv_len: KV cache length for decode phase estimate.
+        prefill_seq_len: Prompt length for cold-prefill TTFT. Defaults to
+            arch.seq_len for backward compatibility; callers should pass the
+            serving prompt/context length explicitly for long-context studies.
         lattice_hw_override: Override lattice hardware name (if different from throughput hw).
     """
     hw = load_hardware(hardware)
@@ -1538,6 +1542,9 @@ def throughput(
 
     # Kernel launch overhead across all layers
     kernel_overhead_total = kernel_overhead_per_layer_s * layers_per_stage
+    prefill_arch = arch
+    if prefill_seq_len is not None and int(prefill_seq_len) != arch.seq_len:
+        prefill_arch = replace(arch, seq_len=max(1, int(prefill_seq_len)))
 
     if is_hybrid:
         # --- Heterogeneous path: sum per-layer costs ---
@@ -1551,7 +1558,7 @@ def throughput(
         layer_train = train_layers[0]  # Representative for breakdown
 
         prefill_layers = compute_heterogeneous_layer_times(
-            arch, hw, lattice_hw, tp_degree, "prefill",
+            prefill_arch, hw, lattice_hw, tp_degree, "prefill",
             calibration=cal_table, ep_degree=ep_degree, ep_topology=ep_topology,
         )
         raw_prefill_s = sum(bd.total_s for bd in prefill_layers[:layers_per_stage])
@@ -1571,7 +1578,7 @@ def throughput(
                                          ep_degree=ep_degree, ep_topology=ep_topology)
         raw_train_s = layer_train.total_s * layers_per_stage
 
-        layer_prefill = compute_layer_time(arch, hw, lattice_hw, tp_degree, "prefill",
+        layer_prefill = compute_layer_time(prefill_arch, hw, lattice_hw, tp_degree, "prefill",
                                            calibration=cal_table,
                                            ep_degree=ep_degree, ep_topology=ep_topology)
         raw_prefill_s = layer_prefill.total_s * layers_per_stage
@@ -1641,6 +1648,16 @@ def throughput(
     # --- Prefill (inference) ---
     sys_eff_prefill = cal.get("prefill_system_efficiency", 0.60)
     raw_prefill = raw_prefill_s + kernel_overhead_total
+    if cp > 1 and (prefill_seq_len or arch.seq_len) >= 32768:
+        bpe_act = hw.bytes_per_elem(arch.precision)
+        prefill_s = max(1, int(prefill_seq_len or arch.seq_len))
+        seq_bytes_per_layer = prefill_arch.batch_size * prefill_s * prefill_arch.d_model * bpe_act
+        comm_factor = (cp - 1) / cp
+        cp_method_factor = 0.5 if getattr(arch, "cp_method", "ring") == "ulysses" else 1.0
+        cp_comm_bytes = comm_factor * layers_per_stage * seq_bytes_per_layer * cp_method_factor
+        nvlink_bw = hw.interconnect["intra_node_bw_gb_s"] * 1e9
+        cp_prefill_comm_s = cp_comm_bytes / max(1.0, nvlink_bw)
+        raw_prefill = raw_prefill / cp + cp_prefill_comm_s
     result.prefill_time_ms = raw_prefill / sys_eff_prefill * 1000
 
     # --- Decode ---

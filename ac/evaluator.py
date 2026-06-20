@@ -16,6 +16,7 @@ physics; it isolates and reports one specific delta's effect.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import sys
 from dataclasses import dataclass, field, asdict
@@ -321,10 +322,11 @@ def _kv_cache_gb_for_cand(cand: CandidateArch,
     context = constraints.prompt_len or constraints.context_length or 2048
     batch = 1
     layers_per_stage = cand.n_layers // max(constraints.pp, 1)
+    kv_heads_per_gpu = max(1, math.ceil(cand.n_kv_heads / max(tp, 1)))
     bytes_total = (
         batch * context * layers_per_stage * 2
-        * cand.n_kv_heads * cand.d_head * kv_bpe
-    ) / max(tp, 1)
+        * kv_heads_per_gpu * cand.d_head * kv_bpe
+    )
     return bytes_total / (1024 ** 3)
 
 

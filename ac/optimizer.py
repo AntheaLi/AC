@@ -73,6 +73,11 @@ class DeploymentConstraints:
     concurrency: int = 256                   # concurrent requests
     scheduler: str = "continuous"            # "continuous" | "static" | "chunked"
     traffic_mix: Optional[Dict[str, float]] = None  # e.g. {"short_chat": 0.3, "long_context": 0.5, "rag_prefill_heavy": 0.2}
+    # Objective profile for greenfield selection. Pareto always keeps the
+    # full frontier, but `optimal` uses this weighted objective. Including
+    # TTFT prevents long-context runs from optimizing decode TBT while
+    # silently accepting huge cold-prefill latency.
+    objective_profile: str = "research_quality"
     # Vocab
     vocab_size: int = 32000
     # Precision search space
@@ -166,6 +171,11 @@ class DeploymentConstraints:
                 self.rope_scaling_methods = ["none"]
             else:
                 self.rope_scaling_methods = ["yarn", "ntk", "longrope", "pi"]
+        if self.objective_profile not in OBJECTIVE_PROFILES:
+            raise ValueError(
+                f"Unknown objective_profile {self.objective_profile!r}; "
+                f"expected one of {sorted(OBJECTIVE_PROFILES)}"
+            )
 
 
 @dataclass
@@ -258,6 +268,71 @@ class OptimizationResult:
     constraints: Optional[DeploymentConstraints] = None
     # Binding constraints (populated after optimization)
     binding_constraints: List[str] = field(default_factory=list)
+
+
+# Selection profiles mirror the web UI tradeoff presets. Weights sum to 1.0;
+# lower score is better. `ttft` is deliberately separate from decode TBT.
+OBJECTIVE_PROFILES: Dict[str, Dict[str, float]] = {
+    "balanced":      {"loss": 0.30, "tbt": 0.15, "ttft": 0.10, "tps": 0.15, "mem": 0.15, "params": 0.15},
+    "quality":       {"loss": 0.90, "tbt": 0.02, "ttft": 0.01, "tps": 0.03, "mem": 0.02, "params": 0.02},
+    "research_quality": {"loss": 1.00, "tbt": 0.0, "ttft": 0.0, "tps": 0.0, "mem": 0.0, "params": 0.0},
+    "loss_only":     {"loss": 1.00, "tbt": 0.0, "ttft": 0.0, "tps": 0.0, "mem": 0.0, "params": 0.0},
+    "latency":       {"loss": 0.15, "tbt": 0.30, "ttft": 0.25, "tps": 0.10, "mem": 0.10, "params": 0.10},
+    "serving_cost":  {"loss": 0.15, "tbt": 0.15, "ttft": 0.10, "tps": 0.05, "mem": 0.30, "params": 0.25},
+    "training_cost": {"loss": 0.20, "tbt": 0.05, "ttft": 0.05, "tps": 0.45, "mem": 0.10, "params": 0.15},
+}
+
+
+def _d_model_max_for_target(target_params_b: float) -> int:
+    """Allow frontier-scale widths without exploding small-model search."""
+    if target_params_b >= 900:
+        return 32768
+    if target_params_b >= 650:
+        return 28672
+    if target_params_b >= 300:
+        return 24576
+    return 16384
+
+
+def _candidate_metric(ev: EvaluatedCandidate, key: str) -> float:
+    if key == "loss":
+        return ev.predicted_loss
+    if key == "tbt":
+        return ev.serving_tbt_ms
+    if key == "ttft":
+        return ev.throughput.prefill_time_ms
+    if key == "tps":
+        return ev.training_tps
+    if key == "mem":
+        return ev.memory_per_gpu_gb
+    if key == "params":
+        return float(ev.arch.total_params)
+    raise KeyError(key)
+
+
+def _objective_score(
+    ev: EvaluatedCandidate,
+    pool: List[EvaluatedCandidate],
+    profile: str,
+) -> float:
+    """Weighted %-delta from best-on-axis over the feasible frontier."""
+    weights = OBJECTIVE_PROFILES[profile]
+    best: Dict[str, float] = {}
+    for key in weights:
+        vals = [_candidate_metric(x, key) for x in pool]
+        best[key] = max(vals) if key == "tps" else min(vals)
+
+    score = 0.0
+    for key, weight in weights.items():
+        if weight <= 0:
+            continue
+        v = _candidate_metric(ev, key)
+        b = best[key]
+        if b == 0:
+            continue
+        delta = (b - v) / abs(b) if key == "tps" else (v - b) / abs(b)
+        score += weight * max(0.0, delta)
+    return score
 
 
 # =============================================================================
@@ -383,7 +458,7 @@ def generate_candidates(
 
     lattice = compute_lattice(
         lattice_hw, precision, constraints.tp,
-        d_model_min=1024, d_model_max=16384,
+        d_model_min=1024, d_model_max=_d_model_max_for_target(constraints.target_params_b),
         d_head_options=[64, 128, 256],
     )
 
@@ -509,6 +584,14 @@ def generate_candidates(
                                         mla_q_latent_dim=c_q,
                                         mla_rope_head_dim=constraints.mla_rope_head_dim,
                                         mla_nope_head_dim=constraints.mla_nope_head_dim,
+                                        mtp_n_predict_depths=int(mtp_k),
+                                        mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
+                                        mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
+                                        cp_degree=int(cp_d),
+                                        cp_method=str(constraints.cp_method),
+                                        rope_scaling_method=str(rope_m),
+                                        rope_scaling_factor=rope_factor if rope_m != "none" else 1.0,
+                                        rope_original_max_position=int(constraints.rope_original_max_position),
                                     ))
 
     return candidates
@@ -583,7 +666,7 @@ def generate_moe_candidates(
 
     lattice = compute_lattice(
         lattice_hw, precision, constraints.tp,
-        d_model_min=1024, d_model_max=16384,
+        d_model_min=1024, d_model_max=_d_model_max_for_target(constraints.target_params_b),
         d_head_options=[64, 128, 256],
     )
     aligned = [pt for pt in lattice if pt.tile_aligned]
@@ -632,6 +715,8 @@ def generate_moe_candidates(
             n_kv_heads = max(1, pt.n_heads // gqa_r)
 
             for opt in moe_opts:
+                if opt.top_k >= opt.n_experts:
+                    continue
                 active_per_layer = _moe_active_params_per_layer(
                     pt.d_model, pt.n_heads, pt.d_head, n_kv_heads, opt,
                 )
@@ -730,6 +815,38 @@ def generate_moe_candidates(
                                     moe_style=opt.style,
                                     n_dense_ffn_layers=n_dense_clamped,
                                 ))
+                                if getattr(constraints, "allow_mla", False):
+                                    for c_kv in constraints.mla_kv_latent_options:
+                                        for c_q in constraints.mla_q_latent_options:
+                                            uncompressed = 2 * pt.n_heads * pt.d_head
+                                            if c_kv >= uncompressed:
+                                                continue
+                                            candidates.append(CandidateArch(
+                                                d_model=pt.d_model,
+                                                n_layers=n_layers,
+                                                n_heads=pt.n_heads,
+                                                d_head=pt.d_head,
+                                                n_kv_heads=n_kv_heads,
+                                                ffn_dim=pt.ffn_dim_swiglu,
+                                                vocab_size=constraints.vocab_size,
+                                                weight_precision=prec["weight_precision"],
+                                                ffn_precision=prec["ffn_precision"],
+                                                attn_precision=dict(prec["attn_precision"]),
+                                                kv_cache_bits=kv_bits,
+                                                total_params=total_total,
+                                                total_params_b=round(total_total / 1e9, 2),
+                                                moe=moe_dict,
+                                                ep_degree=opt.ep_degree,
+                                                active_params=active_total,
+                                                active_params_b=round(active_total / 1e9, 2),
+                                                moe_style=opt.style,
+                                                n_dense_ffn_layers=n_dense_clamped,
+                                                attention_type="mla",
+                                                mla_kv_latent_dim=c_kv,
+                                                mla_q_latent_dim=c_q,
+                                                mla_rope_head_dim=constraints.mla_rope_head_dim,
+                                                mla_nope_head_dim=constraints.mla_nope_head_dim,
+                                            ))
 
     return candidates
 
@@ -768,7 +885,7 @@ def generate_state_candidates(
 
     lattice = compute_lattice(
         lattice_hw, precision, constraints.tp,
-        d_model_min=1024, d_model_max=16384,
+        d_model_min=1024, d_model_max=_d_model_max_for_target(constraints.target_params_b),
         d_head_options=[64, 128, 256],
     )
     aligned = [pt for pt in lattice if pt.tile_aligned]
@@ -993,7 +1110,7 @@ def generate_moe_hybrid_candidates(
 
     lattice = compute_lattice(
         lattice_hw, precision, constraints.tp,
-        d_model_min=1024, d_model_max=16384,
+        d_model_min=1024, d_model_max=_d_model_max_for_target(constraints.target_params_b),
         d_head_options=[64, 128, 256],
     )
     aligned = [pt for pt in lattice if pt.tile_aligned]
@@ -1062,6 +1179,8 @@ def generate_moe_hybrid_candidates(
             state_params_per_layer = attn_params_per_layer
 
             for opt in moe_opts:
+                if opt.top_k >= opt.n_experts:
+                    continue
                 # Per-layer FFN params: MoE active vs total.
                 ffn_active_per_layer = opt.top_k * 3 * pt.d_model * opt.expert_dim
                 if opt.shared_dim:
@@ -1221,6 +1340,45 @@ def generate_moe_hybrid_candidates(
                                             derived_d_state=d_state,
                                             crossover_seq_len=L_star,
                                         ))
+                                        if getattr(constraints, "allow_mla", False):
+                                            for c_kv in constraints.mla_kv_latent_options:
+                                                for c_q in constraints.mla_q_latent_options:
+                                                    uncompressed = 2 * pt.n_heads * pt.d_head
+                                                    if c_kv >= uncompressed:
+                                                        continue
+                                                    candidates.append(CandidateArch(
+                                                        d_model=pt.d_model,
+                                                        n_layers=n_layers,
+                                                        n_heads=pt.n_heads,
+                                                        d_head=pt.d_head,
+                                                        n_kv_heads=n_kv_heads,
+                                                        ffn_dim=pt.ffn_dim_swiglu,
+                                                        vocab_size=constraints.vocab_size,
+                                                        weight_precision=prec["weight_precision"],
+                                                        ffn_precision=prec["ffn_precision"],
+                                                        attn_precision=dict(prec["attn_precision"]),
+                                                        kv_cache_bits=kv_bits,
+                                                        total_params=total_total,
+                                                        total_params_b=round(total_total / 1e9, 2),
+                                                        moe=moe_dict,
+                                                        ep_degree=opt.ep_degree,
+                                                        active_params=active_total,
+                                                        active_params_b=round(active_total / 1e9, 2),
+                                                        moe_style=opt.style,
+                                                        state_config=state_cfg,
+                                                        layer_type_list=layer_type_list,
+                                                        placement_strategy=strategy,
+                                                        n_attention_layers=actual_n_attn,
+                                                        n_state_layers=actual_n_state,
+                                                        hybrid_ratio=hybrid_ratio,
+                                                        derived_d_state=d_state,
+                                                        crossover_seq_len=L_star,
+                                                        attention_type="mla",
+                                                        mla_kv_latent_dim=c_kv,
+                                                        mla_q_latent_dim=c_q,
+                                                        mla_rope_head_dim=constraints.mla_rope_head_dim,
+                                                        mla_nope_head_dim=constraints.mla_nope_head_dim,
+                                                    ))
 
     return candidates
 
@@ -1237,6 +1395,7 @@ def evaluate_candidate(
     """Evaluate a single candidate with throughput and quality models."""
 
     # --- Throughput ---
+    prefill_len = max(1, int(constraints.prompt_len or constraints.context_length))
     tput_arch = TputArch(
         d_model=cand.d_model,
         n_layers=cand.n_layers,
@@ -1245,6 +1404,8 @@ def evaluate_candidate(
         n_kv_heads=cand.n_kv_heads,
         ffn_dim=cand.ffn_dim,
         vocab_size=cand.vocab_size,
+        batch_size=max(1, int(constraints.serving_batch)),
+        seq_len=max(1, int(constraints.context_length)),
         precision=cand.ffn_precision,  # dominant precision for throughput
         kv_precision=kv_bits_to_precision(cand.kv_cache_bits),
         # v1: MoE branch fires when moe_config is set on the throughput's ArchConfig
@@ -1282,7 +1443,8 @@ def evaluate_candidate(
         tp_degree=constraints.tp,
         pp_degree=constraints.pp,
         microbatches=constraints.dp,
-        decode_kv_len=constraints.prompt_len or constraints.context_length,
+        decode_kv_len=prefill_len,
+        prefill_seq_len=prefill_len,
         ep_degree=cand.ep_degree,
         ep_topology=constraints.ep_topology,
     )
@@ -1363,6 +1525,7 @@ def evaluate_candidate(
         qual_arch,
         TrainingConfig(
             training_tokens=constraints.training_tokens,
+            sequence_length=max(1, int(constraints.context_length)),
             hardware=hw_name,
             kv_quantization_bits=cand.kv_cache_bits,
         ),
@@ -1445,17 +1608,17 @@ def _get_hbm_gb(hw_name: str) -> float:
 def is_dominated(a: EvaluatedCandidate, b: EvaluatedCandidate) -> bool:
     """Return True if b dominates a (b is better or equal in all objectives, strictly better in at least one).
 
-    v1 adds N_total as a 5th axis so an MoE candidate doesn't auto-dominate a
+    v1 adds TTFT and N_total as axes so an MoE candidate doesn't auto-dominate a
     same-active dense at the same training tput, TBT, and memory just because
     of the sparse-capacity quality bonus — its higher total parameter count
-    is a real cost (storage, serving cluster footprint). For dense candidates
-    total_params == active_params, so this axis is inert in dense-only
-    searches and preserves the v0 frontier exactly.
+    is a real cost (storage, serving cluster footprint). TTFT is separate from
+    decode TBT because long-prefill architectures can otherwise look Pareto
+    clean despite being unusable for cold 1M-context serving.
     """
     objs_a = (a.predicted_loss, -a.training_tps, a.serving_tbt_ms,
-              a.memory_per_gpu_gb, a.arch.total_params)
+              a.throughput.prefill_time_ms, a.memory_per_gpu_gb, a.arch.total_params)
     objs_b = (b.predicted_loss, -b.training_tps, b.serving_tbt_ms,
-              b.memory_per_gpu_gb, b.arch.total_params)
+              b.throughput.prefill_time_ms, b.memory_per_gpu_gb, b.arch.total_params)
 
     at_least_one_better = False
     for oa, ob in zip(objs_a, objs_b):
@@ -1468,7 +1631,7 @@ def is_dominated(a: EvaluatedCandidate, b: EvaluatedCandidate) -> bool:
 
 
 def compute_pareto_frontier(candidates: List[EvaluatedCandidate]) -> List[EvaluatedCandidate]:
-    """Compute the 4D Pareto frontier via non-dominated sorting."""
+    """Compute the Pareto frontier via non-dominated sorting."""
     if not candidates:
         return []
 
@@ -1604,10 +1767,29 @@ def optimize(
             )
         else:
             state_key = None
+        attn_key = (
+            c.attention_type,
+            c.mla_kv_latent_dim,
+            c.mla_q_latent_dim,
+            c.mla_rope_head_dim,
+            c.mla_nope_head_dim,
+        )
+        long_context_key = (
+            c.cp_degree,
+            c.cp_method,
+            c.rope_scaling_method,
+            round(float(c.rope_scaling_factor), 6),
+            c.rope_original_max_position,
+        )
+        mtp_key = (
+            c.mtp_n_predict_depths,
+            c.mtp_depth_n_layers,
+            round(float(c.mtp_train_loss_weight), 6),
+        )
         key = (c.d_model, c.n_layers, c.n_heads, c.d_head, c.n_kv_heads,
                c.ffn_dim, c.weight_precision, c.ffn_precision,
                tuple(sorted(c.attn_precision.items())), c.kv_cache_bits,
-               moe_key, state_key)
+               moe_key, state_key, attn_key, long_context_key, mtp_key)
         if key not in seen:
             seen.add(key)
             unique.append(c)
@@ -1642,10 +1824,22 @@ def optimize(
     # 5. Pareto frontier (over feasible only)
     pareto = compute_pareto_frontier(feasible)
 
-    # 6. Argmax: lowest predicted loss among feasible, ties broken by training throughput
+    # 6. Pick the displayed optimum from the Pareto surface using the selected
+    # tradeoff preset. This keeps "optimal" aligned with latency/cost profiles
+    # instead of always snapping to the lowest loss point.
     optimal = None
     if feasible:
-        optimal = min(feasible, key=lambda x: (x.predicted_loss, -x.training_tps))
+        scoring_pool = pareto if pareto else feasible
+        optimal = min(
+            scoring_pool,
+            key=lambda x: (
+                _objective_score(x, scoring_pool, constraints.objective_profile),
+                x.predicted_loss,
+                x.throughput.prefill_time_ms,
+                x.serving_tbt_ms,
+                -x.training_tps,
+            ),
+        )
 
     elapsed = time.time() - t0
 
@@ -1664,6 +1858,142 @@ def optimize(
         constraints=constraints,
         binding_constraints=binding,
     )
+
+
+def _same_candidate(a: EvaluatedCandidate, b: EvaluatedCandidate) -> bool:
+    ca = a.arch
+    cb = b.arch
+    return (
+        ca.d_model == cb.d_model
+        and ca.n_layers == cb.n_layers
+        and ca.n_heads == cb.n_heads
+        and ca.d_head == cb.d_head
+        and ca.n_kv_heads == cb.n_kv_heads
+        and ca.ffn_dim == cb.ffn_dim
+        and ca.weight_precision == cb.weight_precision
+        and ca.ffn_precision == cb.ffn_precision
+        and ca.kv_cache_bits == cb.kv_cache_bits
+        and ca.moe_style == cb.moe_style
+        and ca.ep_degree == cb.ep_degree
+        and ca.attention_type == cb.attention_type
+        and ca.mla_kv_latent_dim == cb.mla_kv_latent_dim
+        and ca.cp_degree == cb.cp_degree
+        and ca.rope_scaling_method == cb.rope_scaling_method
+        and ca.mtp_n_predict_depths == cb.mtp_n_predict_depths
+    )
+
+
+def _candidate_summary(ev: EvaluatedCandidate) -> Dict[str, Any]:
+    c = ev.arch
+    return {
+        "d_model": c.d_model,
+        "n_layers": c.n_layers,
+        "n_heads": c.n_heads,
+        "d_head": c.d_head,
+        "n_kv_heads": c.n_kv_heads,
+        "attention_type": c.attention_type,
+        "ffn_precision": c.ffn_precision,
+        "kv_bits": c.kv_cache_bits,
+        "moe_style": c.moe_style,
+        "ep_degree": c.ep_degree,
+        "active_params_b": c.active_params_b or c.total_params_b,
+        "total_params_b": c.total_params_b,
+        "predicted_loss": round(ev.predicted_loss, 6),
+        "training_tps": round(ev.training_tps),
+        "serving_tbt_ms": round(ev.serving_tbt_ms, 3),
+        "serving_ttft_ms": round(ev.throughput.prefill_time_ms, 3),
+        "memory_per_gpu_gb": round(ev.memory_per_gpu_gb, 3),
+        "confidence": ev.quality.confidence,
+    }
+
+
+def _loss_interval(ev: EvaluatedCandidate) -> Tuple[float, float]:
+    unc = max(0.0, float(getattr(ev.quality, "uncertainty_total", 0.0)))
+    low = max(0.0, ev.predicted_loss * (1.0 - unc))
+    high = ev.predicted_loss * (1.0 + unc)
+    return low, high
+
+
+def _confidence_envelope(result: OptimizationResult, opt: EvaluatedCandidate) -> Dict[str, Any]:
+    opt_low, opt_high = _loss_interval(opt)
+    contenders = []
+    for ev in result.all_evaluated:
+        if ev is opt or not ev.meets_constraints:
+            continue
+        low, high = _loss_interval(ev)
+        if low <= opt_high and ev.predicted_loss <= opt_high:
+            contenders.append((ev, low, high))
+    best_other_low = min((low for _, low, _ in contenders), default=None)
+    target_coverage = None
+    try:
+        from quality_model import load_quality_constants
+        target_coverage = (
+            load_quality_constants()
+            .get("uncertainty", {})
+            .get("calibration_target_coverage")
+        )
+    except Exception:
+        target_coverage = None
+    return {
+        "loss_low": round(opt_low, 6),
+        "loss_high": round(opt_high, 6),
+        "uncertainty_total_pct": round(float(getattr(opt.quality, "uncertainty_total", 0.0)) * 100, 3),
+        "target_coverage": target_coverage,
+        "robust_to_loss_uncertainty": not contenders,
+        "contending_candidates": len(contenders),
+        "best_contender_loss_low": (
+            round(best_other_low, 6) if best_other_low is not None else None
+        ),
+    }
+
+
+def _selection_diagnostics(result: OptimizationResult, opt: EvaluatedCandidate) -> Dict[str, Any]:
+    pareto = result.pareto_frontier or []
+    profile = result.constraints.objective_profile if result.constraints else "balanced"
+    best_loss = min(pareto, key=lambda ev: ev.predicted_loss) if pareto else opt
+    selected_rank = None
+    best_loss_rank = None
+    for idx, ev in enumerate(pareto, start=1):
+        if selected_rank is None and _same_candidate(ev, opt):
+            selected_rank = idx
+        if best_loss_rank is None and _same_candidate(ev, best_loss):
+            best_loss_rank = idx
+    selected_score = (
+        _objective_score(opt, pareto, profile) if pareto else 0.0
+    )
+    best_loss_score = (
+        _objective_score(best_loss, pareto, profile) if pareto else 0.0
+    )
+    loss_gap_pct = 0.0
+    if best_loss.predicted_loss > 0:
+        loss_gap_pct = (opt.predicted_loss - best_loss.predicted_loss) / best_loss.predicted_loss * 100.0
+
+    warnings = []
+    if loss_gap_pct > 1e-6:
+        warnings.append(
+            f"Selected point is {loss_gap_pct:.2f}% worse in predicted loss than the best-loss Pareto point."
+        )
+    if opt.quality.confidence == "low" and best_loss.quality.confidence != "low":
+        warnings.append(
+            "Selected point has low quality confidence while the best-loss Pareto point does not."
+        )
+    if result.constraints and result.constraints.allow_moe and opt.arch.moe is None:
+        moe_points = [ev for ev in pareto if ev.arch.moe is not None]
+        if moe_points and min(ev.predicted_loss for ev in moe_points) < opt.predicted_loss:
+            warnings.append(
+                "MoE search was enabled but the selected point is dense while a lower-loss MoE point exists on the Pareto frontier."
+            )
+    return {
+        "objective_profile": profile,
+        "selected_pareto_rank": selected_rank,
+        "selected_objective_score": round(selected_score, 8),
+        "best_loss_pareto_rank": best_loss_rank,
+        "best_loss_objective_score": round(best_loss_score, 8),
+        "loss_gap_vs_best_pct": round(loss_gap_pct, 4),
+        "selected": _candidate_summary(opt),
+        "best_loss": _candidate_summary(best_loss),
+        "warnings": warnings,
+    }
 
 
 def result_to_config(
@@ -1688,6 +2018,7 @@ def result_to_config(
     arch_term = terms.get("architecture_residual")
     precision_term = terms.get("precision_residual")
     risk_term = terms.get("risk_residual")
+    selection_diag = _selection_diagnostics(result, opt)
 
     input_constraints = {
         "target_params": f"{result.constraints.target_params_b}B",
@@ -1696,6 +2027,10 @@ def result_to_config(
         "serving_tbt_ms": result.constraints.serving_tbt_ms,
         "serving_ttft_ms": result.constraints.serving_ttft_ms,
         "serving_batch": result.constraints.serving_batch,
+        "prompt_len": result.constraints.prompt_len,
+        "output_len": result.constraints.output_len,
+        "scheduler": result.constraints.scheduler,
+        "objective_profile": result.constraints.objective_profile,
         "allow_moe": result.constraints.allow_moe,
         "max_total_params_b": result.constraints.max_total_params_b,
         "allow_state": result.constraints.allow_state,
@@ -1707,6 +2042,16 @@ def result_to_config(
         "training_throughput_tokens_per_sec": round(opt.training_tps),
         "serving_tbt_ms": round(opt.serving_tbt_ms, 1),
         "serving_ttft_ms": round(opt.throughput.prefill_time_ms, 1),
+        "prefill_model": {
+            "prompt_len": int(result.constraints.prompt_len or result.constraints.context_length),
+            "cold_prefill": True,
+            "prefix_cache_hit_rate": 0.0,
+            "scheduler": result.constraints.scheduler,
+            "chunk_size": 65536 if result.constraints.scheduler == "chunked" else None,
+            "chunking_changes_total_ttft": False,
+            "context_parallel_degree": int(c.cp_degree),
+            "context_parallel_method": str(c.cp_method),
+        },
         "memory_per_gpu_gb": round(opt.memory_per_gpu_gb, 1),
         "active_params_b": c.active_params_b or c.total_params_b,
         "total_params_b": c.total_params_b,
@@ -1728,6 +2073,11 @@ def result_to_config(
             k: round(v * 100, 3)
             for k, v in getattr(opt.quality, "uncertainty_breakdown", {}).items()
         },
+        "confidence_envelope": _confidence_envelope(result, opt),
+        "selection_diagnostics": selection_diag,
+        "selection_warnings": selection_diag["warnings"],
+        "calibration_warnings": list(getattr(opt.quality, "calibration_warnings", [])),
+        "eval_predictions": getattr(opt.quality, "eval_predictions", {}),
         "quality_model_version": getattr(opt.quality, "quality_model_version", "quality_v0"),
         "quality_terms": {
             k: {
@@ -1858,10 +2208,13 @@ def result_to_pareto_csv(result: OptimizationResult) -> str:
     """Convert the Pareto frontier to CSV format. v1 adds MoE columns; dense
     rows leave them blank/0 so existing parsers degrade cleanly."""
     lines = [
-        "rank,d_model,n_layers,n_heads,d_head,n_kv_heads,ffn_dim,"
+        "rank,selected,objective_profile,objective_score,d_model,n_layers,n_heads,d_head,n_kv_heads,ffn_dim,"
         "weight_prec,ffn_prec,kv_bits,active_params_B,total_params_B,"
+        "attention_type,mla_kv_latent,mla_q_latent,cp,cp_method,rope_method,rope_factor,mtp_depth,"
+        "state_layers,attention_layers,placement_strategy,"
         "moe_style,n_experts,top_k,expert_dim,ep,"
-        "predicted_loss,training_tps,serving_tbt_ms,memory_gb,confidence"
+        "predicted_loss,loss_ci_low,loss_ci_high,uncertainty_total_pct,"
+        "training_tps,serving_tbt_ms,serving_ttft_ms,memory_gb,confidence"
     ]
     for i, ev in enumerate(result.pareto_frontier):
         c = ev.arch
@@ -1872,12 +2225,27 @@ def result_to_pareto_csv(result: OptimizationResult) -> str:
         else:
             n_experts = top_k = expert_dim = 0
         active = c.active_params_b or c.total_params_b
+        objective_score = (
+            _objective_score(ev, result.pareto_frontier, result.constraints.objective_profile)
+            if result.constraints else 0.0
+        )
+        loss_low, loss_high = _loss_interval(ev)
         lines.append(
-            f"{i+1},{c.d_model},{c.n_layers},{c.n_heads},{c.d_head},{c.n_kv_heads},"
+            f"{i+1},{_same_candidate(ev, result.optimal) if result.optimal else False},"
+            f"{result.constraints.objective_profile if result.constraints else ''},"
+            f"{objective_score:.8f},"
+            f"{c.d_model},{c.n_layers},{c.n_heads},{c.d_head},{c.n_kv_heads},"
             f"{c.ffn_dim},{c.weight_precision},{c.ffn_precision},{c.kv_cache_bits},"
             f"{active},{c.total_params_b},"
+            f"{c.attention_type},{c.mla_kv_latent_dim},{c.mla_q_latent_dim},"
+            f"{c.cp_degree},{c.cp_method},{c.rope_scaling_method},"
+            f"{c.rope_scaling_factor:.4f},{c.mtp_n_predict_depths},"
+            f"{c.n_state_layers},{c.n_attention_layers},{c.placement_strategy},"
             f"{c.moe_style},{n_experts},{top_k},{expert_dim},{c.ep_degree},"
-            f"{ev.predicted_loss:.4f},{ev.training_tps:.0f},"
-            f"{ev.serving_tbt_ms:.1f},{ev.memory_per_gpu_gb:.1f},{ev.quality.confidence}"
+            f"{ev.predicted_loss:.4f},{loss_low:.4f},{loss_high:.4f},"
+            f"{getattr(ev.quality, 'uncertainty_total', 0.0) * 100:.2f},"
+            f"{ev.training_tps:.0f},"
+            f"{ev.serving_tbt_ms:.1f},{ev.throughput.prefill_time_ms:.1f},"
+            f"{ev.memory_per_gpu_gb:.1f},{ev.quality.confidence}"
         )
     return "\n".join(lines)

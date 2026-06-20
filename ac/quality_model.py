@@ -17,6 +17,7 @@ architecture solver (`predicted_loss`, `penalty_breakdown`, confidence bands),
 while exposing v1 term-level results for reports and future adapters.
 """
 
+import json
 import math
 import os
 import sys
@@ -301,6 +302,8 @@ class QualityResult:
     benchmark_score_proxy: Optional[float] = None
     benchmark_uncertainty: Optional[float] = None
     benchmark_notes: List[str] = field(default_factory=list)
+    eval_predictions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    calibration_warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -678,9 +681,12 @@ def load_quality_constants(path: Optional[str] = None) -> Dict[str, Any]:
         _QUALITY_CONSTANTS_CACHE[path] = _deepcopy_dict(constants)
         return constants
     try:
-        import yaml  # type: ignore
         with open(path) as f:
-            loaded = yaml.safe_load(f) or {}
+            if str(path).lower().endswith(".json"):
+                loaded = json.load(f) or {}
+            else:
+                import yaml  # type: ignore
+                loaded = yaml.safe_load(f) or {}
         if isinstance(loaded, dict):
             constants = _deep_merge(constants, loaded)
             _QUALITY_CONSTANTS_CACHE[path] = _deepcopy_dict(constants)
@@ -713,6 +719,145 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
         else:
             base[k] = v
     return base
+
+
+def _safe_log(value: float) -> float:
+    return math.log(max(float(value), 1e-9))
+
+
+def _eval_feature_value(
+    feature: str,
+    arch: ArchConfig,
+    training: TrainingConfig,
+    result: QualityResult,
+) -> float:
+    if feature == "intercept":
+        return 1.0
+    if feature == "predicted_loss":
+        return float(result.predicted_loss)
+    if feature == "log_active_params_b":
+        return _safe_log(max(result.n_active_params, 1) / 1e9)
+    if feature == "log_total_params_b":
+        return _safe_log(max(result.n_total_params, 1) / 1e9)
+    if feature == "log_training_tokens_t":
+        return _safe_log(max(training.training_tokens, 1) / 1e12)
+    if feature == "log_context_length":
+        return _safe_log(max(training.sequence_length, 1))
+    if feature == "is_moe":
+        return 1.0 if arch._moe_enabled or arch.model_type == "moe" else 0.0
+    if feature == "is_state_or_hybrid":
+        return 1.0 if arch.state_config or arch.model_type in {"state", "hybrid"} else 0.0
+    return 0.0
+
+
+def _domain_warning(
+    *,
+    label: str,
+    value: float,
+    domain: Dict[str, Any],
+) -> Optional[str]:
+    rng = domain.get(label)
+    if not isinstance(rng, dict):
+        return None
+    lo = rng.get("min")
+    hi = rng.get("max")
+    if lo is None or hi is None:
+        return None
+    if value < float(lo) or value > float(hi):
+        return (
+            f"Lab calibration extrapolates on {label}: "
+            f"{value:.4g} outside [{float(lo):.4g}, {float(hi):.4g}]."
+        )
+    return None
+
+
+def _apply_lab_calibration_notes(
+    result: QualityResult,
+    constants: Dict[str, Any],
+    arch: ArchConfig,
+    training: TrainingConfig,
+) -> None:
+    lab = constants.get("lab_calibration", {})
+    if not isinstance(lab, dict) or not lab:
+        return
+    status = lab.get("status")
+    if status and status != "production_ready":
+        note = f"Lab calibration status is {status}; do not use as sign-off evidence without inspecting the pack."
+        result.confidence_notes.append(note)
+        result.calibration_warnings.append(note)
+    for warning in lab.get("warnings", []) or []:
+        text = str(warning)
+        result.confidence_notes.append(text)
+        result.calibration_warnings.append(text)
+    domain = lab.get("domains", {})
+    if isinstance(domain, dict):
+        checks = (
+            ("active_params_b", max(result.n_active_params, 1) / 1e9),
+            ("total_params_b", max(result.n_total_params, 1) / 1e9),
+            ("training_tokens_t", max(training.training_tokens, 1) / 1e12),
+            ("context_length", float(training.sequence_length)),
+        )
+        for label, value in checks:
+            warning = _domain_warning(label=label, value=value, domain=domain)
+            if warning:
+                result.confidence_notes.append(warning)
+                result.calibration_warnings.append(warning)
+                if result.confidence == "high":
+                    result.confidence = "medium"
+
+
+def _apply_eval_models(
+    result: QualityResult,
+    constants: Dict[str, Any],
+    arch: ArchConfig,
+    training: TrainingConfig,
+) -> None:
+    eval_models = constants.get("eval_models", {})
+    if not isinstance(eval_models, dict):
+        return
+    models = eval_models.get("evals", {})
+    if not isinstance(models, dict) or not models:
+        return
+    global_status = str(eval_models.get("status", "experimental"))
+    if global_status != "validated":
+        result.confidence_notes.append(
+            f"Eval projections are {global_status}; inspect held-out-family CV before relying on them."
+        )
+    predictions: Dict[str, Dict[str, Any]] = {}
+    for name, model in sorted(models.items()):
+        if not isinstance(model, dict):
+            continue
+        features = model.get("feature_names") or eval_models.get("feature_names") or []
+        coefs = model.get("coefficients") or []
+        if not features or not coefs or len(features) != len(coefs):
+            continue
+        x = [_eval_feature_value(str(f), arch, training, result) for f in features]
+        score = sum(float(c) * v for c, v in zip(coefs, x))
+        uncertainty = float(model.get("uncertainty") or 0.0)
+        score_min = model.get("score_min")
+        score_max = model.get("score_max")
+        outside_training_range = False
+        if score_min is not None and score_max is not None:
+            span = max(float(score_max) - float(score_min), 1e-9)
+            margin = max(span * 0.25, uncertainty)
+            if score < float(score_min) - margin or score > float(score_max) + margin:
+                outside_training_range = True
+        predictions[str(name)] = {
+            "score": round(score, 6),
+            "uncertainty": round(uncertainty, 6),
+            "status": model.get("status", global_status),
+            "n": model.get("n", 0),
+            "families": model.get("families", []),
+            "train_rmse": model.get("train_rmse"),
+            "heldout_family_rmse": model.get("heldout_family_rmse"),
+            "outside_training_score_range": outside_training_range,
+            "notes": list(model.get("warnings", []) or []),
+        }
+        if outside_training_range:
+            warning = f"Eval projection for {name} is outside the calibrated score range."
+            result.calibration_warnings.append(warning)
+            result.confidence_notes.append(warning)
+    result.eval_predictions = predictions
 
 
 def _safe_log_ratio(value: float, ref: float) -> float:
@@ -809,6 +954,106 @@ def _data_quality_filter(training: TrainingConfig, constants: Dict[str, Any]) ->
     else:
         warnings.append(f"Unknown data-quality mode {mode!r}; ignored.")
     return d_eff, term, warnings
+
+
+def _large_shape_stability_prior(
+    arch: ArchConfig,
+    n_total: int,
+    baseline_loss: float,
+) -> TermResult:
+    """Mild prior against implausible frontier-scale depth/width shapes.
+
+    Public scaling laws do not pin down 120B-1T internal shapes, but extreme
+    skinny/deep or shallow/wide candidates are unstable enough that they should
+    not win by accident. Anchors are coarse frontier-family centers, not
+    measured optima.
+    """
+    total_b = n_total / 1e9
+    if total_b < 120:
+        return TermResult(
+            name="large_shape_stability_prior",
+            confidence="not_applicable",
+            source="below_120b",
+        )
+
+    anchors = (
+        (120.0, 12288.0, 80.0),
+        (250.0, 16384.0, 88.0),
+        (500.0, 24576.0, 104.0),
+        (1000.0, 28672.0, 112.0),
+    )
+    target_log = math.log(max(total_b, 1.0))
+    center_b, center_d, center_l = min(
+        anchors,
+        key=lambda x: abs(math.log(x[0]) - target_log),
+    )
+
+    width_ratio = arch.d_model / max(1.0, center_d)
+    depth_ratio = arch.n_layers / max(1.0, center_l)
+    shape_ratio = (arch.n_layers / max(1.0, arch.d_model)) / (center_l / center_d)
+
+    penalty = 0.0
+    reasons: List[str] = []
+    if width_ratio < 0.70:
+        penalty += 0.040 * math.log(0.70 / max(width_ratio, 1e-6)) ** 2
+        reasons.append("width below large-model stability band")
+    elif width_ratio > 1.45:
+        penalty += 0.020 * math.log(width_ratio / 1.45) ** 2
+        reasons.append("width above large-model stability band")
+
+    if depth_ratio < 0.55:
+        penalty += 0.030 * math.log(0.55 / max(depth_ratio, 1e-6)) ** 2
+        reasons.append("depth below large-model stability band")
+    elif depth_ratio > 1.75:
+        penalty += 0.025 * math.log(depth_ratio / 1.75) ** 2
+        reasons.append("depth above large-model stability band")
+
+    if shape_ratio < 0.50:
+        penalty += 0.020 * math.log(0.50 / max(shape_ratio, 1e-6)) ** 2
+        reasons.append("depth/width ratio too shallow")
+    elif shape_ratio > 2.20:
+        penalty += 0.020 * math.log(shape_ratio / 2.20) ** 2
+        reasons.append("depth/width ratio too deep")
+
+    penalty = min(0.060, max(0.0, penalty))
+    if penalty <= 0:
+        return TermResult(
+            name="large_shape_stability_prior",
+            confidence="not_applicable",
+            source="within_frontier_shape_band",
+            features={
+                "target_total_params_b": round(total_b, 3),
+                "anchor_total_params_b": center_b,
+                "anchor_d_model": int(center_d),
+                "anchor_n_layers": int(center_l),
+                "width_ratio": round(width_ratio, 4),
+                "depth_ratio": round(depth_ratio, 4),
+                "depth_width_ratio_vs_anchor": round(shape_ratio, 4),
+            },
+        )
+
+    confidence = "low" if penalty >= 0.025 else "medium"
+    return TermResult(
+        name="large_shape_stability_prior",
+        value=penalty,
+        delta=penalty * baseline_loss,
+        uncertainty=penalty * 0.60,
+        confidence=confidence,
+        source="frontier_scale_depth_width_prior",
+        notes=[
+            "Coarse prior for 120B-1T candidates; verify with training stability sweeps.",
+            "; ".join(reasons),
+        ],
+        features={
+            "target_total_params_b": round(total_b, 3),
+            "anchor_total_params_b": center_b,
+            "anchor_d_model": int(center_d),
+            "anchor_n_layers": int(center_l),
+            "width_ratio": round(width_ratio, 4),
+            "depth_ratio": round(depth_ratio, 4),
+            "depth_width_ratio_vs_anchor": round(shape_ratio, 4),
+        },
+    )
 
 
 def _architecture_residual(
@@ -1928,6 +2173,17 @@ def estimate_quality(
             confidence=state_term.confidence,
         )
 
+    large_shape_term = _large_shape_stability_prior(arch, n_total, L_base)
+    result.terms[large_shape_term.name] = large_shape_term
+    if large_shape_term.confidence != "not_applicable":
+        terms_for_residual.append(large_shape_term)
+        penalties["large_shape"] = _make_penalty_entry(
+            "large_shape", large_shape_term.value, large_shape_term.source,
+            caveat="Coarse frontier-scale depth/width stability prior",
+            confidence=large_shape_term.confidence,
+        )
+        result.warnings.append("Large-model depth/width shape is outside the stability prior band.")
+
     # v1-fix MTP: Multi-Token Prediction sample-efficiency bonus during
     # training (DeepSeek-V3 §2.2). Modeled as a small negative residual
     # proportional to the n_predict_depths times the training loss weight.
@@ -2030,6 +2286,7 @@ def estimate_quality(
         "precision": _term_uncertainty(precision_term),
         "moe": _term_uncertainty(moe_term),
         "state": _term_uncertainty(state_term),
+        "large_shape": _term_uncertainty(large_shape_term),
         "risk": _term_uncertainty(risk_term),
         "data_quality": _term_uncertainty(data_term),
     }
@@ -2059,6 +2316,8 @@ def estimate_quality(
         )
 
     _apply_downstream_head(result, constants, workload_spec)
+    _apply_lab_calibration_notes(result, constants, arch, training)
+    _apply_eval_models(result, constants, arch, training)
     return result
 
 

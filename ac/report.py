@@ -185,6 +185,33 @@ def render_field_changes(ev: DeltaEvaluation) -> str:
     return "\n".join(lines)
 
 
+def render_topology_notes(ev: DeltaEvaluation) -> str:
+    """Explain topology cases where a structural delta has no local metric move."""
+    notes: List[str] = []
+    kv_change = next(
+        (ch for ch in ev.field_changes if ch.get("field") == "n_kv_heads"),
+        None,
+    )
+    kv_metric = ev.metrics.get("kv_cache_gb")
+    tbt_metric = ev.metrics.get("serving_tbt_ms")
+    if kv_change and kv_metric and abs(kv_metric.delta) < 1e-9:
+        notes.append(
+            "KV heads changed, but modeled per-GPU KV cache stayed flat because "
+            "the current TP/KV placement assumes at least one KV head resident "
+            "per rank. This is expected when TP is greater than or equal to the "
+            "candidate KV-head count; use a different KV-sharding policy or lower "
+            "TP to realize per-rank KV-cache savings."
+        )
+        if tbt_metric and abs(tbt_metric.delta) < 1e-9:
+            notes.append(
+                "Decode TBT is neutral for the same reason: local decode "
+                "bandwidth still reads one KV head per rank."
+            )
+    if not notes:
+        return ""
+    return "\n".join(f"- {note}" for note in notes)
+
+
 def render_markdown(ev: DeltaEvaluation) -> str:
     """Render a single-page Markdown report for one DeltaEvaluation."""
     args_str = ", ".join(f"{k}={v}" for k, v in ev.delta_args.items()) or "(no args)"
@@ -217,6 +244,10 @@ def render_markdown(ev: DeltaEvaluation) -> str:
         "## Evaluation metrics",
         "",
         render_metric_table(ev.metrics),
+        "",
+        "## Topology notes",
+        "",
+        render_topology_notes(ev) or "_No topology caveats for this delta._",
         "",
         "## Quality residual decomposition",
         "",

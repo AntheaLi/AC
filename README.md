@@ -95,6 +95,11 @@ workload
   --concurrency       int       concurrent serving requests (default 256)
   --scheduler         {continuous, static, chunked}
 
+selection
+  --objective-profile  research_quality | loss_only | balanced | quality |
+                       latency | serving_cost | training_cost
+                       default: research_quality
+
 serving budgets
   --serving-tbt   ms      time-between-tokens p95
   --serving-ttft  ms      time-to-first-token p95
@@ -154,6 +159,8 @@ outputs (paths)
   --output-shadow-prices    default shadow_prices.json
   --output-assumptions      default not written
   --output-model-card       default not written
+  --output-implementation   generated PyTorch architecture scaffold
+  --implementation-class-name  class name for --output-implementation
   --no-shadow-prices        skip the shadow-price pass (faster)
   --max-candidates          optional greenfield cap after candidate dedupe
   --progress-every          print evaluation progress every N candidates
@@ -365,7 +372,9 @@ every rank and the quality model will return its INFEASIBLE marker.**
 
 ### Auto-calibration
 
-Use `ac-auto-calibrate` to fit local uncertainty and hardware-efficiency overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible field names.
+Use `ac-auto-calibrate` to fit lab-local uncertainty and hardware-efficiency
+overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible
+field names.
 
 Minimal row:
 
@@ -373,9 +382,23 @@ Minimal row:
 {
   "id": "h100_mistral_7b_decode",
   "hardware": "h100",
+  "architecture_family": "dense_gqa",
+  "model_type": "dense",
+  "active_params_b": 7.2,
+  "total_params_b": 7.2,
+  "training_tokens": 2.0,
+  "context_length": 8192,
   "predicted_loss": 2.03,
   "observed_loss": 2.08,
   "predicted_uncertainty_total_pct": 3.1,
+  "eval_scores": {
+    "mmlu_pro": 0.421,
+    "gpqa": 0.311
+  },
+  "predicted_evals": {
+    "mmlu_pro": 0.409,
+    "gpqa": 0.298
+  },
   "predicted_training_tps": 11800,
   "observed_training_tps": 10400,
   "predicted_serving_tbt_ms": 6.2,
@@ -391,7 +414,12 @@ Fit a pack:
 ac-auto-calibrate fit \
   --measurements lab_measurements.jsonl \
   --out out/lab_calibration \
-  --target-coverage 0.90
+  --target-coverage 0.90 \
+  --min-quality-rows 12 \
+  --min-eval-rows 12 \
+  --min-eval-families 3 \
+  --min-hardware-rows 3 \
+  --max-hardware-scatter-p90-pct 15
 ```
 
 An editable starter file is included at
@@ -418,8 +446,71 @@ ac-compile --hardware h100 --params 7 --tokens 2 ...
 Quality calibration scales uncertainty intervals; it does not bias-correct the
 loss point estimate. Hardware calibration adjusts `training_system_efficiency`,
 `decode_system_efficiency`, and `prefill_system_efficiency` from median
-observed/predicted ratios. Keep separate packs for materially different
-clusters, kernels, schedulers, and datamixes.
+observed/predicted ratios.
+
+When rows include `eval_scores`, the fitter also writes ridge eval models with
+held-out architecture-family CV. The overlay marks the pack as
+`production_ready` only when the configured sample gates pass; otherwise compile
+outputs carry `metadata.predicted.calibration_warnings`. Greenfield configs also
+include:
+
+```json
+{
+  "confidence_envelope": {
+    "loss_low": 1.91,
+    "loss_high": 2.11,
+    "robust_to_loss_uncertainty": false,
+    "contending_candidates": 7
+  },
+  "eval_predictions": {
+    "mmlu_pro": {
+      "score": 0.438,
+      "uncertainty": 0.021,
+      "heldout_family_rmse": 0.019
+    }
+  }
+}
+```
+
+Keep separate packs for materially different clusters, kernels, schedulers,
+recipes, and datamixes.
+
+---
+
+## Implementation export
+
+Greenfield runs can also emit a standalone PyTorch module scaffold from the
+selected AC schema config:
+
+```bash
+ac-compile \
+  --hardware h100 --params 7 --tokens 2 --context 8192 \
+  --serving-tbt 50 --serving-batch 32 --tp 8 --pp 1 --dp 8 \
+  --output-config out/arch.json \
+  --output-implementation out/ac_model.py \
+  --implementation-class-name ACModel
+```
+
+The generated file embeds the config as `AC_CONFIG` and defines an
+`nn.Module` class with dense/GQA/MLA attention, SwiGLU, MoE, RMSNorm, and
+state-block adapter slots. It uses PyTorch reference paths by default, tries
+`flash-attn` for attention when available, and lets labs provide their own
+installed kernels:
+
+```python
+from ac_model import ACModel
+
+model = ACModel(component_overrides={
+    "attention:nsa": my_native_sparse_attention_forward,
+    "state:gla": lambda d_model, config: MyFlaGlaBlock(d_model, **config),
+    "state:mamba2": lambda d_model, config: MyMamba2Block(d_model, **config),
+})
+```
+
+This artifact is meant as integration glue and shape-faithful reference code.
+For production pretraining, replace attention/state/MoE kernels with the lab's
+own FlashAttention, FLA, Mamba, expert-parallel, quantization, and checkpointing
+components.
 
 ---
 

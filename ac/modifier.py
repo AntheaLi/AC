@@ -430,9 +430,10 @@ def _kv_cache_gb(cand: CandidateArch, constraints: DeploymentConstraints, tp: in
     # single active decode-stream memory rather than full scheduler residency.
     batch = 1
     layers_per_stage = cand.n_layers // max(constraints.pp, 1)
+    kv_heads_per_gpu = max(1, math.ceil(cand.n_kv_heads / max(tp, 1)))
     bytes_total = (
-        batch * context * layers_per_stage * 2 * cand.n_kv_heads * cand.d_head * kv_bpe
-    ) / max(tp, 1)
+        batch * context * layers_per_stage * 2 * kv_heads_per_gpu * cand.d_head * kv_bpe
+    )
     return bytes_total / (1024**3)
 
 
