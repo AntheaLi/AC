@@ -10,17 +10,11 @@ check out demo here: [ac-demo](https://antheali.github.io/ac-demo/)
 
 Three composable capabilities, one shared config format:
 
-- **Greenfield**  Given compute, what's the optimal Pareto-front architecture? 
+- **Greenfield**  Given compute -> architecture | `ac-compile --hardware H --params N --tokens T …` 
 
-`ac-compile --hardware H --params N --tokens T …` 
+- **Modifier**  Given compute + a base architecture -> modifier? `ac-compile --baseline-config CONF --hardware H …` 
 
-- **Modifier**  Given compute + a base architecture, what's the best local Pareto modifier? 
-
-`ac-compile --baseline-config CONF --hardware H …` 
-
-- **Delta influence**  Given compute + base + a delta, quantify the influence. 
-
-`ac-delta-eval --baseline-config CONF --apply NAME …`
+- **Delta influence**  Given compute + base + delta -> influence. `ac-delta-eval --baseline-config CONF --apply NAME …`
 
 Also check out the [AC-Harness](https://github.com/AntheaLi/AC-harness), which is a loop scaffold 
 built to automate the process. It can also exist as a thin layer that sits beside existing training, eval, and benchmarking stack. 
@@ -433,14 +427,14 @@ clusters, kernels, schedulers, and datamixes.
 
 ### Hardware targets
 
-| Target | Peak BF16 / FP8 / FP4 (TF) | HBM | Interconnect | Tile path | Calibrated |
+| Target | Peak BF16 / FP8 / FP4 (TF) | HBM | Interconnect | Tile path |
 |---|---|---:|---|---|:---:|
-| **NVIDIA H100 SXM** | 990 / 1980 / — | 80 GB | NVLink 4 (900 GB/s) | wmma 16×16 | ✓ |
-| **NVIDIA B200** | 2 250 / 4 500 / 4 500 (MXFP4) | 192 GB | NVLink 5 (1.8 TB/s) | wmma + MX | ✓ |
-| **TPU v5p** | 459 BF16 / — / — | 95 GB | ICI mesh | MXU 128×128 | ✓ |
-| **TPU v5e** | 197 BF16 / — / — | 16 GB | ICI mesh | MXU 128×128 | — |
-| **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128 | spec |
-| **AWS Trainium 3** | 1 300 / 2 600 / 5 200 (MX) | 192 GB | NeuronLink v4 (2.4 TB/s) | NCv4 + FP4 | spec |
+| **NVIDIA H100 SXM** | 990 / 1980 / — | 80 GB | NVLink 4 (900 GB/s) | wmma 16×16 |
+| **NVIDIA B200** | 2 250 / 4 500 / 4 500 (MXFP4) | 192 GB | NVLink 5 (1.8 TB/s) | wmma + MX |
+| **TPU v5p** | 459 BF16 / — / — | 95 GB | ICI mesh | MXU 128×128 |
+| **TPU v5e** | 197 BF16 / — / — | 16 GB | ICI mesh | MXU 128×128 |
+| **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128  |
+| **AWS Trainium 3** | 1 300 / 2 600 / 5 200 (MX) | 192 GB | NeuronLink v4 (2.4 TB/s) | NCv4 + FP4 |
 
 ### Attention mechanisms
 
