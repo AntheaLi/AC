@@ -428,12 +428,12 @@ clusters, kernels, schedulers, and datamixes.
 #### Hardware targets
 
 | Target | Peak BF16 / FP8 / FP4 (TF) | HBM | Interconnect | Tile path |
-|---|---|---:|---|---|:---:|
+|---|---|---:|---|---|
 | **NVIDIA H100 SXM** | 990 / 1980 / — | 80 GB | NVLink 4 (900 GB/s) | wmma 16×16 |
 | **NVIDIA B200** | 2 250 / 4 500 / 4 500 (MXFP4) | 192 GB | NVLink 5 (1.8 TB/s) | wmma + MX |
 | **TPU v5p** | 459 BF16 / — / — | 95 GB | ICI mesh | MXU 128×128 |
 | **TPU v5e** | 197 BF16 / — / — | 16 GB | ICI mesh | MXU 128×128 |
-| **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128  |
+| **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128 |
 | **AWS Trainium 3** | 1 300 / 2 600 / 5 200 (MX) | 192 GB | NeuronLink v4 (2.4 TB/s) | NCv4 + FP4 |
 
 #### attention + cache
