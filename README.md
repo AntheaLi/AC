@@ -2,11 +2,13 @@
 
 ![算模AC - ArchCalc](assets/image.png)
 
-AC is a hardware-aware architecture compiler that turns a compute budget, hardware target, and optional base model into multi-objective Pareto-front model architectures and architecture deltas. It serves as a quantitative **pre-flight** check, it does NOT replace training. 
+AC is a compiler for model architecture design under hardware constraints. It takes hardware platform, parameter budget, training tokens, serving workload, and an optional basemodel, 
+AC optimizes for multi-objective Pareto-improving model architectures and architecture deltas. It currently supports greenfield architecture generation, 
+basemodel local modification, and basemodel modifier influence evaluation.
+The goal is to make architecture design less like folklore and more like hardware-and-quality-aware Pareto search.
+It serves as a quantitative **pre-flight** check, it does NOT replace training. 
 
-> AC is a compiler for model architecture design under real hardware constraints. Given a target hardware platform, parameter budget, training tokens, serving workload, or an existing baseline architecture, AC searches for Pareto-improving architectures and local modifiers across choices like width/depth, attention layout, GQA/KV configuration, precision policy, MoE structure, and hybrid attention/state ratios. It supports greenfield architecture search, baseline-aware local modification, and delta influence evaluation, making it useful both for designing new models and for understanding whether a proposed architecture change actually improves the quality–latency–memory tradeoff.
-
-check out demo here: [ac-demo](https://antheali.github.io/ac-demo/)
+Check out demo here: [ac-demo](https://antheali.github.io/ac-demo/)
 
 Three composable capabilities, one shared config format:
 
@@ -18,6 +20,8 @@ Three composable capabilities, one shared config format:
 
 Also check out the [AC-Harness](https://github.com/AntheaLi/AC-harness), which is a loop scaffold 
 built to automate the process. It can also exist as a thin layer that sits beside existing training, eval, and benchmarking stack. 
+
+
 
 ---
 
