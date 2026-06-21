@@ -2,7 +2,7 @@
 
 ![算模AC - ArchCalc](assets/image.png)
 
-AC is a compiler for model architecture design under hardware constraints. It can take hardware platform, parameter budget, training tokens, serving workload, and an optional basemodel, 
+AC is a compiler for model architecture design under hardware constraints. It can take hardware platform, param count, training tokens, serving workload, and an optional basemodel, 
 AC optimizes for multi-objective Pareto-improving model architectures and architecture deltas. It currently supports greenfield generation, 
 basemodel modification, and modifier eval.
 The goal is to make architecture design less like folklore and more like multi-objective Pareto optimization.
