@@ -21,25 +21,9 @@ built to automate the process. It can also exist as a thin layer that sits besid
 
 ---
 
-## Read this first: rank, don't predict
+## Calibration vs. Ordinal Uase
 
-AC is a **forward proxy**, not a measurement system. Internally it is:
-
-1. a roofline + tile-efficiency throughput model with one
-   `*_system_efficiency` scalar per phase per hardware target, and
-2. a Hoffmann-style scaling-law spine
-   (`L = E + A/N^α + B/D^β`) plus a stack of additive residuals for
-   architecture shape, precision, MoE, state/hybrid, risk, and data
-   quality.
-
-The default coefficients are documented (and labelled) as priors in
-`ac/quality_defaults.yaml`. The shape-law refit ships with a small dense
-fit set; the MoE / state residuals are calibrated to public ablations,
-not your lab's traces. **As shipped, the absolute loss numbers (and the
-TPS/TBT predictions) will be biased relative to what your stack
-actually produces.**
-
-What AC *is* good for, without calibration:
+AC is a **forward proxy**, not a measurement system. Without calibration, AC is **ordinal**:
 
 - **Pareto ranking.** Given identical priors, two candidates'
   *relative* ordering on the (loss, TBT, memory, TPS) frontier is much
@@ -49,7 +33,13 @@ What AC *is* good for, without calibration:
   loosened. That's a structural answer; it doesn't depend on a tight
   loss calibration.
 
-What AC needs **before you trust the absolute numerals**:
+The current coefficients are calibrated to public ablations, used as priors and documented in
+`ac/quality_defaults.yaml`. The uncalibrated starter mode can be different from your private internal traces. 
+The absolute loss numbers (and the TPS/TBT predictions) can be **biased** relative to what your stack
+actually produces.
+
+
+Calibrate, if you want **absolute numerals**:
 
 - Run `ac-auto-calibrate fit --measurements <your_traces>.jsonl` against
   ≥12 measured runs spanning the architecture families you care about
@@ -62,8 +52,8 @@ What AC needs **before you trust the absolute numerals**:
   — one global pack will mask all the interesting variance.
 
 For any decision that depends on absolute loss (e.g. "is 7B at 2T
-better than 13B at 1T at our budget?"), assume an uncalibrated AC will
-mislead you. For comparative decisions ("does adding MLA relieve the
+better than 13B at 1T at our budget?"), an uncalibrated AC can be 
+misleading. For comparative decisions ("does adding MLA relieve the
 binding axis without spending >1% loss on a frontier already at TP=8?"),
 AC's structural answer is the value it adds.
 
