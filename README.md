@@ -21,7 +21,7 @@ built to automate the process. It can also exist as a thin layer that sits besid
 
 ---
 
-## Calibration vs. Ordinal Uase
+## Calibration vs. Ordinal Use
 
 AC is a **forward proxy**, not a measurement system. Without calibration, AC is **ordinal**:
 
