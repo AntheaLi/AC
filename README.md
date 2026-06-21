@@ -4,8 +4,8 @@
 
 AC is a compiler for model architecture design under hardware constraints. It can take hardware platform, parameter budget, training tokens, serving workload, and an optional basemodel, 
 AC optimizes for multi-objective Pareto-improving model architectures and architecture deltas. It currently supports greenfield generation, 
-basemodel modification, and basemodel modifier influence eval.
-The goal is to make architecture design less like folklore and more like hardware-and-quality-aware Pareto search.
+basemodel modification, and modifier eval.
+The goal is to make architecture design less like folklore and more like multi-objective Pareto optimization.
 It serves as a quantitative **pre-flight** check, it does NOT replace training. 
 
 Check out demo here: [ac-demo](https://antheali.github.io/ac-demo/)
