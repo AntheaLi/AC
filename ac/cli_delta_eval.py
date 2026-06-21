@@ -83,8 +83,22 @@ _WORKLOAD_PRESETS = {
     },
 }
 
-VALID_HARDWARE = ["h100", "b200", "tpu_v5p",
+VALID_HARDWARE = ["h100", "b200", "tpu_v5p", "tpu_v5e",
                   "trainium2", "trn2", "trainium3", "trn3"]
+
+
+def _positive_int(v: str) -> int:
+    out = int(v)
+    if out <= 0:
+        raise argparse.ArgumentTypeError("value must be > 0")
+    return out
+
+
+def _non_negative_float(v: str) -> float:
+    out = float(v)
+    if out < 0:
+        raise argparse.ArgumentTypeError("value must be >= 0")
+    return out
 
 
 def _coerce_arg_value(v: str) -> Any:
@@ -113,19 +127,19 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
                         help="Path to a compiler-schema JSON baseline.")
     parser.add_argument("--hardware", default="h100",
                         choices=VALID_HARDWARE)
-    parser.add_argument("--tp", type=int, default=8)
-    parser.add_argument("--pp", type=int, default=1)
-    parser.add_argument("--dp", type=int, default=8)
+    parser.add_argument("--tp", type=_positive_int, default=8)
+    parser.add_argument("--pp", type=_positive_int, default=1)
+    parser.add_argument("--dp", type=_positive_int, default=8)
     parser.add_argument("--workload", default="chat",
                         choices=list(_WORKLOAD_PRESETS.keys()))
-    parser.add_argument("--serving-batch", type=int, default=None,
+    parser.add_argument("--serving-batch", type=_positive_int, default=None,
                         help="Override workload preset.")
-    parser.add_argument("--context-length", type=int, default=None,
+    parser.add_argument("--context-length", type=_positive_int, default=None,
                         help="Override workload preset.")
-    parser.add_argument("--prompt-len", type=int, default=None)
-    parser.add_argument("--target-params-b", type=float, default=0.0,
+    parser.add_argument("--prompt-len", type=_positive_int, default=None)
+    parser.add_argument("--target-params-b", type=_non_negative_float, default=0.0,
                         help="0 means inferred from baseline.")
-    parser.add_argument("--training-tokens", type=int,
+    parser.add_argument("--training-tokens", type=_positive_int,
                         default=2_000_000_000_000)
     parser.add_argument("--apply", action="append", required=True,
                         metavar="DELTA_NAME",
@@ -171,8 +185,23 @@ def _build_delta_groups(argv: List[str]) -> List[Tuple[str, Dict[str, Any]]]:
                 i += 2
                 continue
             kv = argv[i + 1] if i + 1 < len(argv) else ""
+            # Fix #2: detect the legacy comma-separated form `k1=v1,k2=v2`
+            # and emit an actionable error instead of letting the value
+            # fall through as a string and surfacing later as a misleading
+            # "k must be an integer". This is the most common migration
+            # failure from v1-release / ac-cli-release-v1.
             if "=" in kv:
                 k, _, v = kv.partition("=")
+                if "," in v and "=" in v:
+                    print(
+                        f"ERROR: --apply-args value {kv!r} looks like the "
+                        "legacy comma-separated form `k1=v1,k2=v2`. "
+                        "Repeat --apply-args once per key instead: "
+                        f"`--apply-args {k}=<val> --apply-args "
+                        f"{v.split(',', 1)[1].split('=', 1)[0]}=<val>`.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
                 groups[-1][1][k] = _coerce_arg_value(v)
             i += 2
             continue
@@ -207,10 +236,81 @@ def _validate_delta_groups(groups: List[Tuple[str, Dict[str, Any]]]) -> None:
                     f"--apply {name}: unknown --apply-args key {k!r}. "
                     f"Legal keys for this delta: {', '.join(legal) or '(none)'}"
                 )
+        errors.extend(_validate_delta_arg_values(name, args))
     if errors:
         for e in errors:
             print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(2)
+
+
+def _is_int_value(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_delta_arg_values(name: str, args: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+
+    def require_int(key: str, minimum: int = None) -> None:
+        if key not in args:
+            return
+        value = args[key]
+        if not _is_int_value(value):
+            errors.append(f"--apply {name}: {key} must be an integer")
+            return
+        if minimum is not None and value < minimum:
+            errors.append(f"--apply {name}: {key} must be >= {minimum}")
+
+    def require_float_gt_zero(key: str) -> None:
+        if key not in args:
+            return
+        value = args[key]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            errors.append(f"--apply {name}: {key} must be numeric")
+            return
+        if float(value) <= 0:
+            errors.append(f"--apply {name}: {key} must be > 0")
+
+    if name == "swap_attention_to_gqa":
+        require_int("group_size", 1)
+    elif name == "swap_attention_to_mla":
+        require_int("latent_dim", 16)
+    elif name == "swap_attention_to_swa":
+        require_int("window_size", 64)
+    elif name == "add_state_layers":
+        require_int("d_state", 1)
+        ratio = args.get("ratio")
+        if ratio is not None and ratio != "all":
+            try:
+                left, right = str(ratio).split(":")
+                if int(left) <= 0 or int(right) <= 0:
+                    raise ValueError
+            except ValueError:
+                errors.append(
+                    f"--apply {name}: ratio must be 'all' or positive A:B integers"
+                )
+    elif name == "densify_first_k":
+        require_int("k", 0)
+    elif name == "change_moe_topology":
+        require_int("n_experts", 1)
+        require_int("top_k", 1)
+        require_int("expert_dim", 1)
+        require_float_gt_zero("capacity_factor")
+    elif name == "change_parallelism":
+        for key in ("tp", "pp", "ep", "dp"):
+            require_int(key, 1)
+    elif name == "scale_d_model":
+        require_int("delta")
+        require_int("align", 1)
+    elif name == "scale_n_layers":
+        require_int("delta")
+    elif name == "change_precision_per_component":
+        valid = {"bf16", "fp16", "fp32", "fp8", "fp4", "int8", "int4", "mxfp4", "mxfp6"}
+        for key in ("kv", "weight", "activation"):
+            if key in args and str(args[key]).lower() not in valid:
+                errors.append(
+                    f"--apply {name}: {key} must be one of {', '.join(sorted(valid))}"
+                )
+    return errors
 
 
 # =============================================================================
@@ -229,25 +329,44 @@ def main(argv: List[str] = None) -> int:
     # we load and evaluate anything.
     _validate_delta_groups(delta_groups)
 
+    # Fix #3: warn on non-power-of-two parallelism (typo guard).
+    def _is_pow2(n: int) -> bool:
+        return n >= 1 and (n & (n - 1)) == 0
+    for label, val in (("--tp", args.tp), ("--pp", args.pp), ("--dp", args.dp)):
+        if val is not None and not _is_pow2(val):
+            print(
+                f"WARNING: {label}={val} is not a power of two. Most accelerator "
+                "nodes use power-of-two parallelism; double-check this is intended.",
+                file=sys.stderr,
+            )
+
     # 1) Load baseline
-    bm = load_baseline_model(args.baseline_config)
+    try:
+        bm = load_baseline_model(args.baseline_config)
+    except ValueError as exc:
+        print(f"ERROR: Could not load baseline config: {exc}", file=sys.stderr)
+        return 2
 
     # 2) Build DeploymentConstraints, layering preset + explicit overrides
     preset = _WORKLOAD_PRESETS[args.workload]
-    constraints = DeploymentConstraints(
-        target_params_b=(args.target_params_b
-                         if args.target_params_b > 0
-                         else bm.candidate.total_params / 1e9),
-        training_tokens=args.training_tokens,
-        context_length=args.context_length or preset["context_length"],
-        prompt_len=args.prompt_len or preset["prompt_len"],
-        serving_tbt_ms=preset["serving_tbt_ms"],
-        serving_ttft_ms=2000.0,
-        serving_batch=args.serving_batch or preset["serving_batch"],
-        tp=args.tp,
-        pp=args.pp,
-        dp=args.dp,
-    )
+    try:
+        constraints = DeploymentConstraints(
+            target_params_b=(args.target_params_b
+                             if args.target_params_b > 0
+                             else bm.candidate.total_params / 1e9),
+            training_tokens=args.training_tokens,
+            context_length=args.context_length or preset["context_length"],
+            prompt_len=args.prompt_len or preset["prompt_len"],
+            serving_tbt_ms=preset["serving_tbt_ms"],
+            serving_ttft_ms=2000.0,
+            serving_batch=args.serving_batch or preset["serving_batch"],
+            tp=args.tp,
+            pp=args.pp,
+            dp=args.dp,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     # 3) Evaluate. Single delta vs sequence.
     if len(delta_groups) == 1:
@@ -267,6 +386,22 @@ def main(argv: List[str] = None) -> int:
             include_pareto=not args.no_pareto,
         )
         results = [ev]
+
+    # Fix #3: stamp the resolved workload onto every evaluation so reports
+    # and JSON make it unambiguous what assumptions the predictions used.
+    resolved = {
+        "workload_preset": args.workload,
+        "serving_batch": int(constraints.serving_batch),
+        "context_length": int(constraints.context_length),
+        "prompt_len": int(constraints.prompt_len or constraints.context_length),
+        "serving_tbt_ms_budget": float(constraints.serving_tbt_ms),
+        "serving_ttft_ms_budget": float(constraints.serving_ttft_ms or 0.0) or None,
+        "tp": int(constraints.tp),
+        "pp": int(constraints.pp),
+        "dp": int(constraints.dp),
+    }
+    for ev in results:
+        ev.resolved_workload = resolved
 
     # 4) Output
     if args.stdout:
@@ -306,6 +441,19 @@ def main(argv: List[str] = None) -> int:
             f.write(render_pareto_csv(results[0]))
 
     print(f"Wrote evaluation to: {out_dir}")
+
+    # Fix #11: surface infeasibility to stderr so users notice when a delta
+    # was a precondition-failed no-op (e.g. densify_first_k on a dense
+    # baseline). Previously the CLI exited 0 with "Wrote evaluation to: …"
+    # and the user had to open the report to see "Infeasible".
+    infeasible = [ev for ev in results if not ev.feasible]
+    if infeasible:
+        for ev in infeasible:
+            print(
+                f"WARNING: delta `{ev.delta_name}` was infeasible against "
+                f"baseline `{ev.baseline_name}`: {ev.reason_if_infeasible}",
+                file=sys.stderr,
+            )
     return 0
 
 

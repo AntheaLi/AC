@@ -240,7 +240,11 @@ def _nested_get(row: Dict[str, Any], path: str) -> Any:
 
 
 def _value(row: Dict[str, Any], key: str) -> Any:
-    for alias in _ALIASES[key]:
+    # Fall back to a single-alias lookup when the key is not registered in
+    # _ALIASES (e.g. ad-hoc inference fields used by `_family`). This keeps
+    # the helper general without forcing every caller to declare an alias.
+    aliases = _ALIASES.get(key, (key,))
+    for alias in aliases:
         got = _nested_get(row, alias)
         if got is not None:
             return got
@@ -330,12 +334,67 @@ def _collect_predicted_evals(row: Dict[str, Any]) -> Dict[str, float]:
     return evals
 
 
+_CANONICAL_FAMILIES = {
+    "dense", "dense_gqa", "mla_dense", "moe", "moe_mla", "hybrid_state",
+}
+
+# Loose aliases for common shorthand in measurement files.
+_FAMILY_ALIASES = {
+    "dense_mha": "dense",
+    "dense-mha": "dense",
+    "mha": "dense",
+    "gqa": "dense_gqa",
+    "dense-gqa": "dense_gqa",
+    "mla": "mla_dense",
+    "mla_only": "mla_dense",
+    "moe_dense": "moe",
+    "moe-mla": "moe_mla",
+    "hybrid": "hybrid_state",
+    "state_hybrid": "hybrid_state",
+    "mamba_hybrid": "hybrid_state",
+}
+
+
 def _family(row: Dict[str, Any]) -> str:
+    """Canonicalize a row's architecture family.
+
+    Fix #1: the throughput model's lookup uses one of six canonical family
+    names (`dense`, `dense_gqa`, `mla_dense`, `moe`, `moe_mla`,
+    `hybrid_state`). Earlier versions fell back to the row's `id` field when
+    `architecture_family` was missing, which meant the lab table written
+    here was always shadowed by the in-code defaults. We now:
+
+      1. Try `architecture_family`, normalising aliases.
+      2. Infer from `model_type` ("moe", "dense", …) plus attention/state
+         hints when explicit family is missing.
+      3. Fall back to `dense_gqa` (the most common case) — never to `id`.
+    """
     raw = _value(row, "architecture_family")
-    if raw is None:
-        raw = _value(row, "id")
-    text = str(raw or "unknown").strip().lower()
-    return text or "unknown"
+    if raw:
+        text = str(raw).strip().lower().replace(" ", "_")
+        text = _FAMILY_ALIASES.get(text, text)
+        if text in _CANONICAL_FAMILIES:
+            return text
+
+    model_type = (_value(row, "model_type") or "").strip().lower()
+    attn_type = (_value(row, "attention_type") or "").strip().lower()
+    has_state = bool(_value(row, "state_type") or _value(row, "has_state"))
+
+    if has_state or attn_type in {"state", "mamba2", "gla", "kda", "hybrid"}:
+        return "hybrid_state"
+    if model_type in {"moe", "moe_dense", "moe_mla"} or _value(row, "n_experts"):
+        return "moe_mla" if attn_type == "mla" else "moe"
+    if attn_type == "mla":
+        return "mla_dense"
+    n_heads = _numeric(row, "n_heads")
+    n_kv = _numeric(row, "n_kv_heads")
+    if n_heads and n_kv and n_kv < n_heads:
+        return "dense_gqa"
+    if model_type == "dense":
+        return "dense_gqa"
+    # Default to dense_gqa — every modern frontier dense baseline uses GQA,
+    # so this is the maximum-likelihood prior for ambiguous rows.
+    return "dense_gqa"
 
 
 def _scale_to_billions(value: Optional[float]) -> Optional[float]:
@@ -649,8 +708,62 @@ def _fit_hardware(
             round(1.0 / fit["prefill_time_observed_over_predicted"], 6)
             if fit["prefill_time_observed_over_predicted"] else None
         )
+        # Fix #1 follow-up: per-family ratios are useful diagnostics but were
+        # being mis-applied at compile time as raw absolute efficiencies (mu
+        # replaced the default), not as multipliers on the default. We now
+        # store them under a separate `family_multipliers` key so labs can
+        # opt-in to per-family scaling — and the hardware-wide
+        # `efficiency_multipliers` (consumed by the throughput model) does the
+        # uniform calibration on the well-trodden path.
+        fit["family_multipliers"] = _efficiency_table_for_hw(rows, hw)
         fits[hw] = fit
     return fits
+
+
+def _efficiency_table_for_hw(
+    rows: Sequence[Dict[str, Any]],
+    hw: str,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Build per-family per-phase efficiency cells for one hardware target.
+
+    Returns a nested dict matching the throughput model's lookup:
+        {phase: {family: {"overall": {"mu": ..., "sigma": ..., "n": ...}}}}
+    where mu is the calibrated efficiency multiplier and sigma is derived
+    from the scatter of the observed/predicted ratios."""
+    families = sorted({_family(r) for r in rows
+                        if _canonical_hw(_value(r, "hardware"), None) == hw})
+    out: Dict[str, Dict[str, Dict[str, Any]]] = {
+        "training": {}, "prefill": {}, "decode": {}
+    }
+    for fam in families:
+        fam_rows = [r for r in rows
+                     if _canonical_hw(_value(r, "hardware"), None) == hw
+                     and _family(r) == fam]
+        # Map measured (pred, obs) onto each phase. For training and
+        # prefill the metric grows with observation; for decode (TBT) the
+        # ratio is inverted so the multiplier reads as efficiency.
+        for phase, (pred_key, obs_key, invert) in (
+            ("training", ("predicted_training_tps", "observed_training_tps", False)),
+            ("prefill",  ("predicted_prefill_time_ms", "observed_prefill_time_ms", True)),
+            ("decode",   ("predicted_serving_tbt_ms", "observed_serving_tbt_ms", True)),
+        ):
+            pairs = _ratio_pairs(fam_rows, pred_key, obs_key, hardware=hw)
+            if not pairs:
+                continue
+            ratios = [(1.0 / r if invert else r) for r in pairs]
+            mu = _median(ratios)
+            # Sigma ≈ p90_pct/100 / 1.28; p90 is already a two-sided figure
+            # in _ratio_scatter_p90_pct so divide accordingly.
+            p90 = _ratio_scatter_p90_pct(pairs) or 0.0
+            sigma = (p90 / 100.0) / 1.28 if p90 else 0.0
+            out[phase][fam] = {
+                "overall": {
+                    "mu": round(float(mu), 6),
+                    "sigma": round(float(sigma), 6),
+                    "n": len(pairs),
+                }
+            }
+    return out
 
 
 def _fit_one_eval(
@@ -955,6 +1068,41 @@ def _copy_and_calibrate_specs(
                        min_efficiency, max_efficiency),
                 6,
             )
+        # Lab-specific multipliers go into `calibration_efficiency_multipliers`,
+        # NOT `efficiency_multipliers`. The throughput model composes the two
+        # as `base × cal` so the modern-tuned base shipped with each hardware
+        # spec (e.g. H100 BF16 training = 1.8×) survives auto-calibrate, and
+        # the lab fit only carries the *local-cluster delta* (typically near
+        # 1.0 when the base is well-tuned). Previously this block overwrote
+        # the base, silently pushing predictions back into the 2× pessimistic
+        # regime whenever a lab ran the calibrator.
+        mults: Dict[str, float] = {}
+        for phase, multiplier_key in (
+            ("training", "training_efficiency_multiplier"),
+            ("decode", "decode_efficiency_multiplier"),
+            ("prefill", "prefill_efficiency_multiplier"),
+        ):
+            multiplier = fit.get(multiplier_key)
+            if multiplier is None:
+                continue
+            try:
+                m = float(multiplier)
+            except (TypeError, ValueError):
+                continue
+            # Clamp to [0.1, 2.5]; matches the per-layer clamp on each leg
+            # of the composed product (the throughput model caps the
+            # composed value at 3.0 to defend against tiny-sample doubles).
+            mults[phase] = round(max(0.1, min(2.5, m)), 6)
+        if mults:
+            cal["calibration_efficiency_multipliers"] = mults
+        # Per-family multipliers are diagnostic only (not consumed by the
+        # throughput model). The hardware-wide `efficiency_multipliers`
+        # written above is the load-bearing knob; this block preserves the
+        # per-family ratios so a lab can inspect them and, if confident,
+        # promote them by hand into `calibration.efficiency_table`.
+        fam_mults = fit.get("family_multipliers") or {}
+        if fam_mults:
+            cal["family_multipliers"] = fam_mults
         spec["calibration"] = cal
         notes = spec.setdefault("notes", {})
         notes["auto_calibration"] = (
@@ -1130,7 +1278,33 @@ def _fmt_optional(value: Any) -> str:
 
 def fit_command(args: argparse.Namespace) -> int:
     measurements_path = Path(args.measurements)
-    rows = _read_measurements(measurements_path)
+    # Round-2 fix: wrap measurement loading so users get a one-line error
+    # instead of a raw Python stack trace when the file is malformed or
+    # missing. The previous behaviour leaked a json.decoder.JSONDecodeError
+    # stack from deep in _read_measurements and obscured the real cause.
+    if not measurements_path.exists():
+        print(
+            f"ERROR: --measurements file not found: {measurements_path}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        rows = _read_measurements(measurements_path)
+    except json.JSONDecodeError as exc:
+        print(
+            f"ERROR: --measurements file at {measurements_path} is not valid "
+            f"JSON/JSONL: {exc.msg} (line {exc.lineno}, col {exc.colno}). "
+            "See examples/lab_measurements.example.jsonl for the expected schema.",
+            file=sys.stderr,
+        )
+        return 2
+    except ValueError as exc:
+        print(
+            f"ERROR: --measurements file at {measurements_path} could not be "
+            f"parsed: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     target_coverage = float(args.target_coverage)

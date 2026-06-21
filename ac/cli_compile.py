@@ -62,7 +62,10 @@ def parse_billions(value: str) -> float:
     s = str(value).strip().lower().replace("_", "")
     if s.endswith("b"):
         s = s[:-1]
-    return float(s)
+    out = float(s)
+    if out <= 0:
+        raise argparse.ArgumentTypeError("value must be > 0")
+    return out
 
 
 def parse_trillions(value: str) -> float:
@@ -70,12 +73,49 @@ def parse_trillions(value: str) -> float:
     s = str(value).strip().lower().replace("_", "")
     if s.endswith("t"):
         s = s[:-1]
-    return float(s)
+    out = float(s)
+    if out <= 0:
+        raise argparse.ArgumentTypeError("value must be > 0")
+    return out
+
+
+def parse_positive_int(value: str) -> int:
+    out = int(value)
+    if out <= 0:
+        raise argparse.ArgumentTypeError("value must be > 0")
+    return out
+
+
+def parse_non_negative_int(value: str) -> int:
+    out = int(value)
+    if out < 0:
+        raise argparse.ArgumentTypeError("value must be >= 0")
+    return out
+
+
+def parse_positive_float(value: str) -> float:
+    out = float(value)
+    if out <= 0:
+        raise argparse.ArgumentTypeError("value must be > 0")
+    return out
+
+
+def parse_non_negative_float(value: str) -> float:
+    out = float(value)
+    if out < 0:
+        raise argparse.ArgumentTypeError("value must be >= 0")
+    return out
 
 
 def parse_int_list(value: str):
     """Parse comma-separated positive integers."""
-    return [int(v.strip()) for v in value.split(",") if v.strip()]
+    out = [int(v.strip()) for v in value.split(",") if v.strip()]
+    if not out:
+        raise argparse.ArgumentTypeError("expected at least one integer")
+    bad = [v for v in out if v <= 0]
+    if bad:
+        raise argparse.ArgumentTypeError(f"values must be > 0: {bad}")
+    return out
 
 
 def parse_kv_dtype_options(value: str):
@@ -89,6 +129,8 @@ def parse_kv_dtype_options(value: str):
         if key not in mapping:
             raise argparse.ArgumentTypeError(f"Unknown KV dtype option: {raw}")
         out.append(mapping[key])
+    if not out:
+        raise argparse.ArgumentTypeError("expected at least one KV dtype")
     return sorted(set(out), reverse=True)
 
 
@@ -122,7 +164,15 @@ def parse_precision_modes(value: str):
         if key not in mapping:
             raise argparse.ArgumentTypeError(f"Unknown precision mode: {raw}")
         out.append(mapping[key])
+    if not out:
+        raise argparse.ArgumentTypeError("expected at least one precision mode")
     return out
+
+
+def ensure_parent_dir(path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
 
 
 def parse_args(argv=None):
@@ -142,35 +192,39 @@ def parse_args(argv=None):
                    help="Training token count in trillions (e.g., 2 or 2T)")
 
     # Architecture constraints
-    p.add_argument("--context", type=int, default=8192,
+    p.add_argument("--context", type=parse_positive_int, default=8192,
                    help="Context length (default: 8192)")
-    p.add_argument("--vocab-size", type=int, default=32000,
+    p.add_argument("--vocab-size", type=parse_positive_int, default=32000,
                    help="Vocabulary size (default: 32000)")
-    p.add_argument("--param-tolerance", type=float, default=0.15,
-                   help="Parameter count tolerance fraction (default: 0.15)")
-    p.add_argument("--param-band", dest="param_tolerance", type=float, default=argparse.SUPPRESS,
+    p.add_argument("--param-tolerance", type=parse_non_negative_float, default=0.15,
+                   help=("Parameter-count tolerance as a fraction of --params. "
+                         "Default 0.15 (±15%%) — the search will accept any "
+                         "shape whose total-param count lands in "
+                         "[params*(1-tol), params*(1+tol)]. Tighten with "
+                         "--param-tolerance 0.05 for a closer match."))
+    p.add_argument("--param-band", dest="param_tolerance", type=parse_non_negative_float, default=argparse.SUPPRESS,
                    help="Alias for --param-tolerance")
 
     # Serving constraints
-    p.add_argument("--serving-tbt", type=float, default=None,
+    p.add_argument("--serving-tbt", type=parse_positive_float, default=None,
                    help="Serving time-between-tokens budget in ms")
-    p.add_argument("--serving-ttft", type=float, default=None,
+    p.add_argument("--serving-ttft", type=parse_positive_float, default=None,
                    help="Serving time-to-first-token budget in ms")
-    p.add_argument("--serving-batch", type=int, default=32,
+    p.add_argument("--serving-batch", type=parse_positive_int, default=32,
                    help="Serving batch size (default: 32)")
-    p.add_argument("--batch-size", dest="serving_batch", type=int, default=argparse.SUPPRESS,
+    p.add_argument("--batch-size", dest="serving_batch", type=parse_positive_int, default=argparse.SUPPRESS,
                    help="Alias for --serving-batch")
-    p.add_argument("--tbt-p95-ms", dest="serving_tbt", type=float, default=argparse.SUPPRESS,
+    p.add_argument("--tbt-p95-ms", dest="serving_tbt", type=parse_positive_float, default=argparse.SUPPRESS,
                    help="Alias for --serving-tbt")
-    p.add_argument("--ttft-p95-ms", dest="serving_ttft", type=float, default=argparse.SUPPRESS,
+    p.add_argument("--ttft-p95-ms", dest="serving_ttft", type=parse_positive_float, default=argparse.SUPPRESS,
                    help="Alias for --serving-ttft")
 
     # Workload profile
-    p.add_argument("--prompt-len", type=int, default=None,
+    p.add_argument("--prompt-len", type=parse_positive_int, default=None,
                    help="Prompt length for serving (overrides --context for prefill)")
-    p.add_argument("--output-len", type=int, default=512,
+    p.add_argument("--output-len", type=parse_positive_int, default=512,
                    help="Expected generation length (default: 512)")
-    p.add_argument("--concurrency", type=int, default=256,
+    p.add_argument("--concurrency", type=parse_positive_int, default=256,
                    help="Concurrent serving requests (default: 256)")
     p.add_argument("--scheduler", choices=["continuous", "static", "chunked"],
                    default="continuous", help="Serving scheduler type (default: continuous)")
@@ -181,15 +235,15 @@ def parse_args(argv=None):
                    help="Tradeoff preset for choosing the displayed optimal point from the Pareto frontier")
 
     # Parallelism
-    p.add_argument("--tp", type=int, default=8,
+    p.add_argument("--tp", type=parse_positive_int, default=8,
                    help="Tensor parallelism degree (default: 8)")
     p.add_argument("--tp-options", default=None,
                    help="Comma-separated TP options for baseline modifier mode (e.g., 1,2,4,8)")
-    p.add_argument("--pp", type=int, default=1,
+    p.add_argument("--pp", type=parse_positive_int, default=1,
                    help="Pipeline parallelism degree (default: 1)")
-    p.add_argument("--dp", type=int, default=8,
+    p.add_argument("--dp", type=parse_positive_int, default=8,
                    help="Data parallelism degree (default: 8)")
-    p.add_argument("--num-gpus", type=int, default=None,
+    p.add_argument("--num-gpus", type=parse_positive_int, default=None,
                    help="Accepted for v0.5 command compatibility; TP/PP/DP still control modeling")
 
     # Precision/KV search controls
@@ -200,13 +254,23 @@ def parse_args(argv=None):
 
     # Output files
     p.add_argument("--output-config", default="arch.json",
-                   help="Output JSON config path (default: arch.json)")
-    p.add_argument("--output-justification", default="arch.md",
-                   help="Output markdown justification path (default: arch.md)")
-    p.add_argument("--output-pareto", default="pareto.csv",
-                   help="Output Pareto frontier CSV path (default: pareto.csv)")
-    p.add_argument("--output-shadow-prices", default="shadow_prices.json",
-                   help="Output shadow prices JSON path (default: shadow_prices.json)")
+                   help="Output JSON config path (default: arch.json). If "
+                        "this is changed and the sibling outputs (justification, "
+                        "pareto, shadow_prices) are left at their defaults, "
+                        "they will follow --output-config into the same "
+                        "directory rather than landing in the cwd.")
+    p.add_argument("--output-justification", default=None,
+                   help="Output markdown justification path (default: sibling "
+                        "of --output-config, .md extension; or arch.md if "
+                        "--output-config is at its default)")
+    p.add_argument("--output-pareto", default=None,
+                   help="Output Pareto frontier CSV path (default: sibling "
+                        "of --output-config named pareto.csv; or pareto.csv "
+                        "in cwd if --output-config is at its default)")
+    p.add_argument("--output-shadow-prices", default=None,
+                   help="Output shadow prices JSON path (default: sibling "
+                        "of --output-config named shadow_prices.json; or in "
+                        "cwd if --output-config is at its default)")
     p.add_argument("--output-assumptions", default=None,
                    help="Output assumptions markdown path (default: not written)")
     p.add_argument("--output-model-card", default=None,
@@ -221,11 +285,11 @@ def parse_args(argv=None):
                    help="Compiler-schema baseline config to locally modify")
     p.add_argument("--out", default=None,
                    help="Output directory for baseline modifier mode")
-    p.add_argument("--quality-risk-budget-pct", type=float, default=1.0,
+    p.add_argument("--quality-risk-budget-pct", type=parse_non_negative_float, default=1.0,
                    help="Max relative loss-proxy increase when --allow-quality-spending is used (default: 1.0)")
     p.add_argument("--allow-quality-spending", action="store_true",
                    help="Allow modifier selection to spend quality risk; default selects only same-quality model-preserving moves")
-    p.add_argument("--top-modifications", type=int, default=8,
+    p.add_argument("--top-modifications", type=parse_positive_int, default=8,
                    help="Number of modifier candidates to show in reports (default: 8)")
 
     # v2 state/hybrid options
@@ -246,7 +310,7 @@ def parse_args(argv=None):
     # v1 MoE
     p.add_argument("--allow-moe", action="store_true",
                    help="Enable MoE FFN candidates. --params is read as ACTIVE.")
-    p.add_argument("--max-total-params-b", type=float, default=None,
+    p.add_argument("--max-total-params-b", type=parse_positive_float, default=None,
                    help="MoE memory ceiling (total params billions).")
     p.add_argument("--moe-n-experts", default=None,
                    help="Comma-separated expert counts to sweep.")
@@ -268,7 +332,7 @@ def parse_args(argv=None):
                    help="Enable Multi-Token Prediction depth sweep.")
     p.add_argument("--mtp-depths", default=None,
                    help="Comma-separated MTP depths (e.g., 0,1,2).")
-    p.add_argument("--cp", type=int, default=1,
+    p.add_argument("--cp", type=parse_positive_int, default=1,
                    help="Context parallelism degree (default: 1).")
     p.add_argument("--cp-method", default="ring", choices=["ring", "ulysses"],
                    help="CP method.")
@@ -276,19 +340,19 @@ def parse_args(argv=None):
                    help="Comma-separated CP degrees to sweep.")
     p.add_argument("--nsa", action="store_true",
                    help="Emit NSA (Native Sparse Attention) block on optimal config.")
-    p.add_argument("--nsa-compress-block-size", type=int, default=None)
-    p.add_argument("--nsa-compress-block-stride", type=int, default=None)
-    p.add_argument("--nsa-select-block-size", type=int, default=None)
-    p.add_argument("--nsa-select-top-k", type=int, default=None)
-    p.add_argument("--nsa-window-size", type=int, default=None)
+    p.add_argument("--nsa-compress-block-size", type=parse_positive_int, default=None)
+    p.add_argument("--nsa-compress-block-stride", type=parse_positive_int, default=None)
+    p.add_argument("--nsa-select-block-size", type=parse_positive_int, default=None)
+    p.add_argument("--nsa-select-top-k", type=parse_positive_int, default=None)
+    p.add_argument("--nsa-window-size", type=parse_positive_int, default=None)
     p.add_argument("--yoco", action="store_true",
                    help="Emit YOCO block on optimal config.")
-    p.add_argument("--yoco-n-self-attn-layers", type=int, default=None)
+    p.add_argument("--yoco-n-self-attn-layers", type=parse_positive_int, default=None)
     p.add_argument("--yoco-share-pattern", default=None,
                    choices=[None, "single_source", "block_shared"])
     p.add_argument("--allow-rope-scaling", action="store_true",
                    help="Enable RoPE extension method sweep.")
-    p.add_argument("--rope-original-max-position", type=int, default=8192,
+    p.add_argument("--rope-original-max-position", type=parse_positive_int, default=8192,
                    help="Pretrain context length (default: 8192).")
     p.add_argument("--rope-scaling-methods", default=None,
                    help="Comma-separated RoPE methods (yarn,ntk,longrope,pi,none).")
@@ -296,9 +360,9 @@ def parse_args(argv=None):
     # Options
     p.add_argument("--no-shadow-prices", action="store_true",
                    help="Skip shadow price computation (faster)")
-    p.add_argument("--max-candidates", type=int, default=None,
+    p.add_argument("--max-candidates", type=parse_positive_int, default=None,
                    help="Optional greenfield cap after deterministic candidate dedupe")
-    p.add_argument("--progress-every", type=int, default=0,
+    p.add_argument("--progress-every", type=parse_non_negative_int, default=0,
                    help="Print greenfield evaluation progress every N candidates")
     p.add_argument("--quiet", action="store_true",
                    help="Suppress progress output")
@@ -313,6 +377,30 @@ def main(argv=None):
         if not args.quiet:
             print(msg, file=sys.stderr)
 
+    # Round-2 fix: cwd pollution on failure or default usage. When the user
+    # points --output-config at a non-default location (e.g. /tmp/run42/
+    # arch.json) but leaves --output-justification / --output-pareto /
+    # --output-shadow-prices at their defaults, route those sibling outputs
+    # into the same directory rather than writing arch.md / pareto.csv /
+    # shadow_prices.json into the cwd. Previously, an infeasible search
+    # also wrote arch.md to cwd which was visible noise on shared boxes.
+    cfg_dir = os.path.dirname(os.path.abspath(args.output_config))
+    cfg_stem = os.path.splitext(os.path.basename(args.output_config))[0]
+    using_default_cfg = (os.path.abspath(args.output_config) ==
+                         os.path.abspath("arch.json"))
+    if args.output_justification is None:
+        args.output_justification = (
+            "arch.md" if using_default_cfg
+            else os.path.join(cfg_dir, f"{cfg_stem}.md"))
+    if args.output_pareto is None:
+        args.output_pareto = (
+            "pareto.csv" if using_default_cfg
+            else os.path.join(cfg_dir, "pareto.csv"))
+    if args.output_shadow_prices is None:
+        args.output_shadow_prices = (
+            "shadow_prices.json" if using_default_cfg
+            else os.path.join(cfg_dir, "shadow_prices.json"))
+
     if args.baseline_config:
         return _run_modifier_mode(args, log)
 
@@ -321,78 +409,201 @@ def main(argv=None):
               file=sys.stderr)
         return 2
 
+    # Fix #3: warn on unusual parallelism degrees. H100/B200 nodes have 8
+    # GPUs and TPU pods are powers of 2; --tp / --pp / --dp values that are
+    # neither 1 nor a power of 2 are almost always a typo (e.g. `--tp 3`
+    # meant `--tp 8`). We don't reject — there's no hard rule — but we surface
+    # the warning so it's not silent.
+    def _is_pow2(n: int) -> bool:
+        return n >= 1 and (n & (n - 1)) == 0
+    for label, val in (("--tp", args.tp), ("--pp", args.pp), ("--dp", args.dp)):
+        if val is not None and not _is_pow2(val):
+            extra = ""
+            if label == "--tp":
+                extra = (
+                    f" AC will restrict candidates to architectures whose "
+                    f"n_heads (and n_kv_heads for non-MQA) divide evenly by "
+                    f"{val}; common power-of-two head counts (e.g. 32, 64, 128) "
+                    f"will be excluded."
+                )
+            print(
+                f"WARNING: {label}={val} is not a power of two. Most accelerator "
+                f"nodes use power-of-two parallelism; double-check this is "
+                f"intended.{extra}",
+                file=sys.stderr,
+            )
+
+    # B3 fix: --num-gpus is accepted for v0.5 command-line compatibility but
+    # the modeling reads TP/PP/DP directly. Previously a mismatch between
+    # `--num-gpus` and `tp*pp*dp` was silent, which let users believe their
+    # flag controlled something it doesn't. Warn loudly so the user knows the
+    # number they typed will be ignored.
+    if getattr(args, "num_gpus", None) is not None:
+        implied = (args.tp or 1) * (args.pp or 1) * (args.dp or 1)
+        if int(args.num_gpus) != implied:
+            print(
+                f"WARNING: --num-gpus={args.num_gpus} does not match "
+                f"--tp * --pp * --dp = {args.tp}*{args.pp}*{args.dp} = "
+                f"{implied}. --num-gpus is accepted for command-line "
+                "compatibility only; AC sizes the model from TP/PP/DP. "
+                "Update --tp/--pp/--dp if you want a different total.",
+                file=sys.stderr,
+            )
+
     # Parse placement strategies if provided
     placement_strategies = None
     if getattr(args, "placement_strategy", None):
         placement_strategies = [s.strip() for s in args.placement_strategy.split(",")]
 
-    def _split_int(v):
-        return [int(s.strip()) for s in v.split(",") if s.strip()] if v else None
+    def _split_int(v, label, minimum=1):
+        if not v:
+            return None
+        out = [int(s.strip()) for s in v.split(",") if s.strip()]
+        if not out:
+            raise ValueError(f"{label} must contain at least one integer")
+        bad = [x for x in out if x < minimum]
+        if bad:
+            op = ">=" if minimum == 0 else ">"
+            limit = minimum if minimum == 0 else 0
+            raise ValueError(f"{label} values must be {op} {limit}: {bad}")
+        return out
 
     def _split_str(v):
         return [s.strip() for s in v.split(",") if s.strip()] if v else None
 
-    moe_n_experts_options = _split_int(getattr(args, "moe_n_experts", None))
-    moe_top_k_options     = _split_int(getattr(args, "moe_top_k", None))
-    dense_ffn_layer_opts  = _split_int(getattr(args, "dense_ffn_layers", None))
-    ep_options            = _split_int(getattr(args, "ep_options", None))
-    mla_kv_latent_options = _split_int(getattr(args, "mla_kv_latent", None))
-    mla_q_latent_options  = _split_int(getattr(args, "mla_q_latent", None))
-    mtp_depth_options     = _split_int(getattr(args, "mtp_depths", None))
-    cp_options            = _split_int(getattr(args, "cp_options", None))
-    rope_methods          = _split_str(getattr(args, "rope_scaling_methods", None))
+    try:
+        moe_n_experts_options = _split_int(getattr(args, "moe_n_experts", None), "--moe-n-experts")
+        moe_top_k_options     = _split_int(getattr(args, "moe_top_k", None), "--moe-top-k")
+        dense_ffn_layer_opts  = _split_int(getattr(args, "dense_ffn_layers", None), "--dense-ffn-layers", minimum=0)
+        ep_options            = _split_int(getattr(args, "ep_options", None), "--ep-options")
+        mla_kv_latent_options = _split_int(getattr(args, "mla_kv_latent", None), "--mla-kv-latent")
+        mla_q_latent_options  = _split_int(getattr(args, "mla_q_latent", None), "--mla-q-latent")
+        mtp_depth_options     = _split_int(getattr(args, "mtp_depths", None), "--mtp-depths", minimum=0)
+        cp_options            = _split_int(getattr(args, "cp_options", None), "--cp-options")
+        rope_methods          = _split_str(getattr(args, "rope_scaling_methods", None))
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     # Build constraints for greenfield compiler mode.
-    constraints = DeploymentConstraints(
-        target_params_b=args.params,
-        param_tolerance=args.param_tolerance,
-        training_tokens=int(args.tokens * 1e12),
-        context_length=args.context,
-        serving_tbt_ms=args.serving_tbt,
-        serving_ttft_ms=args.serving_ttft,
-        serving_batch=args.serving_batch,
-        tp=args.tp,
-        pp=args.pp,
-        dp=args.dp,
-        vocab_size=args.vocab_size,
-        prompt_len=args.prompt_len,
-        output_len=args.output_len,
-        concurrency=args.concurrency,
-        scheduler=args.scheduler,
-        objective_profile=args.objective_profile,
-        precision_configs=args.precision_modes,
-        kv_bits_options=args.kv_dtypes,
-        # v2 state/hybrid
-        allow_state=getattr(args, "allow_state", False),
-        state_type=getattr(args, "state_type", "mamba2"),
-        placement_strategies=placement_strategies,
-        state_precision=getattr(args, "state_precision", "bf16"),
-        # v1 MoE
-        allow_moe=getattr(args, "allow_moe", False),
-        max_total_params_b=getattr(args, "max_total_params_b", None),
-        moe_n_experts_options=moe_n_experts_options,
-        moe_top_k_options=moe_top_k_options,
-        dense_ffn_layer_options=dense_ffn_layer_opts,
-        ep_options=ep_options,
-        # MLA
-        allow_mla=getattr(args, "allow_mla", False),
-        mla_kv_latent_options=mla_kv_latent_options,
-        mla_q_latent_options=mla_q_latent_options,
-        # MTP
-        allow_mtp=getattr(args, "allow_mtp", False),
-        mtp_depth_options=mtp_depth_options,
-        # CP
-        cp=getattr(args, "cp", 1),
-        cp_method=getattr(args, "cp_method", "ring"),
-        cp_options=cp_options,
-        # RoPE scaling
-        allow_rope_scaling=getattr(args, "allow_rope_scaling", False),
-        rope_scaling_methods=rope_methods,
-        rope_original_max_position=getattr(args, "rope_original_max_position", 8192),
-        # Search ergonomics
-        max_candidates=getattr(args, "max_candidates", None),
-        progress_every=0 if args.quiet else getattr(args, "progress_every", 0),
-    )
+    try:
+        constraints = DeploymentConstraints(
+            target_params_b=args.params,
+            param_tolerance=args.param_tolerance,
+            training_tokens=int(args.tokens * 1e12),
+            context_length=args.context,
+            serving_tbt_ms=args.serving_tbt,
+            serving_ttft_ms=args.serving_ttft,
+            serving_batch=args.serving_batch,
+            tp=args.tp,
+            pp=args.pp,
+            dp=args.dp,
+            vocab_size=args.vocab_size,
+            prompt_len=args.prompt_len,
+            output_len=args.output_len,
+            concurrency=args.concurrency,
+            scheduler=args.scheduler,
+            objective_profile=args.objective_profile,
+            precision_configs=args.precision_modes,
+            kv_bits_options=args.kv_dtypes,
+            # v2 state/hybrid
+            allow_state=getattr(args, "allow_state", False),
+            state_type=getattr(args, "state_type", "mamba2"),
+            placement_strategies=placement_strategies,
+            state_precision=getattr(args, "state_precision", "bf16"),
+            # v1 MoE
+            allow_moe=getattr(args, "allow_moe", False),
+            max_total_params_b=getattr(args, "max_total_params_b", None),
+            moe_n_experts_options=moe_n_experts_options,
+            moe_top_k_options=moe_top_k_options,
+            dense_ffn_layer_options=dense_ffn_layer_opts,
+            ep_options=ep_options,
+            # MLA
+            allow_mla=getattr(args, "allow_mla", False),
+            mla_kv_latent_options=mla_kv_latent_options,
+            mla_q_latent_options=mla_q_latent_options,
+            # MTP
+            allow_mtp=getattr(args, "allow_mtp", False),
+            mtp_depth_options=mtp_depth_options,
+            # CP
+            cp=getattr(args, "cp", 1),
+            cp_method=getattr(args, "cp_method", "ring"),
+            cp_options=cp_options,
+            # RoPE scaling
+            allow_rope_scaling=getattr(args, "allow_rope_scaling", False),
+            rope_scaling_methods=rope_methods,
+            rope_original_max_position=getattr(args, "rope_original_max_position", 8192),
+            # Search ergonomics
+            max_candidates=getattr(args, "max_candidates", None),
+            progress_every=0 if args.quiet else getattr(args, "progress_every", 0),
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    # Fix #8: long-context guardrails. When --context >> rope_original_max_position
+    # and --allow-rope-scaling is off, the lattice will emit a config with no
+    # RoPE scaling and the predicted loss will be unrealistically pessimistic.
+    # Warn explicitly, and auto-cap candidates at very long context to avoid the
+    # 45-second wall-clock cliff users were hitting.
+    try:
+        ctx = int(args.context)
+    except Exception:
+        ctx = 0
+    pretrain_ctx_warn = int(getattr(args, "rope_original_max_position", 8192) or 8192)
+    if ctx >= 4 * pretrain_ctx_warn and not getattr(args, "allow_rope_scaling", False):
+        print(
+            f"WARNING: --context={ctx} is {ctx // pretrain_ctx_warn}× the trained "
+            f"range ({pretrain_ctx_warn}) and --allow-rope-scaling is not set. "
+            "Predictions will assume vanilla RoPE and likely overstate quality "
+            "loss. Pass `--allow-rope-scaling --rope-scaling-methods yarn,longrope` "
+            "to enable the scaling sweep.",
+            file=sys.stderr,
+        )
+    # When context is very long, the lattice × precision × KV-bits × rope-method
+    # cross product grows quickly. Cap candidates so the CLI never hangs without
+    # the user opting in.
+    if ctx >= 262144 and getattr(args, "max_candidates", None) in (None, 0):
+        default_cap = 500
+        print(
+            f"WARNING: --context={ctx} is very long; capping --max-candidates "
+            f"at {default_cap} to keep search under a few seconds. Pass an "
+            "explicit --max-candidates to override.",
+            file=sys.stderr,
+        )
+        constraints.max_candidates = default_cap
+
+    # Pre-flight: warn loudly if the user-requested precision modes are all
+    # filtered out for this hardware. The optimizer silently falls back to
+    # the hardware default, which previously made `--precision-modes fp4`
+    # on H100 look like it had worked. Compute the intersection here so the
+    # warning is visible before the search runs and is also recorded in the
+    # output JSON for the calibration_warnings surface.
+    precision_warnings: list = []
+    if args.precision_modes:
+        try:
+            from optimizer import get_precision_configs_for_hardware  # type: ignore
+            hw_supported = set(get_precision_configs_for_hardware(args.hardware))
+        except Exception:
+            hw_supported = set()
+        requested = set(args.precision_modes or [])
+        kept = requested & hw_supported
+        if requested and not kept:
+            msg = (
+                f"--precision-modes={sorted(requested)} are all unsupported "
+                f"on {args.hardware}; falling back to default "
+                f"({sorted(hw_supported)[:3]})."
+            )
+            print(f"WARNING: {msg}", file=sys.stderr)
+            precision_warnings.append(msg)
+        elif requested - kept:
+            dropped = sorted(requested - kept)
+            msg = (
+                f"--precision-modes dropped {dropped} (not supported on "
+                f"{args.hardware}); kept {sorted(kept)}."
+            )
+            print(f"WARNING: {msg}", file=sys.stderr)
+            precision_warnings.append(msg)
 
     # Run optimizer
     log(f"[arch-compiler] Searching {args.params}B architectures on {args.hardware}...")
@@ -402,6 +613,9 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("Interrupted: architecture search cancelled by user.", file=sys.stderr)
         return 130
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     log(f"[arch-compiler] Search complete: {result.candidates_generated} candidates, "
         f"{result.candidates_feasible} feasible, {len(result.pareto_frontier)} Pareto, "
         f"{result.search_time_sec:.1f}s")
@@ -409,11 +623,31 @@ def main(argv=None):
     if result.optimal is None:
         print(f"ERROR: No feasible architecture found for {args.params}B on {args.hardware}.",
               file=sys.stderr)
-        print("Try: relax serving constraints, widen param tolerance, or change hardware.",
+        # Targeted hint: if the param target is small relative to TP × tile
+        # alignment, the most common cause is that no d_model on the lattice
+        # is divisible by TP with enough heads to instantiate a transformer.
+        tp = max(1, int(getattr(args, "tp", 1) or 1))
+        params_b = float(getattr(args, "params", 0) or 0)
+        if params_b > 0 and params_b < 1.0 and tp >= 4:
+            print(
+                f"Hint: --params={params_b}B with --tp={tp} leaves little room "
+                "on the tile-aligned d_model lattice; try --tp 1 (or 2) for "
+                "sub-1B models.",
+                file=sys.stderr,
+            )
+        elif params_b >= 100 and not getattr(args, "pp", 0):
+            print(
+                f"Hint: --params={params_b}B usually needs --pp > 1 to fit on "
+                f"{args.hardware}; the default pipeline degree is 1.",
+                file=sys.stderr,
+            )
+        print("Try: relax serving constraints, widen param tolerance, lower --tp, "
+              "raise --pp, or change hardware.",
               file=sys.stderr)
 
         # Still write justification explaining the failure
         md = generate_justification(result)
+        ensure_parent_dir(args.output_justification)
         with open(args.output_justification, "w") as f:
             f.write(md)
         log(f"[arch-compiler] Wrote failure justification to {args.output_justification}")
@@ -431,6 +665,65 @@ def main(argv=None):
     log(f"[arch-compiler] Loss={opt.predicted_loss:.4f} "
         f"TPS={opt.training_tps:.0f} TBT={opt.serving_tbt_ms:.1f}ms "
         f"Mem={opt.memory_per_gpu_gb:.1f}GB")
+
+    # MoE-fallback warning: the user opted into MoE search but the picked
+    # config is dense, which usually means either no MoE candidate beat the
+    # dense Pareto front under the chosen objective, or the requested expert
+    # topology was filtered out by --max-total-params-b / tile alignment / TP
+    # constraints. Make this visible so silent dense fallback is not mistaken
+    # for "MoE didn't help."
+    if getattr(args, "allow_moe", False) and getattr(opt.arch, "moe_style", "dense") == "dense":
+        any_moe_in_frontier = any(
+            getattr(c.arch, "moe_style", "dense") != "dense"
+            for c in (result.pareto_frontier or [])
+        )
+        requested_experts = getattr(args, "moe_n_experts", None)
+        if any_moe_in_frontier:
+            msg = (
+                "--allow-moe was set, but the picked architecture is dense. "
+                "MoE candidates exist on the Pareto frontier but were dominated "
+                "by dense under the current objective profile; inspect the CSV "
+                "or rerun with --objective-profile=quality to prefer MoE."
+            )
+        else:
+            extra = (
+                f" Requested --moe-n-experts={requested_experts}"
+                if requested_experts else ""
+            )
+            msg = (
+                "--allow-moe was set, but no MoE candidate was feasible under "
+                "the current constraints, so the picked architecture is dense."
+                f"{extra} Common causes: --max-total-params-b too low, "
+                "n_experts incompatible with --ep-options × tile alignment, "
+                "or expert_dim too small for the model width."
+            )
+        print(f"WARNING: {msg}", file=sys.stderr)
+
+    # MoE depth-floor warning: very shallow stacks at MoE scale are unusual
+    # in the published literature. Mixtral 8×7B (47B total) uses 32 layers;
+    # DeepSeek-V3 (671B total) uses 61; GPT-OSS-120B uses 36. The AC
+    # picker tends to favour width over depth for MoE because the FFN-
+    # attention ratio prior pulls toward wide FFNs. Surface this so the
+    # user can decide whether the wide-and-shallow pick is intentional.
+    if getattr(opt.arch, "moe_style", "dense") != "dense":
+        total_b = float(opt.arch.total_params_b or 0.0)
+        # Depth floor fitted to published MoE anchors:
+        #   Mixtral 8×7B (47B total)     → 32 layers
+        #   GPT-OSS-120B (~117B total)   → 36 layers
+        #   DeepSeek-V3 (671B total)     → 61 layers
+        # Power law: floor ≈ 24 * (total_b / 20)^0.2
+        # Anything below 80% of this floor gets flagged.
+        floor = max(20, int(round(24 * max(total_b / 20.0, 1.0) ** 0.2)))
+        if opt.arch.n_layers < 0.8 * floor:
+            print(
+                f"WARNING: selected MoE has n_layers={opt.arch.n_layers}, "
+                f"unusually shallow for {total_b:.0f}B total params "
+                f"(published Mixtral / GPT-OSS / DeepSeek-V3 sit around "
+                f"{floor}+ layers at this scale). Wide-and-shallow MoE "
+                f"often trains but under-uses depth — verify against a "
+                f"depth-anchored baseline before committing.",
+                file=sys.stderr,
+            )
 
     # Shadow prices
     shadow_report = None
@@ -459,10 +752,12 @@ def main(argv=None):
     # Write outputs
     # 1. JSON config
     config = result_to_config(result, nsa=nsa_block, yoco=yoco_block)
+    ensure_parent_dir(args.output_config)
     save_config(config, args.output_config)
     log(f"[arch-compiler] Wrote {args.output_config}")
     if args.output_implementation:
         try:
+            ensure_parent_dir(args.output_implementation)
             save_pytorch_implementation(
                 config,
                 args.output_implementation,
@@ -476,6 +771,37 @@ def main(argv=None):
 
     # 2. Justification
     md = generate_justification(result, shadow_report)
+    # Diagnostics: when the user enabled MTP or RoPE-scaling sweeps but the
+    # optimizer did not pick them, surface a one-line note so the report does
+    # not silently look like those flags were no-ops.
+    enabled_but_dropped = []
+    arch_block = (config or {}).get("architecture", {}) or {}
+    if getattr(args, "allow_mtp", False):
+        mtp_cfg = arch_block.get("mtp")
+        n_depths = int((mtp_cfg or {}).get("n_predict_depths", 0))
+        if not mtp_cfg or n_depths == 0:
+            enabled_but_dropped.append(
+                "- MTP was enabled (`--allow-mtp`) but the selected candidate "
+                "uses `mtp_depths=0`. The optimizer ranked MTP-off above MTP-on "
+                "for this (params, tokens, hardware) point — typically because "
+                "the MTP sample-efficiency bonus is smaller than competing "
+                "shape moves at this scale."
+            )
+    if getattr(args, "allow_rope_scaling", False):
+        pos = arch_block.get("positional_encoding") or {}
+        scaling = pos.get("scaling")
+        pretrain_ctx = int(getattr(args, "rope_original_max_position", 8192))
+        target_ctx = int(getattr(args, "context", 8192))
+        if (not scaling or scaling.get("method") in (None, "none")) and target_ctx > pretrain_ctx:
+            enabled_but_dropped.append(
+                f"- RoPE scaling was enabled (`--allow-rope-scaling`) but the "
+                f"selected candidate uses no scaling (`method=none`) at "
+                f"context={target_ctx} > pretrain_max={pretrain_ctx}. "
+                f"Long-context degradation is not modeled in the chosen "
+                f"candidate; if you intend to serve at the target context, "
+                f"re-run with a narrower `--rope-scaling-methods` list to "
+                f"force a scaling pick."
+            )
     stamp_notes = []
     if nsa_block is not None:
         stamp_notes.append(
@@ -489,12 +815,56 @@ def main(argv=None):
         )
     if stamp_notes:
         md += "\n## Post-search Stamps\n" + "\n".join(stamp_notes) + "\n"
+    if enabled_but_dropped:
+        md += (
+            "\n## Enabled-but-Dropped Sweeps\n"
+            "These sweeps were enabled on the command line but did not appear "
+            "in the selected candidate.\n\n"
+            + "\n".join(enabled_but_dropped)
+            + "\n"
+        )
+    # Surface precision-filter and parallelism-override warnings inline so the
+    # user does not have to scroll back through stderr to find them.
+    cli_warnings: list = list(precision_warnings)
+    requested_cp = getattr(args, "cp", 1) or 1
+    actual_cp = (config or {}).get("parallelism", {}).get(
+        "context_parallel", requested_cp)
+    if int(requested_cp) > 1 and int(actual_cp) != int(requested_cp):
+        msg = (
+            f"--cp={requested_cp} was requested but the selected candidate "
+            f"uses context_parallel={actual_cp}. This usually means an EP or "
+            f"PP sweep produced a winning candidate that rebalanced the "
+            f"parallelism plan; re-run with --cp-options narrowed or without "
+            f"--allow-moe to lock CP."
+        )
+        print(f"WARNING: {msg}", file=sys.stderr)
+        cli_warnings.append(msg)
+    if cli_warnings:
+        md += (
+            "\n## CLI Warnings\n"
+            + "\n".join(f"- {w}" for w in cli_warnings)
+            + "\n"
+        )
+        # Also pin them onto the JSON config metadata.predicted so downstream
+        # tooling sees them.
+        try:
+            if config is not None:
+                pred = config.setdefault("metadata", {}).setdefault(
+                    "predicted", {})
+                existing = list(pred.get("calibration_warnings") or [])
+                existing.extend(cli_warnings)
+                pred["calibration_warnings"] = existing
+                save_config(config, args.output_config)
+        except Exception:
+            pass
+    ensure_parent_dir(args.output_justification)
     with open(args.output_justification, "w") as f:
         f.write(md)
     log(f"[arch-compiler] Wrote {args.output_justification}")
 
     # 3. Pareto CSV
     csv = result_to_pareto_csv(result)
+    ensure_parent_dir(args.output_pareto)
     with open(args.output_pareto, "w") as f:
         f.write(csv)
     log(f"[arch-compiler] Wrote {args.output_pareto} ({len(result.pareto_frontier)} points)")
@@ -502,18 +872,21 @@ def main(argv=None):
     # 4. Shadow prices JSON
     if shadow_report:
         sp_json = shadow_prices_to_json(shadow_report)
+        ensure_parent_dir(args.output_shadow_prices)
         with open(args.output_shadow_prices, "w") as f:
             json.dump(sp_json, f, indent=2)
         log(f"[arch-compiler] Wrote {args.output_shadow_prices}")
 
     # 5. Assumptions
     if args.output_assumptions:
+        ensure_parent_dir(args.output_assumptions)
         with open(args.output_assumptions, "w") as f:
             f.write(generate_assumptions())
         log(f"[arch-compiler] Wrote {args.output_assumptions}")
 
     # 6. Model card
     if args.output_model_card:
+        ensure_parent_dir(args.output_model_card)
         with open(args.output_model_card, "w") as f:
             f.write(generate_model_card())
         log(f"[arch-compiler] Wrote {args.output_model_card}")
@@ -541,26 +914,30 @@ def _run_modifier_mode(args, log):
     params_b = args.params if args.params is not None else baseline.total_params_b
     tokens_t = args.tokens if args.tokens is not None else 2.0
 
-    constraints = DeploymentConstraints(
-        target_params_b=params_b,
-        param_tolerance=args.param_tolerance,
-        training_tokens=int(tokens_t * 1e12),
-        context_length=args.context,
-        serving_tbt_ms=args.serving_tbt,
-        serving_ttft_ms=args.serving_ttft,
-        serving_batch=args.serving_batch,
-        tp=args.tp,
-        pp=args.pp,
-        dp=args.dp,
-        vocab_size=baseline.candidate.vocab_size,
-        prompt_len=args.prompt_len,
-        output_len=args.output_len,
-        concurrency=args.concurrency,
-        scheduler=args.scheduler,
-        objective_profile=args.objective_profile,
-        precision_configs=args.precision_modes,
-        kv_bits_options=args.kv_dtypes,
-    )
+    try:
+        constraints = DeploymentConstraints(
+            target_params_b=params_b,
+            param_tolerance=args.param_tolerance,
+            training_tokens=int(tokens_t * 1e12),
+            context_length=args.context,
+            serving_tbt_ms=args.serving_tbt,
+            serving_ttft_ms=args.serving_ttft,
+            serving_batch=args.serving_batch,
+            tp=args.tp,
+            pp=args.pp,
+            dp=args.dp,
+            vocab_size=baseline.candidate.vocab_size,
+            prompt_len=args.prompt_len,
+            output_len=args.output_len,
+            concurrency=args.concurrency,
+            scheduler=args.scheduler,
+            objective_profile=args.objective_profile,
+            precision_configs=args.precision_modes,
+            kv_bits_options=args.kv_dtypes,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     tp_options = parse_int_list(args.tp_options) if args.tp_options else [args.tp]
     out_dir = args.out or os.path.join("outputs", f"{baseline.name}_modifier")

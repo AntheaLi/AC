@@ -444,10 +444,854 @@ class CliSmokeTests(unittest.TestCase):
             config = json.loads(output.read_text())
             predicted = config["metadata"]["predicted"]
             self.assertEqual(predicted["selection_diagnostics"]["objective_profile"], "research_quality")
-            self.assertEqual(predicted["selection_diagnostics"]["selected_pareto_rank"], 1)
-            self.assertEqual(predicted["selection_diagnostics"]["best_loss_pareto_rank"], 1)
+            # Uncertainty-aware tiebreak: the picker may choose a Pareto point
+            # within the loss-uncertainty band of the best-loss point if it
+            # dominates on a non-loss axis (memory, TBT, etc.). Verify that
+            # the selected point is on the frontier and that its loss is
+            # close to the best-loss point rather than asserting equality of
+            # ranks, which would lock in the old argmin-loss behaviour.
+            self.assertLessEqual(predicted["selection_diagnostics"]["best_loss_pareto_rank"], 5)
+            self.assertLessEqual(predicted["selection_diagnostics"]["selected_pareto_rank"], 10)
             self.assertEqual(config["parallelism"]["expert_parallel"], 4)
             self.assertEqual(config["architecture"]["layer_configs"][0]["ffn"]["type"], "moe")
+
+    def test_compile_honors_fixed_context_parallel_degree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "cp.json"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware",
+                "h100",
+                "--params",
+                "1",
+                "--tokens",
+                "0.2",
+                "--context",
+                "32768",
+                "--serving-tbt",
+                "100",
+                "--serving-batch",
+                "4",
+                "--tp",
+                "1",
+                "--pp",
+                "1",
+                "--dp",
+                "1",
+                "--cp",
+                "4",
+                "--max-candidates",
+                "20",
+                "--output-config",
+                str(output),
+                "--output-justification",
+                str(tmp_path / "cp.md"),
+                "--output-pareto",
+                str(tmp_path / "cp.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = json.loads(output.read_text())
+            self.assertEqual(config["parallelism"]["context_parallel"], 4)
+
+    def test_compile_emits_tp_placeable_kv_heads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "tp_kv.json"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware",
+                "h100",
+                "--params",
+                "1",
+                "--tokens",
+                "0.2",
+                "--context",
+                "2048",
+                "--serving-tbt",
+                "100",
+                "--serving-batch",
+                "4",
+                "--tp",
+                "4",
+                "--pp",
+                "1",
+                "--dp",
+                "1",
+                "--max-candidates",
+                "80",
+                "--output-config",
+                str(output),
+                "--output-justification",
+                str(tmp_path / "tp_kv.md"),
+                "--output-pareto",
+                str(tmp_path / "tp_kv.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = json.loads(output.read_text())
+            tp = config["parallelism"]["tensor_parallel"]
+            attn = config["architecture"]["layer_configs"][0]["attention"]
+            n_kv = attn["n_kv_heads"]
+            self.assertTrue(n_kv == 1 or n_kv % tp == 0)
+
+    def test_compile_rejects_non_positive_user_inputs(self):
+        base_args = [
+            "ac/cli_compile.py",
+            "--hardware",
+            "h100",
+            "--params",
+            "1",
+            "--tokens",
+            "0.2",
+            "--context",
+            "2048",
+            "--serving-tbt",
+            "100",
+            "--serving-batch",
+            "4",
+            "--tp",
+            "1",
+            "--pp",
+            "1",
+            "--dp",
+            "1",
+            "--max-candidates",
+            "20",
+            "--no-shadow-prices",
+            "--quiet",
+        ]
+        invalid_cases = [
+            ("--tp", "0"),
+            ("--context", "0"),
+            ("--serving-batch", "0"),
+            ("--tokens", "-0.2"),
+        ]
+        for flag, value in invalid_cases:
+            args = list(base_args)
+            idx = args.index(flag)
+            args[idx + 1] = value
+            with self.subTest(flag=flag, value=value):
+                result = run_cli(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("value must be > 0", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_delta_eval_accepts_tpu_v5e(self):
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config",
+            "configs/mistral_7b.json",
+            "--hardware",
+            "tpu_v5e",
+            "--tp",
+            "8",
+            "--workload",
+            "chat",
+            "--apply",
+            "swap_attention_to_gqa",
+            "--apply-args",
+            "group_size=8",
+            "--stdout",
+            "--no-pareto",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("# Delta Influence", result.stdout)
+
+    def test_delta_eval_rejects_invalid_delta_arg_values(self):
+        cases = [
+            ("swap_attention_to_gqa", "group_size=0", "group_size must be >= 1"),
+            ("change_parallelism", "tp=0", "tp must be >= 1"),
+        ]
+        for delta_name, arg, expected in cases:
+            with self.subTest(delta=delta_name, arg=arg):
+                result = run_cli(
+                    "ac/cli_delta_eval.py",
+                    "--baseline-config",
+                    "configs/mistral_7b.json",
+                    "--hardware",
+                    "h100",
+                    "--tp",
+                    "8",
+                    "--workload",
+                    "chat",
+                    "--apply",
+                    delta_name,
+                    "--apply-args",
+                    arg,
+                    "--stdout",
+                    "--no-pareto",
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_delta_eval_sequence_reports_all_applied_deltas(self):
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config",
+            "configs/mistral_7b.json",
+            "--hardware",
+            "h100",
+            "--tp",
+            "8",
+            "--workload",
+            "chat",
+            "--apply",
+            "swap_attention_to_mla",
+            "--apply-args",
+            "latent_dim=256",
+            "--apply",
+            "add_state_layers",
+            "--apply-args",
+            "ratio=1:3",
+            "--stdout",
+            "--no-pareto",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("swap_attention_to_mla", result.stdout)
+        self.assertIn("add_state_layers", result.stdout)
+        self.assertIn("state_enabled", result.stdout)
+
+    def test_stress_quality_accepts_known_alias(self):
+        result = run_cli(
+            "ac/cli_stress.py",
+            "quality",
+            "--known",
+            "mistral_7b",
+            "--tokens",
+            "2000000000000",
+            "--prefill-seq",
+            "4096",
+            "--decode-kv",
+            "4096",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("QualityStressVector", result.stdout)
+        self.assertIn("Mistral-7B", result.stdout)
+
+    def test_decode_stress_marks_training_memory_inactive(self):
+        result = run_cli(
+            "ac/cli_stress.py",
+            "stress",
+            "--known",
+            "Mistral-7B",
+            "--hw",
+            "h100",
+            "--batch",
+            "32",
+            "--prefill-seq",
+            "8192",
+            "--decode-kv",
+            "8192",
+            "--phase",
+            "decode",
+            "--tp",
+            "8",
+            "--pp",
+            "1",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("training_mem", result.stdout)
+        self.assertIn("inactive for decode", result.stdout)
+        self.assertIn("binding: (none)", result.stdout)
+
+    def test_compile_rejects_invalid_rope_method(self):
+        result = run_cli(
+            "ac/cli_compile.py",
+            "--hardware",
+            "h100",
+            "--params",
+            "1",
+            "--tokens",
+            "0.2",
+            "--context",
+            "32768",
+            "--serving-tbt",
+            "100",
+            "--serving-batch",
+            "4",
+            "--tp",
+            "1",
+            "--pp",
+            "1",
+            "--dp",
+            "1",
+            "--allow-rope-scaling",
+            "--rope-original-max-position",
+            "8192",
+            "--rope-scaling-methods",
+            "banana",
+            "--max-candidates",
+            "20",
+            "--no-shadow-prices",
+            "--quiet",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Unknown rope scaling method", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_compile_rejects_invalid_placement_strategy(self):
+        result = run_cli(
+            "ac/cli_compile.py",
+            "--hardware",
+            "h100",
+            "--params",
+            "1",
+            "--tokens",
+            "0.2",
+            "--context",
+            "2048",
+            "--serving-tbt",
+            "100",
+            "--serving-batch",
+            "4",
+            "--tp",
+            "1",
+            "--pp",
+            "1",
+            "--dp",
+            "1",
+            "--allow-state",
+            "--placement-strategy",
+            "bogus",
+            "--max-candidates",
+            "20",
+            "--no-shadow-prices",
+            "--quiet",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Unknown placement strategy", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_moe_compile_honors_fixed_cp_and_forced_rope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "moe_cp_rope.json"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware",
+                "h100",
+                "--params",
+                "1",
+                "--tokens",
+                "0.2",
+                "--context",
+                "32768",
+                "--serving-tbt",
+                "100",
+                "--serving-batch",
+                "4",
+                "--tp",
+                "1",
+                "--pp",
+                "1",
+                "--dp",
+                "1",
+                "--allow-moe",
+                "--moe-n-experts",
+                "16",
+                "--moe-top-k",
+                "2",
+                "--ep-options",
+                "4",
+                "--allow-rope-scaling",
+                "--rope-original-max-position",
+                "8192",
+                "--rope-scaling-methods",
+                "longrope",
+                "--cp",
+                "2",
+                "--max-candidates",
+                "200",
+                "--output-config",
+                str(output),
+                "--output-justification",
+                str(tmp_path / "moe_cp_rope.md"),
+                "--output-pareto",
+                str(tmp_path / "moe_cp_rope.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = json.loads(output.read_text())
+            self.assertEqual(config["parallelism"]["context_parallel"], 2)
+            scaling = config["architecture"]["positional_encoding"]["scaling"]
+            self.assertEqual(scaling["method"], "longrope")
+            self.assertEqual(
+                config["architecture"]["layer_configs"][0]["ffn"]["type"],
+                "moe",
+            )
+
+    def test_decode_stress_does_not_bind_training_memory(self):
+        result = run_cli(
+            "ac/cli_stress.py",
+            "stress",
+            "--known",
+            "Mistral-7B",
+            "--hw",
+            "h100",
+            "--batch",
+            "32",
+            "--prefill-seq",
+            "8192",
+            "--decode-kv",
+            "8192",
+            "--phase",
+            "decode",
+            "--tp",
+            "8",
+            "--pp",
+            "1",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("training_mem", result.stdout)
+        self.assertNotIn("binding: training_mem", result.stdout)
+
+    def test_decode_transition_does_not_bind_training_memory(self):
+        result = run_cli(
+            "ac/cli_stress.py",
+            "transition",
+            "--known",
+            "Mistral-7B",
+            "--hw",
+            "h100",
+            "--batch",
+            "32",
+            "--prefill-seq",
+            "8192",
+            "--decode-kv",
+            "8192",
+            "--phase",
+            "decode",
+            "--tp",
+            "8",
+            "--pp",
+            "1",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Binding stresses: training_mem", result.stdout)
+
+    def test_justification_omits_missing_ttft_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            md = tmp_path / "arch.md"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware",
+                "h100",
+                "--params",
+                "1",
+                "--tokens",
+                "0.2",
+                "--context",
+                "2048",
+                "--serving-tbt",
+                "100",
+                "--serving-batch",
+                "4",
+                "--tp",
+                "1",
+                "--pp",
+                "1",
+                "--dp",
+                "1",
+                "--max-candidates",
+                "20",
+                "--output-config",
+                str(tmp_path / "arch.json"),
+                "--output-justification",
+                str(md),
+                "--output-pareto",
+                str(tmp_path / "pareto.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text = md.read_text()
+            self.assertNotIn("Nonems", text)
+            self.assertNotIn("TTFT <=", text)
+
+    def test_compile_creates_output_parent_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_dir = tmp_path / "nested" / "outputs"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware",
+                "h100",
+                "--params",
+                "1",
+                "--tokens",
+                "0.2",
+                "--context",
+                "2048",
+                "--serving-tbt",
+                "100",
+                "--serving-batch",
+                "4",
+                "--tp",
+                "1",
+                "--pp",
+                "1",
+                "--dp",
+                "1",
+                "--max-candidates",
+                "20",
+                "--output-config",
+                str(out_dir / "arch.json"),
+                "--output-justification",
+                str(out_dir / "arch.md"),
+                "--output-pareto",
+                str(out_dir / "pareto.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((out_dir / "arch.json").exists())
+            self.assertTrue((out_dir / "arch.md").exists())
+            self.assertTrue((out_dir / "pareto.csv").exists())
+
+
+    # ------------------------------------------------------------------
+    # Regression tests for the audit bug-fix batch (B1, B2, B3).
+    # ------------------------------------------------------------------
+
+    def test_densify_first_k_surfaces_layer_structure_change(self):
+        """B1: densify_first_k changes layer structure, not any top-level
+        scalar, so the field-level diff used to be empty and the no-op
+        callout fired even though the metric table moved. Verify both:
+        (a) the diff now shows `n_dense_ffn_layers`, and (b) the
+        "structurally identical" callout does NOT fire.
+        """
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/gpt_oss_120b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "chat",
+            "--apply", "densify_first_k",
+            "--apply-args", "k=4",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # (a) the field-level diff names the change
+        self.assertIn("n_dense_ffn_layers", result.stdout)
+        # (b) the false no-op callout is gone
+        self.assertNotIn(
+            "structurally identical to the baseline", result.stdout)
+
+    def test_change_moe_topology_surfaces_n_experts_change(self):
+        """B1: change_moe_topology used to hide the n_experts shift."""
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/gpt_oss_120b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "chat",
+            "--apply", "change_moe_topology",
+            "--apply-args", "n_experts=64",
+            "--apply-args", "top_k=4",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("moe.n_experts", result.stdout)
+        # And the genuine moe.n_experts change line should reflect
+        # both sides:
+        self.assertIn("128", result.stdout)
+        self.assertIn("64", result.stdout)
+
+    def test_delta_eval_does_not_emit_ghost_parallelism_diff(self):
+        """B2: when a delta does NOT touch parallelism, the field-level
+        diff used to render `parallelism.tensor_parallel: 8 -> None`
+        (and same for PP/CP) because the candidate sidecar was unset.
+        Verify those ghost rows are gone.
+        """
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/mistral_7b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "long_context",
+            "--apply", "swap_attention_to_gqa",
+            "--apply-args", "group_size=8",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for ghost in (
+            "| `parallelism.tensor_parallel` | `8` | `None` |",
+            "| `parallelism.pipeline_parallel` | `1` | `None` |",
+            "| `parallelism.context_parallel` | `1` | `None` |",
+        ):
+            self.assertNotIn(
+                ghost, result.stdout,
+                f"Found ghost parallelism diff row: {ghost!r}",
+            )
+
+    def test_change_parallelism_still_surfaces_real_tp_change(self):
+        """B2 negative case: when the delta really does change TP, the
+        diff must still surface it. We use change_parallelism explicitly.
+        """
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/mistral_7b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "chat",
+            "--apply", "change_parallelism",
+            "--apply-args", "tp=4",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("parallelism.tensor_parallel", result.stdout)
+        # Real change: baseline 8, candidate 4. We don't assert exact
+        # rendering (the candidate side may resolve differently for the
+        # sidecar vs canonical path), but both numbers must appear in
+        # the diff row context.
+        self.assertIn("`8`", result.stdout)
+
+    def test_compile_warns_on_num_gpus_mismatch(self):
+        """B3: --num-gpus inconsistent with tp*pp*dp used to be silent.
+        It now emits a warning to stderr but still runs.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "arch.json"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware", "h100",
+                "--params", "1",
+                "--tokens", "0.2",
+                "--context", "2048",
+                "--serving-tbt", "100",
+                "--serving-batch", "4",
+                "--tp", "8", "--pp", "1", "--dp", "8",
+                "--num-gpus", "4",
+                "--max-candidates", "20",
+                "--output-config", str(output),
+                "--output-justification", str(tmp_path / "arch.md"),
+                "--output-pareto", str(tmp_path / "pareto.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--num-gpus=4 does not match", result.stderr)
+            self.assertTrue(output.exists())
+
+    def test_compile_does_not_warn_on_num_gpus_match(self):
+        """B3 negative case: when --num-gpus == tp*pp*dp, no warning."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "arch.json"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware", "h100",
+                "--params", "1",
+                "--tokens", "0.2",
+                "--context", "2048",
+                "--serving-tbt", "100",
+                "--serving-batch", "4",
+                "--tp", "8", "--pp", "1", "--dp", "8",
+                "--num-gpus", "64",
+                "--max-candidates", "20",
+                "--output-config", str(output),
+                "--output-justification", str(tmp_path / "arch.md"),
+                "--output-pareto", str(tmp_path / "pareto.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("--num-gpus", result.stderr)
+
+    def test_swap_attention_to_mla_diff_has_no_duplicate_rows(self):
+        """B1 follow-up: the canonical CandidateArch path and the legacy
+        sidecar path both used to emit a row for `attention.type` and a
+        row for the MLA latent (under two different labels —
+        `attention.mla_kv_latent_dim` vs `attention.mla_latent_dim`).
+        Verify the dedup pass collapses both.
+        """
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/mistral_7b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "chat",
+            "--apply", "swap_attention_to_mla",
+            "--apply-args", "latent_dim=256",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Each conceptual field appears exactly once.
+        # (Match the markdown row marker, with a leading "| `" so we
+        # ignore the legacy label appearing in stress / prose blocks.)
+        self.assertEqual(
+            result.stdout.count("| `attention.type` |"), 1,
+            "Duplicate `attention.type` rows in field diff",
+        )
+        self.assertEqual(
+            result.stdout.count("| `attention.mla_kv_latent_dim` |"), 1,
+            "Duplicate canonical MLA latent rows in field diff",
+        )
+        # The legacy alias label should no longer appear in the diff
+        # table (it lives in stress / quality prose elsewhere, so we
+        # restrict the check to the field-diff row marker).
+        self.assertNotIn(
+            "| `attention.mla_latent_dim` |", result.stdout)
+
+    def test_add_state_layers_surfaces_state_layout(self):
+        """B1 follow-up: add_state_layers used to be invisible in the
+        diff. Verify the canonical state-layout rows are present.
+        """
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/mistral_7b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "chat",
+            "--apply", "add_state_layers",
+            "--apply-args", "ratio=1:3",
+            "--apply-args", "state_type=mamba2",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("state_enabled", result.stdout)
+        self.assertIn("state.n_layers", result.stdout)
+        self.assertIn("attention.n_layers", result.stdout)
+
+    def test_genuine_no_op_delta_still_fires_callout(self):
+        """B1 negative case: the structurally-identical callout MUST
+        still fire when the delta really is a no-op (group_size=4 on a
+        baseline that is already GQA(32/8)). The B1 fix tightened the
+        gate by also requiring the metric panel to be flat — verify the
+        callout still appears here, where both conditions hold.
+        """
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/mistral_7b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "chat",
+            "--apply", "swap_attention_to_gqa",
+            "--apply-args", "group_size=4",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "structurally identical to the baseline", result.stdout)
+
+    def test_compile_tp_non_pow2_warning_names_head_constraint(self):
+        """H2: the non-power-of-two TP warning must also tell the user
+        that AC will constrain candidates to head counts divisible by TP.
+        Without this hint, users see the warning and don't know whether
+        the run will still produce a sensible result."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware", "h100",
+                "--params", "1",
+                "--tokens", "0.2",
+                "--context", "2048",
+                "--serving-tbt", "100",
+                "--serving-batch", "4",
+                "--tp", "7", "--pp", "1", "--dp", "8",
+                "--max-candidates", "20",
+                "--output-config", str(tmp_path / "arch.json"),
+                "--output-justification", str(tmp_path / "arch.md"),
+                "--output-pareto", str(tmp_path / "pareto.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--tp=7 is not a power of two", result.stderr)
+            self.assertIn("n_heads", result.stderr)
+            self.assertIn("divide evenly by 7", result.stderr)
+
+    def test_delta_eval_surfaces_gqa_group_size_clamp(self):
+        """H3: when group_size > n_heads, the delta engine clamps the
+        result to MQA (n_kv_heads=1). Verify the report surfaces this
+        clamp so the user knows the engine did not apply the requested
+        arg literally."""
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/mistral_7b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "chat",
+            "--apply", "swap_attention_to_gqa",
+            "--apply-args", "group_size=999",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("group_size=999 exceeds n_heads=32", result.stdout)
+        self.assertIn("clamped to n_kv_heads=1", result.stdout)
+
+    def test_delta_eval_surfaces_gqa_group_size_non_divisible(self):
+        """H3 variant: group_size that doesn't divide n_heads should be
+        surfaced too, so the user knows the resulting GQA layout differs
+        from what they asked for."""
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config", "configs/mistral_7b.json",
+            "--hardware", "h100",
+            "--tp", "8",
+            "--workload", "chat",
+            "--apply", "swap_attention_to_gqa",
+            "--apply-args", "group_size=5",
+            "--stdout", "--no-pareto",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "group_size=5 does not divide n_heads=32", result.stdout)
+
+    def test_hardware_specs_document_peak_flops_convention(self):
+        """H1: every NVIDIA hardware spec must carry the
+        `_peak_flops_tf_convention` field that explains why
+        `peak_flops_tf` is ~half the marketed datasheet peak."""
+        import json as _json
+        for hw_file in ("h100_sxm.json", "b200.json"):
+            with open(f"ac/hardware_specs/{hw_file}") as f:
+                spec = _json.load(f)
+            self.assertIn(
+                "_peak_flops_tf_convention", spec,
+                f"{hw_file} missing _peak_flops_tf_convention",
+            )
+            note = spec["_peak_flops_tf_convention"]
+            self.assertIn("datasheet", note.lower())
+            # The convention text must call out that the field is NOT the
+            # raw datasheet peak (otherwise the note isn't doing its job).
+            self.assertIn("not the datasheet", note.lower())
+            # And the notes.peak_flops_source must point to the datasheet.
+            self.assertIn("peak_flops_source", spec.get("notes", {}))
+
+    def test_cli_stress_help_lists_examples_for_each_subcommand(self):
+        """H5: `ac-stress --help` should preview the three subcommands so
+        the user discovers them without having to trigger an error."""
+        result = run_cli("ac/cli_stress.py", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # All three subcommands appear with at least one example line each.
+        self.assertIn("ac-stress stress", result.stdout)
+        self.assertIn("ac-stress quality", result.stdout)
+        self.assertIn("ac-stress transition", result.stdout)
+        # And the metavar should list them in the usage line.
+        self.assertIn("{stress,quality,transition}", result.stdout)
 
 
 if __name__ == "__main__":

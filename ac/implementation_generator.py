@@ -404,7 +404,13 @@ class __CLASS_NAME__(nn.Module):
         self.vocab_size = int(arch["vocab_size"])
         pos = arch.get("positional_encoding") or {}
         self.rope_base = float(pos.get("base", 500000))
-        self.embed_tokens = nn.Embedding(self.vocab_size, self.d_model)
+        # Pick a model-level dtype from the residual dtype of the first layer
+        # config. Embeddings and lm_head must match this so the first matmul in
+        # the first ACBlock does not see a dtype mismatch.
+        first_layer = (arch.get("layer_configs") or [{}])[0] or {}
+        model_dtype = _precision_to_dtype(str(first_layer.get("residual_dtype", "bf16")))
+        self.model_dtype = model_dtype
+        self.embed_tokens = nn.Embedding(self.vocab_size, self.d_model, dtype=model_dtype)
         self.layers = nn.ModuleList([
             ACBlock(
                 self.d_model,
@@ -415,7 +421,7 @@ class __CLASS_NAME__(nn.Module):
             for spec in _expand_layer_specs(arch)
         ])
         self.norm = ACRMSNorm(self.d_model)
-        self.lm_head = nn.Linear(self.d_model, self.vocab_size, bias=False)
+        self.lm_head = nn.Linear(self.d_model, self.vocab_size, bias=False, dtype=model_dtype)
         if bool(arch.get("tied_embeddings", False)):
             self.lm_head.weight = self.embed_tokens.weight
 

@@ -1,6 +1,6 @@
 """densify_first_k — increase n_dense_ffn_layers (DeepSeek-V3 / Qwen3-MoE style)."""
 
-from .base import Transformation, _copy_arch
+from .base import Transformation, _copy_arch, _record_applied
 
 
 class DensifyFirstK(Transformation):
@@ -20,4 +20,5 @@ class DensifyFirstK(Transformation):
             raise ValueError("k must be >= 0")
         out = _copy_arch(arch)
         out.n_dense_ffn_layers = min(k, arch.n_layers - 1)
+        _record_applied(out, self.name)
         return out

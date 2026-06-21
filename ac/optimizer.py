@@ -52,6 +52,13 @@ from sram_derivation import derive_d_state, compute_crossover_seq_len
 # Data classes
 # =============================================================================
 
+VALID_ROPE_SCALING_METHODS = {"none", "pi", "ntk", "yarn", "longrope"}
+VALID_PLACEMENT_STRATEGIES = {
+    "first_periodic_last",
+    "interleaved",
+    "periodic",
+}
+
 @dataclass
 class DeploymentConstraints:
     """User-specified deployment constraints."""
@@ -149,6 +156,18 @@ class DeploymentConstraints:
     progress_every: int = 0                    # stderr update interval; 0 disables
 
     def __post_init__(self):
+        self._validate_positive_inputs()
+        if self.placement_strategies is not None:
+            cleaned = [str(v).strip() for v in self.placement_strategies if str(v).strip()]
+            if not cleaned:
+                raise ValueError("placement_strategies must contain at least one strategy")
+            bad = [v for v in cleaned if v not in VALID_PLACEMENT_STRATEGIES]
+            if bad:
+                raise ValueError(
+                    f"Unknown placement strategy value(s): {bad}. "
+                    f"Supported: {', '.join(sorted(VALID_PLACEMENT_STRATEGIES))}"
+                )
+            self.placement_strategies = cleaned
         if self.precision_configs is None:
             self.precision_configs = ["all_bf16", "ffn_fp8", "all_fp8"]
         if self.kv_bits_options is None:
@@ -161,9 +180,9 @@ class DeploymentConstraints:
         if self.mtp_depth_options is None:
             self.mtp_depth_options = [0, 1] if self.allow_mtp else [0]
         if self.cp_options is None:
-            # CP makes sense at ≥ 32k contexts. For shorter, keep CP=1 only
-            # (matches all existing data / regression).
-            self.cp_options = [self.cp] if self.context_length < 32768 else [1, 2, 4, 8]
+            self.cp_options = [self.cp]
+        elif any(int(v) <= 0 for v in self.cp_options):
+            raise ValueError("cp_options values must be > 0")
         if self.rope_scaling_methods is None:
             # Only sweep extension methods when the workload exceeds the
             # native pretrain context. Otherwise pin to "none".
@@ -171,11 +190,69 @@ class DeploymentConstraints:
                 self.rope_scaling_methods = ["none"]
             else:
                 self.rope_scaling_methods = ["yarn", "ntk", "longrope", "pi"]
+        else:
+            cleaned = [str(v).strip().lower() for v in self.rope_scaling_methods if str(v).strip()]
+            if not cleaned:
+                raise ValueError("rope_scaling_methods must contain at least one method")
+            bad = [v for v in cleaned if v not in VALID_ROPE_SCALING_METHODS]
+            if bad:
+                raise ValueError(
+                    f"Unknown rope scaling method value(s): {bad}. "
+                    f"Supported: {', '.join(sorted(VALID_ROPE_SCALING_METHODS))}"
+                )
+            if not self.allow_rope_scaling and any(v != "none" for v in cleaned):
+                raise ValueError(
+                    "rope_scaling_methods with a non-'none' method require allow_rope_scaling=True"
+                )
+            self.rope_scaling_methods = cleaned
         if self.objective_profile not in OBJECTIVE_PROFILES:
             raise ValueError(
                 f"Unknown objective_profile {self.objective_profile!r}; "
                 f"expected one of {sorted(OBJECTIVE_PROFILES)}"
             )
+
+    def _validate_positive_inputs(self) -> None:
+        checks = {
+            "target_params_b": self.target_params_b,
+            "training_tokens": self.training_tokens,
+            "context_length": self.context_length,
+            "serving_batch": self.serving_batch,
+            "tp": self.tp,
+            "pp": self.pp,
+            "dp": self.dp,
+            "vocab_size": self.vocab_size,
+            "output_len": self.output_len,
+            "concurrency": self.concurrency,
+            "cp": self.cp,
+            "rope_original_max_position": self.rope_original_max_position,
+        }
+        for name, value in checks.items():
+            if value is None or value <= 0:
+                raise ValueError(f"{name} must be > 0")
+        optional_positive = {
+            "serving_tbt_ms": self.serving_tbt_ms,
+            "serving_ttft_ms": self.serving_ttft_ms,
+            "prompt_len": self.prompt_len,
+            "max_total_params_b": self.max_total_params_b,
+            "max_candidates": self.max_candidates,
+        }
+        for name, value in optional_positive.items():
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be > 0")
+        if self.param_tolerance < 0:
+            raise ValueError("param_tolerance must be >= 0")
+        if self.progress_every < 0:
+            raise ValueError("progress_every must be >= 0")
+        for name in ("moe_n_experts_options", "moe_top_k_options",
+                     "ep_options", "mla_kv_latent_options",
+                     "mla_q_latent_options"):
+            values = getattr(self, name)
+            if values is not None and any(int(v) <= 0 for v in values):
+                raise ValueError(f"{name} values must be > 0")
+        for name in ("dense_ffn_layer_options", "mtp_depth_options"):
+            values = getattr(self, name)
+            if values is not None and any(int(v) < 0 for v in values):
+                raise ValueError(f"{name} values must be >= 0")
 
 
 @dataclass
@@ -216,11 +293,16 @@ class CandidateArch:
     # v1-fix MLA: when set, this candidate uses MLA attention. The latent
     # dimensions feed both the throughput model (KV-bandwidth term) and
     # the quality model (small compression-quality penalty).
-    attention_type: str = "full"           # "full" | "mla"
+    attention_type: str = "full"           # "full" | "mla" | "swa"
     mla_kv_latent_dim: int = 0             # c_kv (0 when type=full)
     mla_q_latent_dim: int = 0              # c_q
     mla_rope_head_dim: int = 0             # d_rope
     mla_nope_head_dim: int = 0             # d_nope
+    # v1-fix SWA: when set, KV cache is capped at min(seq_len, window_size)
+    # per token; decode TBT reads the smaller cache; prefill compute is
+    # O(N*W) instead of O(N^2); quality model adds a small residual when
+    # the workload context exceeds the window.
+    swa_window: int = 0                    # 0 = no sliding window (full attention)
     # v1-fix MTP
     mtp_n_predict_depths: int = 0          # 0 = MTP off
     mtp_depth_n_layers: int = 1
@@ -310,6 +392,34 @@ def _candidate_metric(ev: EvaluatedCandidate, key: str) -> float:
     raise KeyError(key)
 
 
+def _aspect_ratio_prior_penalty(ev: EvaluatedCandidate) -> float:
+    """Tiny tiebreaker that nudges toward d_model/n_layers ratios that match
+    published frontier-lab choices.
+
+    Empirical d_model/n_layers from the 14-model reference set spans roughly
+    80–140 (Qwen3-32B ~80, Llama-3-70B ~102, DeepSeek-V3 ~117, Mistral
+    7B/Llama 7-8B ~128, Mistral-Large-123B ~140). Outside that corridor we
+    add a small penalty proportional to log-distance from the band; inside
+    the corridor the penalty is zero. Magnitude is capped so it can only
+    break near-ties on the objective score, never override a real
+    Pareto-dominant pick.
+    """
+    L = max(1, int(ev.arch.n_layers))
+    d = max(1, int(ev.arch.d_model))
+    ratio = d / L
+    lo, hi = 80.0, 160.0
+    if lo <= ratio <= hi:
+        return 0.0
+    import math
+    if ratio < lo:
+        dist = math.log(lo / ratio)
+    else:
+        dist = math.log(ratio / hi)
+    # 0.01 == 1% penalty per natural-log unit outside the corridor; capped
+    # so the tiebreaker remains a tiebreaker (max ~3%).
+    return min(0.03, 0.01 * dist)
+
+
 def _objective_score(
     ev: EvaluatedCandidate,
     pool: List[EvaluatedCandidate],
@@ -332,6 +442,10 @@ def _objective_score(
             continue
         delta = (b - v) / abs(b) if key == "tps" else (v - b) / abs(b)
         score += weight * max(0.0, delta)
+    # Aspect-ratio tiebreaker, calibrated to the 14-model published
+    # frontier-lab reference set. Never large enough to override a real
+    # Pareto move.
+    score += _aspect_ratio_prior_penalty(ev)
     return score
 
 
@@ -432,6 +546,43 @@ def get_precision_configs_for_hardware(hw_name: str) -> List[str]:
         return ["all_bf16"]
 
 
+def _kv_heads_compatible_with_tp(n_kv_heads: int, tp_degree: int) -> bool:
+    """Return whether KV heads have a clear TP placement.
+
+    `n_kv_heads == 1` is the replicated MQA-style case. Otherwise require an
+    even shard across TP ranks so emitted configs do not rely on an unstated
+    uneven KV-head placement policy.
+    """
+    n_kv_heads = int(n_kv_heads)
+    tp_degree = max(1, int(tp_degree))
+    return n_kv_heads == 1 or (n_kv_heads >= tp_degree and n_kv_heads % tp_degree == 0)
+
+
+def _gqa_ratios_for_point(pt: LatticePoint, constraints: DeploymentConstraints) -> List[int]:
+    """Enumerate GQA ratios whose KV-head count is TP-placeable."""
+    ratios = [1]  # MHA
+    for r in [2, 4, 8, 16]:
+        if pt.n_heads % r == 0:
+            n_kv = pt.n_heads // r
+            if _kv_heads_compatible_with_tp(n_kv, constraints.tp):
+                ratios.append(r)
+    if pt.n_heads > 1:
+        ratios.append(pt.n_heads)  # MQA / replicated single KV head
+    return sorted(set(ratios))
+
+
+def _search_option_lists(constraints: DeploymentConstraints) -> Tuple[List[int], List[int], List[str], float]:
+    """Shared MTP/CP/RoPE option lists for every architecture family."""
+    mtp_opts = constraints.mtp_depth_options if constraints.allow_mtp else [0]
+    cp_opts = constraints.cp_options or [constraints.cp]
+    rope_opts = constraints.rope_scaling_methods or ["none"]
+    rope_factor = max(
+        1.0,
+        constraints.context_length / max(1, constraints.rope_original_max_position),
+    )
+    return list(mtp_opts), list(cp_opts), list(rope_opts), float(rope_factor)
+
+
 # =============================================================================
 # Candidate generation
 # =============================================================================
@@ -472,20 +623,10 @@ def generate_candidates(
         prec_configs = hw_prec_configs[:3]  # default to first 3
 
     candidates = []
+    mtp_opts, cp_opts, rope_opts, rope_factor = _search_option_lists(constraints)
 
     for pt in aligned:
-        # Enumerate GQA ratios
-        gqa_ratios = [1]  # MHA
-        for r in [2, 4, 8, 16]:
-            if pt.n_heads % r == 0:
-                n_kv = pt.n_heads // r
-                if n_kv >= 1 and (n_kv >= constraints.tp or n_kv == 1):
-                    gqa_ratios.append(r)
-        # MQA
-        if pt.n_heads > 1:
-            gqa_ratios.append(pt.n_heads)
-
-        gqa_ratios = sorted(set(gqa_ratios))
+        gqa_ratios = _gqa_ratios_for_point(pt, constraints)
 
         for gqa_r in gqa_ratios:
             n_kv_heads = max(1, pt.n_heads // gqa_r)
@@ -518,10 +659,6 @@ def generate_candidates(
                 # v1-fix MTP: when allow_mtp=True the search sweeps depth 0
                 # and 1+ (DeepSeek-V3 reports k=1 dominates the cost/benefit
                 # tradeoff; we cap at 2 by default).
-                mtp_opts = constraints.mtp_depth_options if constraints.allow_mtp else [0]
-                cp_opts = constraints.cp_options or [constraints.cp]
-                rope_opts = constraints.rope_scaling_methods or ["none"]
-                rope_factor = max(1.0, constraints.context_length / max(1, constraints.rope_original_max_position))
                 for prec_name in prec_configs:
                     prec = PRECISION_CONFIGS[prec_name]
                     for kv_bits in constraints.kv_bits_options:
@@ -677,6 +814,7 @@ def generate_moe_candidates(
         prec_configs = hw_prec_configs[:3]
 
     ep_opts = constraints.ep_options or default_ep_options(hw_name)
+    mtp_opts, cp_opts, rope_opts, rope_factor = _search_option_lists(constraints)
 
     # v1-fix Part B: sweep n_dense_ffn_layers. Default is [0] (pure MoE, the
     # original v1-MoE behavior). [0, 1, 2, 3] covers the common dense-prefix
@@ -689,15 +827,7 @@ def generate_moe_candidates(
 
     for pt in aligned:
         # Use the dense lattice's GQA shape sweep (mirrors dense path).
-        gqa_ratios = [1]
-        for r in [2, 4, 8, 16]:
-            if pt.n_heads % r == 0:
-                n_kv = pt.n_heads // r
-                if n_kv >= 1 and (n_kv >= constraints.tp or n_kv == 1):
-                    gqa_ratios.append(r)
-        if pt.n_heads > 1:
-            gqa_ratios.append(pt.n_heads)
-        gqa_ratios = sorted(set(gqa_ratios))
+        gqa_ratios = _gqa_ratios_for_point(pt, constraints)
 
         # MoE options for this lattice point's d_model and ffn_dim baseline.
         moe_opts = compute_moe_options(
@@ -772,62 +902,38 @@ def generate_moe_candidates(
                         for prec_name in prec_configs:
                             prec = PRECISION_CONFIGS[prec_name]
                             for kv_bits in constraints.kv_bits_options:
-                                # Build the canonical MoE FFN dict (matches W1 schema).
-                                shared_block = None
-                                if opt.shared_dim:
-                                    shared_block = {
-                                        "ffn_dim": opt.shared_dim,
-                                        "precision": prec["ffn_precision"],
-                                    }
-                                moe_dict = {
-                                    "type": "moe",
-                                    "n_experts": opt.n_experts,
-                                    "top_k": opt.top_k,
-                                    "expert_dim": opt.expert_dim,
-                                    "shared_expert": shared_block,
-                                    "router": {
-                                        "precision": "bf16",
-                                        "load_balance_loss_coef": 0.01,
-                                        "noise_type": None,
-                                    },
-                                    "capacity_factor": 1.25 if opt.style == "coarse" else 1.0,
-                                    "precision": prec["ffn_precision"],
-                                }
+                                for mtp_k in mtp_opts:
+                                    for cp_d in cp_opts:
+                                        for rope_m in rope_opts:
+                                            # Build the canonical MoE FFN dict (matches W1 schema).
+                                            shared_block = None
+                                            if opt.shared_dim:
+                                                shared_block = {
+                                                    "ffn_dim": opt.shared_dim,
+                                                    "precision": prec["ffn_precision"],
+                                                }
+                                            moe_dict = {
+                                                "type": "moe",
+                                                "n_experts": opt.n_experts,
+                                                "top_k": opt.top_k,
+                                                "expert_dim": opt.expert_dim,
+                                                "shared_expert": shared_block,
+                                                "router": {
+                                                    "precision": "bf16",
+                                                    "load_balance_loss_coef": 0.01,
+                                                    "noise_type": None,
+                                                },
+                                                "capacity_factor": 1.25 if opt.style == "coarse" else 1.0,
+                                                "precision": prec["ffn_precision"],
+                                            }
 
-                                candidates.append(CandidateArch(
-                                    d_model=pt.d_model,
-                                    n_layers=n_layers,
-                                    n_heads=pt.n_heads,
-                                    d_head=pt.d_head,
-                                    n_kv_heads=n_kv_heads,
-                                    ffn_dim=pt.ffn_dim_swiglu,   # baseline retained for memory subtraction
-                                    vocab_size=constraints.vocab_size,
-                                    weight_precision=prec["weight_precision"],
-                                    ffn_precision=prec["ffn_precision"],
-                                    attn_precision=dict(prec["attn_precision"]),
-                                    kv_cache_bits=kv_bits,
-                                    total_params=total_total,
-                                    total_params_b=round(total_total / 1e9, 2),
-                                    moe=moe_dict,
-                                    ep_degree=opt.ep_degree,
-                                    active_params=active_total,
-                                    active_params_b=round(active_total / 1e9, 2),
-                                    moe_style=opt.style,
-                                    n_dense_ffn_layers=n_dense_clamped,
-                                ))
-                                if getattr(constraints, "allow_mla", False):
-                                    for c_kv in constraints.mla_kv_latent_options:
-                                        for c_q in constraints.mla_q_latent_options:
-                                            uncompressed = 2 * pt.n_heads * pt.d_head
-                                            if c_kv >= uncompressed:
-                                                continue
                                             candidates.append(CandidateArch(
                                                 d_model=pt.d_model,
                                                 n_layers=n_layers,
                                                 n_heads=pt.n_heads,
                                                 d_head=pt.d_head,
                                                 n_kv_heads=n_kv_heads,
-                                                ffn_dim=pt.ffn_dim_swiglu,
+                                                ffn_dim=pt.ffn_dim_swiglu,   # baseline retained for memory subtraction
                                                 vocab_size=constraints.vocab_size,
                                                 weight_precision=prec["weight_precision"],
                                                 ffn_precision=prec["ffn_precision"],
@@ -835,18 +941,61 @@ def generate_moe_candidates(
                                                 kv_cache_bits=kv_bits,
                                                 total_params=total_total,
                                                 total_params_b=round(total_total / 1e9, 2),
+                                                mtp_n_predict_depths=int(mtp_k),
+                                                mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
+                                                mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
+                                                cp_degree=int(cp_d),
+                                                cp_method=str(constraints.cp_method),
+                                                rope_scaling_method=str(rope_m),
+                                                rope_scaling_factor=rope_factor if rope_m != "none" else 1.0,
+                                                rope_original_max_position=int(constraints.rope_original_max_position),
                                                 moe=moe_dict,
                                                 ep_degree=opt.ep_degree,
                                                 active_params=active_total,
                                                 active_params_b=round(active_total / 1e9, 2),
                                                 moe_style=opt.style,
                                                 n_dense_ffn_layers=n_dense_clamped,
-                                                attention_type="mla",
-                                                mla_kv_latent_dim=c_kv,
-                                                mla_q_latent_dim=c_q,
-                                                mla_rope_head_dim=constraints.mla_rope_head_dim,
-                                                mla_nope_head_dim=constraints.mla_nope_head_dim,
                                             ))
+                                            if getattr(constraints, "allow_mla", False):
+                                                for c_kv in constraints.mla_kv_latent_options:
+                                                    for c_q in constraints.mla_q_latent_options:
+                                                        uncompressed = 2 * pt.n_heads * pt.d_head
+                                                        if c_kv >= uncompressed:
+                                                            continue
+                                                        candidates.append(CandidateArch(
+                                                            d_model=pt.d_model,
+                                                            n_layers=n_layers,
+                                                            n_heads=pt.n_heads,
+                                                            d_head=pt.d_head,
+                                                            n_kv_heads=n_kv_heads,
+                                                            ffn_dim=pt.ffn_dim_swiglu,
+                                                            vocab_size=constraints.vocab_size,
+                                                            weight_precision=prec["weight_precision"],
+                                                            ffn_precision=prec["ffn_precision"],
+                                                            attn_precision=dict(prec["attn_precision"]),
+                                                            kv_cache_bits=kv_bits,
+                                                            total_params=total_total,
+                                                            total_params_b=round(total_total / 1e9, 2),
+                                                            mtp_n_predict_depths=int(mtp_k),
+                                                            mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
+                                                            mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
+                                                            cp_degree=int(cp_d),
+                                                            cp_method=str(constraints.cp_method),
+                                                            rope_scaling_method=str(rope_m),
+                                                            rope_scaling_factor=rope_factor if rope_m != "none" else 1.0,
+                                                            rope_original_max_position=int(constraints.rope_original_max_position),
+                                                            moe=moe_dict,
+                                                            ep_degree=opt.ep_degree,
+                                                            active_params=active_total,
+                                                            active_params_b=round(active_total / 1e9, 2),
+                                                            moe_style=opt.style,
+                                                            n_dense_ffn_layers=n_dense_clamped,
+                                                            attention_type="mla",
+                                                            mla_kv_latent_dim=c_kv,
+                                                            mla_q_latent_dim=c_q,
+                                                            mla_rope_head_dim=constraints.mla_rope_head_dim,
+                                                            mla_nope_head_dim=constraints.mla_nope_head_dim,
+                                                        ))
 
     return candidates
 
@@ -896,6 +1045,7 @@ def generate_state_candidates(
         prec_configs = hw_prec_configs[:3]
 
     strategies = constraints.placement_strategies or ["first_periodic_last", "interleaved", "periodic"]
+    mtp_opts, cp_opts, rope_opts, rope_factor = _search_option_lists(constraints)
 
     # Get tile-aligned d_state candidates from lattice.
     # Use d_head=64 as the reference (most permissive); hardware with
@@ -917,15 +1067,7 @@ def generate_state_candidates(
 
     for pt in aligned:
         # GQA sweep (same as dense path)
-        gqa_ratios = [1]
-        for r in [2, 4, 8, 16]:
-            if pt.n_heads % r == 0:
-                n_kv = pt.n_heads // r
-                if n_kv >= 1 and (n_kv >= constraints.tp or n_kv == 1):
-                    gqa_ratios.append(r)
-        if pt.n_heads > 1:
-            gqa_ratios.append(pt.n_heads)
-        gqa_ratios = sorted(set(gqa_ratios))
+        gqa_ratios = _gqa_ratios_for_point(pt, constraints)
 
         for gqa_r in gqa_ratios:
             n_kv_heads = max(1, pt.n_heads // gqa_r)
@@ -1038,30 +1180,41 @@ def generate_state_candidates(
                             for prec_name in prec_configs:
                                 prec = PRECISION_CONFIGS[prec_name]
                                 for kv_bits in constraints.kv_bits_options:
-                                    candidates.append(CandidateArch(
-                                        d_model=pt.d_model,
-                                        n_layers=n_layers,
-                                        n_heads=pt.n_heads,
-                                        d_head=pt.d_head,
-                                        n_kv_heads=n_kv_heads,
-                                        ffn_dim=pt.ffn_dim_swiglu,
-                                        vocab_size=constraints.vocab_size,
-                                        weight_precision=prec["weight_precision"],
-                                        ffn_precision=prec["ffn_precision"],
-                                        attn_precision=dict(prec["attn_precision"]),
-                                        kv_cache_bits=kv_bits,
-                                        total_params=total,
-                                        total_params_b=round(total / 1e9, 2),
-                                        # State fields
-                                        state_config=state_cfg,
-                                        layer_type_list=layer_type_list,
-                                        placement_strategy=strategy,
-                                        n_attention_layers=actual_n_attn,
-                                        n_state_layers=actual_n_state,
-                                        hybrid_ratio=hybrid_ratio,
-                                        derived_d_state=d_state,
-                                        crossover_seq_len=L_star,
-                                    ))
+                                    for mtp_k in mtp_opts:
+                                        for cp_d in cp_opts:
+                                            for rope_m in rope_opts:
+                                                candidates.append(CandidateArch(
+                                                    d_model=pt.d_model,
+                                                    n_layers=n_layers,
+                                                    n_heads=pt.n_heads,
+                                                    d_head=pt.d_head,
+                                                    n_kv_heads=n_kv_heads,
+                                                    ffn_dim=pt.ffn_dim_swiglu,
+                                                    vocab_size=constraints.vocab_size,
+                                                    weight_precision=prec["weight_precision"],
+                                                    ffn_precision=prec["ffn_precision"],
+                                                    attn_precision=dict(prec["attn_precision"]),
+                                                    kv_cache_bits=kv_bits,
+                                                    total_params=total,
+                                                    total_params_b=round(total / 1e9, 2),
+                                                    mtp_n_predict_depths=int(mtp_k),
+                                                    mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
+                                                    mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
+                                                    cp_degree=int(cp_d),
+                                                    cp_method=str(constraints.cp_method),
+                                                    rope_scaling_method=str(rope_m),
+                                                    rope_scaling_factor=rope_factor if rope_m != "none" else 1.0,
+                                                    rope_original_max_position=int(constraints.rope_original_max_position),
+                                                    # State fields
+                                                    state_config=state_cfg,
+                                                    layer_type_list=layer_type_list,
+                                                    placement_strategy=strategy,
+                                                    n_attention_layers=actual_n_attn,
+                                                    n_state_layers=actual_n_state,
+                                                    hybrid_ratio=hybrid_ratio,
+                                                    derived_d_state=d_state,
+                                                    crossover_seq_len=L_star,
+                                                ))
 
     return candidates
 
@@ -1122,6 +1275,7 @@ def generate_moe_hybrid_candidates(
 
     ep_opts = constraints.ep_options or default_ep_options(hw_name)
     strategies = constraints.placement_strategies or ["first_periodic_last", "interleaved", "periodic"]
+    mtp_opts, cp_opts, rope_opts, rope_factor = _search_option_lists(constraints)
 
     # State lattice — same downsampling as generate_state_candidates.
     all_d_state = compute_state_lattice(
@@ -1141,15 +1295,7 @@ def generate_moe_hybrid_candidates(
 
     for pt in aligned:
         # GQA sweep
-        gqa_ratios = [1]
-        for r in [2, 4, 8, 16]:
-            if pt.n_heads % r == 0:
-                n_kv = pt.n_heads // r
-                if n_kv >= 1 and (n_kv >= constraints.tp or n_kv == 1):
-                    gqa_ratios.append(r)
-        if pt.n_heads > 1:
-            gqa_ratios.append(pt.n_heads)
-        gqa_ratios = sorted(set(gqa_ratios))
+        gqa_ratios = _gqa_ratios_for_point(pt, constraints)
 
         # MoE options
         moe_opts = compute_moe_options(
@@ -1289,63 +1435,30 @@ def generate_moe_hybrid_candidates(
                                 for prec_name in prec_configs:
                                     prec = PRECISION_CONFIGS[prec_name]
                                     for kv_bits in constraints.kv_bits_options:
-                                        local_shared = None
-                                        if shared_block is not None:
-                                            local_shared = {
-                                                "ffn_dim": shared_block["ffn_dim"],
-                                                "precision": prec["ffn_precision"],
-                                            }
-                                        moe_dict = {
-                                            "type": "moe",
-                                            "n_experts": opt.n_experts,
-                                            "top_k": opt.top_k,
-                                            "expert_dim": opt.expert_dim,
-                                            "shared_expert": local_shared,
-                                            "router": {
-                                                "precision": "bf16",
-                                                "load_balance_loss_coef": 0.01,
-                                                "noise_type": None,
-                                            },
-                                            "capacity_factor": 1.25 if opt.style == "coarse" else 1.0,
-                                            "precision": prec["ffn_precision"],
-                                        }
+                                        for mtp_k in mtp_opts:
+                                            for cp_d in cp_opts:
+                                                for rope_m in rope_opts:
+                                                    local_shared = None
+                                                    if shared_block is not None:
+                                                        local_shared = {
+                                                            "ffn_dim": shared_block["ffn_dim"],
+                                                            "precision": prec["ffn_precision"],
+                                                        }
+                                                    moe_dict = {
+                                                        "type": "moe",
+                                                        "n_experts": opt.n_experts,
+                                                        "top_k": opt.top_k,
+                                                        "expert_dim": opt.expert_dim,
+                                                        "shared_expert": local_shared,
+                                                        "router": {
+                                                            "precision": "bf16",
+                                                            "load_balance_loss_coef": 0.01,
+                                                            "noise_type": None,
+                                                        },
+                                                        "capacity_factor": 1.25 if opt.style == "coarse" else 1.0,
+                                                        "precision": prec["ffn_precision"],
+                                                    }
 
-                                        candidates.append(CandidateArch(
-                                            d_model=pt.d_model,
-                                            n_layers=n_layers,
-                                            n_heads=pt.n_heads,
-                                            d_head=pt.d_head,
-                                            n_kv_heads=n_kv_heads,
-                                            ffn_dim=pt.ffn_dim_swiglu,
-                                            vocab_size=constraints.vocab_size,
-                                            weight_precision=prec["weight_precision"],
-                                            ffn_precision=prec["ffn_precision"],
-                                            attn_precision=dict(prec["attn_precision"]),
-                                            kv_cache_bits=kv_bits,
-                                            total_params=total_total,
-                                            total_params_b=round(total_total / 1e9, 2),
-                                            # MoE
-                                            moe=moe_dict,
-                                            ep_degree=opt.ep_degree,
-                                            active_params=active_total,
-                                            active_params_b=round(active_total / 1e9, 2),
-                                            moe_style=opt.style,
-                                            # State
-                                            state_config=state_cfg,
-                                            layer_type_list=layer_type_list,
-                                            placement_strategy=strategy,
-                                            n_attention_layers=actual_n_attn,
-                                            n_state_layers=actual_n_state,
-                                            hybrid_ratio=hybrid_ratio,
-                                            derived_d_state=d_state,
-                                            crossover_seq_len=L_star,
-                                        ))
-                                        if getattr(constraints, "allow_mla", False):
-                                            for c_kv in constraints.mla_kv_latent_options:
-                                                for c_q in constraints.mla_q_latent_options:
-                                                    uncompressed = 2 * pt.n_heads * pt.d_head
-                                                    if c_kv >= uncompressed:
-                                                        continue
                                                     candidates.append(CandidateArch(
                                                         d_model=pt.d_model,
                                                         n_layers=n_layers,
@@ -1360,11 +1473,21 @@ def generate_moe_hybrid_candidates(
                                                         kv_cache_bits=kv_bits,
                                                         total_params=total_total,
                                                         total_params_b=round(total_total / 1e9, 2),
+                                                        mtp_n_predict_depths=int(mtp_k),
+                                                        mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
+                                                        mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
+                                                        cp_degree=int(cp_d),
+                                                        cp_method=str(constraints.cp_method),
+                                                        rope_scaling_method=str(rope_m),
+                                                        rope_scaling_factor=rope_factor if rope_m != "none" else 1.0,
+                                                        rope_original_max_position=int(constraints.rope_original_max_position),
+                                                        # MoE
                                                         moe=moe_dict,
                                                         ep_degree=opt.ep_degree,
                                                         active_params=active_total,
                                                         active_params_b=round(active_total / 1e9, 2),
                                                         moe_style=opt.style,
+                                                        # State
                                                         state_config=state_cfg,
                                                         layer_type_list=layer_type_list,
                                                         placement_strategy=strategy,
@@ -1373,12 +1496,54 @@ def generate_moe_hybrid_candidates(
                                                         hybrid_ratio=hybrid_ratio,
                                                         derived_d_state=d_state,
                                                         crossover_seq_len=L_star,
-                                                        attention_type="mla",
-                                                        mla_kv_latent_dim=c_kv,
-                                                        mla_q_latent_dim=c_q,
-                                                        mla_rope_head_dim=constraints.mla_rope_head_dim,
-                                                        mla_nope_head_dim=constraints.mla_nope_head_dim,
                                                     ))
+                                                    if getattr(constraints, "allow_mla", False):
+                                                        for c_kv in constraints.mla_kv_latent_options:
+                                                            for c_q in constraints.mla_q_latent_options:
+                                                                uncompressed = 2 * pt.n_heads * pt.d_head
+                                                                if c_kv >= uncompressed:
+                                                                    continue
+                                                                candidates.append(CandidateArch(
+                                                                    d_model=pt.d_model,
+                                                                    n_layers=n_layers,
+                                                                    n_heads=pt.n_heads,
+                                                                    d_head=pt.d_head,
+                                                                    n_kv_heads=n_kv_heads,
+                                                                    ffn_dim=pt.ffn_dim_swiglu,
+                                                                    vocab_size=constraints.vocab_size,
+                                                                    weight_precision=prec["weight_precision"],
+                                                                    ffn_precision=prec["ffn_precision"],
+                                                                    attn_precision=dict(prec["attn_precision"]),
+                                                                    kv_cache_bits=kv_bits,
+                                                                    total_params=total_total,
+                                                                    total_params_b=round(total_total / 1e9, 2),
+                                                                    mtp_n_predict_depths=int(mtp_k),
+                                                                    mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
+                                                                    mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
+                                                                    cp_degree=int(cp_d),
+                                                                    cp_method=str(constraints.cp_method),
+                                                                    rope_scaling_method=str(rope_m),
+                                                                    rope_scaling_factor=rope_factor if rope_m != "none" else 1.0,
+                                                                    rope_original_max_position=int(constraints.rope_original_max_position),
+                                                                    moe=moe_dict,
+                                                                    ep_degree=opt.ep_degree,
+                                                                    active_params=active_total,
+                                                                    active_params_b=round(active_total / 1e9, 2),
+                                                                    moe_style=opt.style,
+                                                                    state_config=state_cfg,
+                                                                    layer_type_list=layer_type_list,
+                                                                    placement_strategy=strategy,
+                                                                    n_attention_layers=actual_n_attn,
+                                                                    n_state_layers=actual_n_state,
+                                                                    hybrid_ratio=hybrid_ratio,
+                                                                    derived_d_state=d_state,
+                                                                    crossover_seq_len=L_star,
+                                                                    attention_type="mla",
+                                                                    mla_kv_latent_dim=c_kv,
+                                                                    mla_q_latent_dim=c_q,
+                                                                    mla_rope_head_dim=constraints.mla_rope_head_dim,
+                                                                    mla_nope_head_dim=constraints.mla_nope_head_dim,
+                                                                ))
 
     return candidates
 
@@ -1428,6 +1593,15 @@ def evaluate_candidate(
         tput_arch.mla_rope_head_dim = cand.mla_rope_head_dim
         tput_arch.mla_nope_head_dim = cand.mla_nope_head_dim
 
+    # v1-fix SWA: wire the sliding window into the throughput model so
+    # both decode KV reads and prefill compute scale with the window
+    # instead of the full sequence length. Without this, swap_attention_to_swa
+    # was effectively a label-only delta on every observable metric.
+    swa_window = int(getattr(cand, "swa_window", 0) or 0)
+    if swa_window > 0:
+        tput_arch.local_window = swa_window
+        tput_arch.attention_type = "swa"
+
     # v1-fix MTP: wire MTP depths so the training compute term picks up the
     # per-depth overhead.
     if cand.mtp_n_predict_depths > 0:
@@ -1438,12 +1612,25 @@ def evaluate_candidate(
         tput_arch.cp_degree = int(cand.cp_degree)
         tput_arch.cp_method = str(cand.cp_method)
 
+    # SWA cap on the throughput call: a sliding-window candidate's decode
+    # reads a windowed KV cache, so decode_kv_len must be capped at the
+    # window. We deliberately do NOT cap prefill_seq_len: prefill compute
+    # is dominated by the FFN term (linear in seq) at short prompts, and
+    # capping seq_len would shrink the FFN cost as well as the attention
+    # cost. The net effect is that SWA's decode wins and KV-cache wins
+    # are booked correctly, while prefill TTFT is left as a conservative
+    # upper bound (real SWA prefill is O(N·W) instead of O(N²); we model
+    # it as O(N²)). Caveat surfaced in the report's topology notes.
+    effective_decode_len = prefill_len
+    if swa_window > 0:
+        effective_decode_len = min(effective_decode_len, swa_window)
+
     tput = throughput_fn(
         tput_arch, hw_name,
         tp_degree=constraints.tp,
         pp_degree=constraints.pp,
         microbatches=constraints.dp,
-        decode_kv_len=prefill_len,
+        decode_kv_len=effective_decode_len,
         prefill_seq_len=prefill_len,
         ep_degree=cand.ep_degree,
         ep_topology=constraints.ep_topology,
@@ -1506,11 +1693,17 @@ def evaluate_candidate(
         n_dense_ffn_layers=cand.n_dense_ffn_layers,
         # v1-fix MLA: thread MLA shape into the quality model so the
         # compression-quality subterm and the KV-bytes feature fire.
-        attention_type=("mla" if cand.attention_type == "mla" else "gqa"),
+        attention_type=(
+            "mla" if cand.attention_type == "mla"
+            else ("swa" if (cand.attention_type == "swa" or swa_window > 0) else "gqa")
+        ),
         mla_latent_dim=(cand.mla_kv_latent_dim if cand.attention_type == "mla" else None),
         mla_q_latent_dim=(cand.mla_q_latent_dim if cand.attention_type == "mla" else None),
         mla_rope_head_dim=(cand.mla_rope_head_dim if cand.attention_type == "mla" else None),
         mla_nope_head_dim=(cand.mla_nope_head_dim if cand.attention_type == "mla" else None),
+        # v1-fix SWA: thread the window so the quality model adds the small
+        # SWA-locality residual when workload_context exceeds the window.
+        local_window=(swa_window if swa_window > 0 else None),
         # v1-fix MTP: quality model's mtp_residual bonus
         mtp_n_predict_depths=int(cand.mtp_n_predict_depths),
         mtp_depth_n_layers=int(cand.mtp_depth_n_layers),
@@ -1827,17 +2020,64 @@ def optimize(
     # 6. Pick the displayed optimum from the Pareto surface using the selected
     # tradeoff preset. This keeps "optimal" aligned with latency/cost profiles
     # instead of always snapping to the lowest loss point.
+    #
+    # Uncertainty-aware tiebreak: bucket predicted_loss to a fraction of the
+    # quality model's own ±%-uncertainty band so that two candidates whose
+    # quality differs by less than the noise floor are *not* split by the
+    # 6th decimal of predicted_loss. Inside a bucket the next keys (prefill,
+    # TBT, memory) decide, which avoids the previous behaviour of picking a
+    # config that was statistically indistinguishable from a much cheaper
+    # neighbour purely because it had the absolute argmin loss.
     optimal = None
     if feasible:
         scoring_pool = pareto if pareto else feasible
+        # k=0.25 means "treat loss as equal within ~quarter of the uncertainty
+        # band". This is conservative: real measurement noise plus optimizer
+        # variance routinely exceed this, so we never trade a meaningful
+        # quality win away.
+        TIEBREAK_K = 0.25
+
+        def _quality_bucket(ev: EvaluatedCandidate) -> int:
+            u = float(getattr(ev.quality, "uncertainty_total", 0.0)) or 0.0
+            # uncertainty_total is a relative %, so the absolute loss noise
+            # floor is u * loss. Fall back to 0.5% of loss if missing.
+            band = max(u, 0.005) * max(ev.predicted_loss, 0.01) * TIEBREAK_K
+            if band <= 0:
+                return 0
+            return int(round(ev.predicted_loss / band))
+
+        # Bucket the objective score itself: when the quality-weighted
+        # objective is dominated by predicted_loss (research_quality profile
+        # gives loss weight ≥ 0.85), two candidates whose loss differs by
+        # less than the noise floor have objective scores that differ by
+        # less than the smallest meaningful step. Bucketing makes the
+        # downstream axes (memory, TBT) the actual decider in that regime.
+        weights = OBJECTIVE_PROFILES[constraints.objective_profile]
+        loss_weight = float(weights.get("loss", 0.0))
+
+        def _score_bucket(ev: EvaluatedCandidate) -> int:
+            score = _objective_score(ev, scoring_pool, constraints.objective_profile)
+            # Bucket size = loss_weight × TIEBREAK_K × uncertainty band on
+            # the loss axis, i.e. the maximum objective-score change that
+            # can come from a within-noise loss difference. Two candidates
+            # whose objective score differs by less than this band are
+            # treated as quality-equivalent.
+            u = float(getattr(ev.quality, "uncertainty_total", 0.0)) or 0.03
+            band = loss_weight * TIEBREAK_K * max(u, 0.01)
+            return int(round(score / band)) if band > 0 else 0
+
         optimal = min(
             scoring_pool,
             key=lambda x: (
-                _objective_score(x, scoring_pool, constraints.objective_profile),
-                x.predicted_loss,
-                x.throughput.prefill_time_ms,
+                _score_bucket(x),
+                _quality_bucket(x),
+                # Within a quality bucket, prefer faster, smaller, and cheaper.
+                x.memory_per_gpu_gb,
                 x.serving_tbt_ms,
+                x.throughput.prefill_time_ms,
                 -x.training_tps,
+                # Final deterministic tiebreaker on raw loss to keep sort stable.
+                x.predicted_loss,
             ),
         )
 
@@ -1914,15 +2154,155 @@ def _loss_interval(ev: EvaluatedCandidate) -> Tuple[float, float]:
     return low, high
 
 
+_FAMILY_AXES = (
+    "d_model", "n_layers", "n_heads", "d_head", "n_kv_heads",
+    "ffn_dim", "ffn_precision", "kv_cache_bits", "attention_type",
+    "moe_style",
+)
+
+
+def _contender_summary(ev: EvaluatedCandidate) -> Dict[str, Any]:
+    """Compact one-row summary of a contending candidate for the family view."""
+    arch = ev.arch
+    active = getattr(arch, "active_params_b", 0.0) or 0.0
+    total = getattr(arch, "total_params_b", 0.0) or 0.0
+    # Dense candidates only populate total_params_b; fall back to it when
+    # active is missing or zero so the table doesn't show 0.0 everywhere.
+    if not active and total:
+        active = total
+    return {
+        "d_model": getattr(arch, "d_model", None),
+        "n_layers": getattr(arch, "n_layers", None),
+        "n_heads": getattr(arch, "n_heads", None),
+        "d_head": getattr(arch, "d_head", None),
+        "n_kv_heads": getattr(arch, "n_kv_heads", None),
+        "ffn_dim": getattr(arch, "ffn_dim", None),
+        "ffn_precision": getattr(arch, "ffn_precision", None),
+        "kv_cache_bits": getattr(arch, "kv_cache_bits", None),
+        "attention_type": getattr(arch, "attention_type",
+                                    getattr(arch, "attn_type", "full")),
+        "moe_style": getattr(arch, "moe_style", "dense"),
+        "active_params_b": active,
+        "predicted_loss": round(float(ev.predicted_loss), 6),
+        "training_tps": int(ev.training_tps),
+        "serving_tbt_ms": round(float(ev.serving_tbt_ms), 2),
+        "memory_per_gpu_gb": round(float(ev.memory_per_gpu_gb), 2),
+    }
+
+
+def _contending_family(
+    opt: EvaluatedCandidate,
+    contenders: List[EvaluatedCandidate],
+    top_n: int = 8,
+    contender_reasons: Optional[Dict[int, str]] = None,
+) -> Dict[str, Any]:
+    """Compute a "statistically-indistinguishable family" view of the
+    contenders: the axes along which they actually vary, plus a top-N row
+    table that lets a pretrain lead see the shape of the indecision.
+    """
+    if not contenders:
+        return {
+            "varying_axes": [],
+            "row_count": 0,
+            "members": [],
+        }
+    opt_row = _contender_summary(opt)
+    rows = []
+    for ev in contenders:
+        r = _contender_summary(ev)
+        if contender_reasons is not None:
+            r["tied_via"] = contender_reasons.get(id(ev), "loss")
+        rows.append(r)
+    varying = []
+    for axis in _FAMILY_AXES:
+        values = {opt_row.get(axis)} | {r.get(axis) for r in rows}
+        if len(values) > 1:
+            varying.append(axis)
+    # Surface the contenders sorted by closeness to the optimum's predicted
+    # loss so the top of the table is the strongest competitor.
+    rows.sort(key=lambda r: abs(float(r["predicted_loss"])
+                                  - float(opt_row["predicted_loss"])))
+    return {
+        "varying_axes": varying,
+        "row_count": len(rows),
+        "members": rows[:top_n],
+        "selected": opt_row,
+    }
+
+
+def _intervals_overlap(a_lo: float, a_hi: float, b_lo: float, b_hi: float) -> bool:
+    """Return True iff two closed intervals overlap."""
+    return a_lo <= b_hi and b_lo <= a_hi
+
+
+def _throughput_intervals(ev: EvaluatedCandidate, k: float = 1.0) -> Dict[str, tuple]:
+    """Return ±k*sigma intervals for each throughput-side metric on a
+    candidate. Pulls the propagated sigmas from the ThroughputResult; falls
+    back to 0-width intervals when sigma isn't available."""
+    t = ev.throughput
+    sig_tps = float(getattr(t, "training_throughput_sigma_tps", 0.0) or 0.0)
+    sig_tbt = float(getattr(t, "decode_time_sigma_ms", 0.0) or 0.0)
+    sig_pre = float(getattr(t, "prefill_time_sigma_ms", 0.0) or 0.0)
+    return {
+        "training_tps": (ev.training_tps - k * sig_tps,
+                          ev.training_tps + k * sig_tps),
+        "serving_tbt_ms": (ev.serving_tbt_ms - k * sig_tbt,
+                            ev.serving_tbt_ms + k * sig_tbt),
+        "prefill_time_ms": (t.prefill_time_ms - k * sig_pre,
+                             t.prefill_time_ms + k * sig_pre),
+    }
+
+
+def _is_throughput_contender(
+    opt: EvaluatedCandidate,
+    ev: EvaluatedCandidate,
+    k: float = 1.0,
+) -> bool:
+    """True when ev is within ±k*sigma of opt on any throughput metric. The
+    interval test only counts as a contender if ev is also not strictly
+    dominated on the other axes (we don't want to call every slower model a
+    'contender'); we approximate that by requiring the candidate to be at
+    least as good as the optimum on at least one throughput axis after the
+    sigma adjustment."""
+    opt_iv = _throughput_intervals(opt, k)
+    ev_iv = _throughput_intervals(ev, k)
+    overlapping = 0
+    at_least_as_good = False
+    for axis, (a_lo, a_hi) in opt_iv.items():
+        b_lo, b_hi = ev_iv[axis]
+        if _intervals_overlap(a_lo, a_hi, b_lo, b_hi):
+            overlapping += 1
+            # "At least as good" depends on axis direction.
+            if axis == "training_tps":
+                if b_hi >= a_lo:
+                    at_least_as_good = True
+            else:
+                if b_lo <= a_hi:
+                    at_least_as_good = True
+    return overlapping > 0 and at_least_as_good
+
+
 def _confidence_envelope(result: OptimizationResult, opt: EvaluatedCandidate) -> Dict[str, Any]:
     opt_low, opt_high = _loss_interval(opt)
     contenders = []
+    contender_reasons = {}  # id(ev) -> "loss" | "throughput" | "both"
     for ev in result.all_evaluated:
         if ev is opt or not ev.meets_constraints:
             continue
         low, high = _loss_interval(ev)
-        if low <= opt_high and ev.predicted_loss <= opt_high:
+        loss_contender = low <= opt_high and ev.predicted_loss <= opt_high
+        # Throughput-side tie: candidate is within ±1σ of opt on any of
+        # {TPS, TBT, prefill}. Lets the contending-family view reflect the
+        # fact that the predicted throughput numbers carry ±20% uncertainty
+        # that the deterministic sort previously ignored.
+        thr_contender = (loss_contender or
+                          ev.predicted_loss <= opt_high * 1.005) and \
+                         _is_throughput_contender(opt, ev, k=1.0)
+        if loss_contender or thr_contender:
             contenders.append((ev, low, high))
+            tag = ("both" if (loss_contender and thr_contender)
+                    else ("loss" if loss_contender else "throughput"))
+            contender_reasons[id(ev)] = tag
     best_other_low = min((low for _, low, _ in contenders), default=None)
     target_coverage = None
     try:
@@ -1934,6 +2314,20 @@ def _confidence_envelope(result: OptimizationResult, opt: EvaluatedCandidate) ->
         )
     except Exception:
         target_coverage = None
+    # Carry a deeper slice into the JSON for downstream tooling (notebooks,
+    # dashboards, downstream calibration); the markdown renderer caps its
+    # own table for readability.
+    family = _contending_family(opt, [ev for ev, _, _ in contenders],
+                                  top_n=32, contender_reasons=contender_reasons)
+    # Throughput-uncertainty fields, exposed so the report renderer can show
+    # the propagated sigmas alongside the point estimates.
+    t = opt.throughput
+    throughput_uncertainty = {
+        "training_tps_sigma": round(float(getattr(t, "training_throughput_sigma_tps", 0.0) or 0.0), 1),
+        "serving_tbt_sigma_ms": round(float(getattr(t, "decode_time_sigma_ms", 0.0) or 0.0), 2),
+        "prefill_time_sigma_ms": round(float(getattr(t, "prefill_time_sigma_ms", 0.0) or 0.0), 2),
+        "efficiency_bucket": getattr(t, "efficiency_bucket", ""),
+    }
     return {
         "loss_low": round(opt_low, 6),
         "loss_high": round(opt_high, 6),
@@ -1941,6 +2335,8 @@ def _confidence_envelope(result: OptimizationResult, opt: EvaluatedCandidate) ->
         "target_coverage": target_coverage,
         "robust_to_loss_uncertainty": not contenders,
         "contending_candidates": len(contenders),
+        "contending_family": family,
+        "throughput_uncertainty": throughput_uncertainty,
         "best_contender_loss_low": (
             round(best_other_low, 6) if best_other_low is not None else None
         ),
@@ -2036,10 +2432,43 @@ def result_to_config(
         "allow_state": result.constraints.allow_state,
     }
 
+    # Fix #2: training throughput is per TP replica (one TP group). The
+    # aggregate across DP × PP replicas is the user-facing cluster number.
+    # Both are emitted so downstream tools and the user can pick the one they
+    # need without re-deriving the unit. The legacy field is kept for back-
+    # compat and aliased to the per-replica value.
+    dp_degree = max(1, int(getattr(result.constraints, "dp", 1) or 1))
+    pp_degree = max(1, int(getattr(result.constraints, "pp", 1) or 1))
+    tp_degree = max(1, int(getattr(result.constraints, "tp", 1) or 1))
+    cp_degree = max(1, int(getattr(c, "cp_degree", 1) or 1))
+    per_replica_tps = round(opt.training_tps)
+    # Aggregate scales linearly with DP. PP pipelines a single replica, so it
+    # doesn't multiply throughput; we still expose pp for the reader.
+    aggregate_tps = round(opt.training_tps * dp_degree)
+    # GPU counts. A "replica" is one TP × PP × CP group; the cluster has DP
+    # such replicas. Per-GPU TPS is the only number that's comparable across
+    # different parallelism layouts — without it, a CP=4 run looks "4×
+    # faster" than CP=1 just because the replica grew 4× in GPUs.
+    gpus_per_replica = tp_degree * pp_degree * cp_degree
+    total_gpus = gpus_per_replica * dp_degree
+    per_gpu_tps = round(opt.training_tps / max(1, gpus_per_replica))
+
     predicted = {
         "quality_rank_score": round(-opt.predicted_loss, 4),
         "predicted_loss": round(opt.predicted_loss, 4),
-        "training_throughput_tokens_per_sec": round(opt.training_tps),
+        # Per-TP-replica throughput. Same value across DP — DP scales the
+        # aggregate, not the per-replica rate. The per-GPU number is the
+        # apples-to-apples comparison across parallelism choices.
+        "training_throughput_tokens_per_sec": per_replica_tps,
+        "training_throughput_tokens_per_sec_per_replica": per_replica_tps,
+        "training_throughput_tokens_per_sec_per_gpu": per_gpu_tps,
+        "aggregate_training_throughput_tokens_per_sec": aggregate_tps,
+        "training_throughput_unit": (
+            f"tokens/sec per TP×PP×CP replica ({tp_degree}×{pp_degree}×{cp_degree}"
+            f" = {gpus_per_replica} GPUs/replica); per-GPU = {per_gpu_tps} tok/s; "
+            f"aggregate over DP={dp_degree} replicas "
+            f"({total_gpus} total GPUs) = {aggregate_tps} tok/s"
+        ),
         "serving_tbt_ms": round(opt.serving_tbt_ms, 1),
         "serving_ttft_ms": round(opt.throughput.prefill_time_ms, 1),
         "prefill_model": {
@@ -2216,7 +2645,38 @@ def result_to_pareto_csv(result: OptimizationResult) -> str:
         "predicted_loss,loss_ci_low,loss_ci_high,uncertainty_total_pct,"
         "training_tps,serving_tbt_ms,serving_ttft_ms,memory_gb,confidence"
     ]
-    for i, ev in enumerate(result.pareto_frontier):
+    # Sort the displayed frontier by the same uncertainty-aware key the
+    # picker uses, so the CSV "rank" column matches the "selected" marker.
+    # Before the tiebreak fix rank-1 was always the argmin-loss point and
+    # the selected marker could land on a higher-ranked row, which looked
+    # like a bug to anyone scanning the CSV. We bucket by 0.25 × the
+    # quality-uncertainty band, exactly mirroring the picker.
+    profile = result.constraints.objective_profile if result.constraints else "balanced"
+    weights = OBJECTIVE_PROFILES.get(profile, {})
+    loss_weight = float(weights.get("loss", 0.0))
+    TIEBREAK_K = 0.25
+
+    def _csv_sort_key(ev):
+        score = (
+            _objective_score(ev, result.pareto_frontier, profile)
+            if result.constraints else 0.0
+        )
+        u = float(getattr(ev.quality, "uncertainty_total", 0.0)) or 0.03
+        score_band = max(loss_weight * TIEBREAK_K * max(u, 0.01), 1e-9)
+        loss_band = max(u, 0.005) * max(ev.predicted_loss, 0.01) * TIEBREAK_K
+        loss_bucket = int(round(ev.predicted_loss / loss_band)) if loss_band > 0 else 0
+        return (
+            int(round(score / score_band)),
+            loss_bucket,
+            ev.memory_per_gpu_gb,
+            ev.serving_tbt_ms,
+            ev.throughput.prefill_time_ms,
+            -ev.training_tps,
+            ev.predicted_loss,
+        )
+
+    sorted_frontier = sorted(result.pareto_frontier, key=_csv_sort_key)
+    for i, ev in enumerate(sorted_frontier):
         c = ev.arch
         if c.moe is not None:
             n_experts = c.moe["n_experts"]

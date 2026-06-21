@@ -11,7 +11,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from stress import StressVector, STRESS_AXES, severity_band, PRESSURED_OR_WORSE
+from stress import (
+    StressVector,
+    STRESS_AXES,
+    active_axes_for_phase,
+    severity_band,
+    PRESSURED_OR_WORSE,
+)
 from quality_stress import QualityStressVector, QUALITY_STRESS_AXES
 
 
@@ -108,7 +114,7 @@ class Transition:
         """
         if not self.baseline_stress or not self.candidate_stress:
             return False
-        for axis in STRESS_AXES:
+        for axis in active_axes_for_phase(self.baseline_stress.phase):
             bv = getattr(self.baseline_stress, axis)
             cv = getattr(self.candidate_stress, axis)
             if severity_band(bv) not in PRESSURED_OR_WORSE \

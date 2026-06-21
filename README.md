@@ -21,6 +21,54 @@ built to automate the process. It can also exist as a thin layer that sits besid
 
 ---
 
+## Read this first: rank, don't predict
+
+AC is a **forward proxy**, not a measurement system. Internally it is:
+
+1. a roofline + tile-efficiency throughput model with one
+   `*_system_efficiency` scalar per phase per hardware target, and
+2. a Hoffmann-style scaling-law spine
+   (`L = E + A/N^α + B/D^β`) plus a stack of additive residuals for
+   architecture shape, precision, MoE, state/hybrid, risk, and data
+   quality.
+
+The default coefficients are documented (and labelled) as priors in
+`ac/quality_defaults.yaml`. The shape-law refit ships with a small dense
+fit set; the MoE / state residuals are calibrated to public ablations,
+not your lab's traces. **As shipped, the absolute loss numbers (and the
+TPS/TBT predictions) will be biased relative to what your stack
+actually produces.**
+
+What AC *is* good for, without calibration:
+
+- **Pareto ranking.** Given identical priors, two candidates'
+  *relative* ordering on the (loss, TBT, memory, TPS) frontier is much
+  more robust than either's absolute number. Use the Pareto CSV.
+- **Binding-axis identification.** The 10-axis stress vector and shadow
+  prices tell you which constraint would actually move quality if
+  loosened. That's a structural answer; it doesn't depend on a tight
+  loss calibration.
+
+What AC needs **before you trust the absolute numerals**:
+
+- Run `ac-auto-calibrate fit --measurements <your_traces>.jsonl` against
+  ≥12 measured runs spanning the architecture families you care about
+  (see the Auto-calibration section for the gates).
+- Pass `AC_QUALITY_DEFAULTS` and `AC_HARDWARE_SPEC_DIR` from the
+  resulting pack into `ac-compile`. The emitted config will then carry
+  a `confidence_envelope` block and `calibration_warnings` will name
+  any gates the pack didn't pass.
+- Keep separate packs per cluster / kernel / datamix / training recipe
+  — one global pack will mask all the interesting variance.
+
+For any decision that depends on absolute loss (e.g. "is 7B at 2T
+better than 13B at 1T at our budget?"), assume an uncalibrated AC will
+mislead you. For comparative decisions ("does adding MLA relieve the
+binding axis without spending >1% loss on a frontier already at TP=8?"),
+AC's structural answer is the value it adds.
+
+---
+
 ## Install
 
 ```bash
@@ -165,6 +213,27 @@ outputs (paths)
   --max-candidates          optional greenfield cap after candidate dedupe
   --progress-every          print evaluation progress every N candidates
   --quiet                   suppress progress logs
+```
+
+#### pareto.csv columns
+
+One row per Pareto-frontier candidate, sorted by the same uncertainty-aware
+tiebreak the picker uses, so `rank=1` always agrees with the row that has
+`selected=True`. Loss columns:
+
+- `predicted_loss` — point estimate from the quality model spine + residuals.
+- `loss_ci_low`, `loss_ci_high` — symmetric uncertainty band around
+  `predicted_loss` (half-width = `uncertainty_total_pct/100 × predicted_loss`).
+  Populated for every row. Two rows whose `[loss_ci_low, loss_ci_high]`
+  intervals overlap are *quality-equivalent within modeled uncertainty*;
+  prefer the one that dominates on the throughput/memory axes.
+- `uncertainty_total_pct` — quality-model total relative uncertainty (%).
+  When `auto-calibrate` runs against your lab traces and writes a
+  `quality_overrides.json` pack, this column is the scaled, post-calibration
+  uncertainty.
+
+Treat the loss column as a *ranking* signal rather than a forecast unless
+you have run `ac-auto-calibrate` against your lab's measurements.
 ```
 
 #### example: MAI-Thinking-1-ish
@@ -347,7 +416,7 @@ rest MoE). See `configs/mistral_7b.json` for the dense reference and
         },
         "normalization": {"type": "rmsnorm", "eps": 1e-5, "precision": "bf16"},
         "residual_dtype": "bf16",
-        "state": null             // or {state_type: gla|kda|..., d_state: ...}
+        "state": null             // or {"type": "mamba2|gla|kda|...", "d_state": 64, "n_heads": 72, "d_head": 64}
       }
     ]
   }
@@ -526,6 +595,15 @@ components.
 | **TPU v5e** | 197 BF16 / — / — | 16 GB | ICI mesh | MXU 128×128 |
 | **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128 |
 | **AWS Trainium 3** | 1 300 / 2 600 / 5 200 (MX) | 192 GB | NeuronLink v4 (2.4 TB/s) | NCv4 + FP4 |
+
+The numbers above are the **vendor datasheet** dense Tensor-Core peaks.
+The `peak_flops_tf` field inside `ac/hardware_specs/*.json` is an *effective*
+per-precision baseline (typically ~50% of the datasheet peak for NVIDIA
+targets, equal to the datasheet for TPU and Trainium) that composes with
+`calibration.efficiency_multipliers` to recover measured production
+throughput. The `_peak_flops_tf_convention` field at the top of each
+NVIDIA spec explains this; the `notes.peak_flops_source` field cites the
+datasheet. If you fork a spec, keep both fields in sync.
 
 #### attention + cache
 

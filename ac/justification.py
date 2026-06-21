@@ -34,18 +34,57 @@ def generate_justification(
                  f"{con.training_tokens/1e12:.1f}T training tokens, "
                  f"{result.hardware.upper()} (TP={con.tp} PP={con.pp} DP={con.dp}), "
                  f"context={con.context_length}.")
-    if con.serving_tbt_ms:
-        lines.append(f"Serving TBT ≤ {con.serving_tbt_ms}ms, "
-                     f"TTFT ≤ {con.serving_ttft_ms}ms, batch={con.serving_batch}.")
+    # Surface the param tolerance band so users can see why active_params_b
+    # may not match --params exactly.
+    tol = float(getattr(con, "param_tolerance", 0.0) or 0.0)
+    if tol > 0:
+        target_b = float(con.target_params_b)
+        lo_b = target_b * (1 - tol)
+        hi_b = target_b * (1 + tol)
+        actual_b = (
+            getattr(opt.arch, "active_params_b", 0.0)
+            or getattr(opt.arch, "total_params_b", 0.0)
+            or target_b
+        )
+        lines.append(
+            f"Parameter tolerance: ±{tol*100:.0f}% "
+            f"(accepts shapes in [{lo_b:.2f}B, {hi_b:.2f}B]; "
+            f"selected: {float(actual_b):.2f}B). "
+            f"Override with `--param-tolerance 0.05` for a tighter match."
+        )
+    budget_parts = []
+    if con.serving_tbt_ms is not None:
+        budget_parts.append(f"TBT <= {con.serving_tbt_ms}ms")
+    if con.serving_ttft_ms is not None:
+        budget_parts.append(f"TTFT <= {con.serving_ttft_ms}ms")
+    if budget_parts:
+        lines.append(f"Serving {', '.join(budget_parts)}, batch={con.serving_batch}.")
     lines.append("")
 
     # Predicted performance
     lines.append("## Predicted Performance\n")
-    lines.append(f"- **Training throughput**: {opt.training_tps:,.0f} tokens/sec")
-    lines.append(f"- **Serving TBT**: {opt.serving_tbt_ms:.1f}ms"
+    sig_tps = float(getattr(opt.throughput, "training_throughput_sigma_tps", 0.0) or 0.0)
+    sig_tbt = float(getattr(opt.throughput, "decode_time_sigma_ms", 0.0) or 0.0)
+    sig_pre = float(getattr(opt.throughput, "prefill_time_sigma_ms", 0.0) or 0.0)
+    tps_suffix = f" (±{sig_tps:,.0f})" if sig_tps > 0 else ""
+    tbt_suffix = f" (±{sig_tbt:.1f}ms)" if sig_tbt > 0 else ""
+    pre_suffix = f" (±{sig_pre:.1f}ms)" if sig_pre > 0 else ""
+    # Fix #2: be explicit about the throughput unit. The base number is
+    # per-TP-replica; the aggregate scales by DP.
+    dp_replicas = max(1, int(getattr(con, "dp", 1) or 1))
+    agg_tps = opt.training_tps * dp_replicas
+    lines.append(
+        f"- **Training throughput (per TP replica, TP={con.tp})**: "
+        f"{opt.training_tps:,.0f} tokens/sec{tps_suffix}"
+    )
+    lines.append(
+        f"- **Aggregate training throughput (× DP={dp_replicas})**: "
+        f"{agg_tps:,.0f} tokens/sec"
+    )
+    lines.append(f"- **Serving TBT**: {opt.serving_tbt_ms:.1f}ms{tbt_suffix}"
                  + (f" ({_pct_under(opt.serving_tbt_ms, con.serving_tbt_ms)} under budget)"
                     if con.serving_tbt_ms else ""))
-    lines.append(f"- **Serving TTFT**: {t.prefill_time_ms:.1f}ms"
+    lines.append(f"- **Serving TTFT**: {t.prefill_time_ms:.1f}ms{pre_suffix}"
                  + (f" ({_pct_under(t.prefill_time_ms, con.serving_ttft_ms)} under budget)"
                     if con.serving_ttft_ms else ""))
     lines.append(f"- **Memory per GPU**: {opt.memory_per_gpu_gb:.1f} GB")
@@ -84,36 +123,67 @@ def generate_justification(
     lines.append("")
 
     # n_layers
+    # For MoE the Chinchilla aspect-ratio prior is over *active* (per-token
+    # compute) params, not total — total includes sparse expert mass that
+    # doesn't scale width/depth optimum the way dense parameters do.
+    is_moe = (getattr(c, "moe_style", "dense") != "dense")
+    aspect_ratio_basis_b = c.active_params_b if is_moe else c.total_params_b
+    basis_label = "active" if is_moe else "total"
     lines.append(f"### n_layers = {c.n_layers}\n")
-    lines.append(f"Chinchilla-derived aspect ratio target for {c.total_params_b}B is "
-                 f"approximately {c.n_layers} layers at d_model={c.d_model}.")
+    lines.append(
+        f"Chinchilla-derived aspect ratio target for {aspect_ratio_basis_b}B "
+        f"{basis_label} parameters is approximately {c.n_layers} layers at "
+        f"d_model={c.d_model}."
+    )
     if con.pp > 1:
         lines.append(f"Divisible by PP={con.pp} for pipeline parallelism.")
     lines.append("")
 
-    # GQA / n_kv_heads
-    gqa_ratio = c.n_heads // c.n_kv_heads if c.n_kv_heads > 0 else 1
-    if c.n_kv_heads == c.n_heads:
-        gqa_label = "MHA"
-    elif c.n_kv_heads == 1:
-        gqa_label = "MQA"
+    # Attention layout (MHA / GQA / MQA / MLA)
+    attn_type = str(getattr(c, "attention_type", "full")).lower()
+    if attn_type == "mla":
+        # Multi-head Latent Attention — n_kv_heads is a shape-bookkeeping
+        # field, NOT a GQA ratio. Surface MLA explicitly so the report does
+        # not silently describe MLA as GQA.
+        c_kv = int(getattr(c, "mla_kv_latent_dim", 0) or 0)
+        c_q = int(getattr(c, "mla_q_latent_dim", 0) or 0)
+        lines.append(f"### Attention: MLA (Multi-head Latent Attention)\n")
+        lines.append(
+            f"DeepSeek-V2/V3-style MLA selected: KV-latent c_kv={c_kv}, "
+            f"Q-latent c_q={c_q}, n_heads={c.n_heads}, d_head={c.d_head}. "
+            f"KV cache stores the c_kv latent (not n_kv_heads × d_head), "
+            f"giving the bulk of the decode-bandwidth relief."
+        )
+        mla_pen = q.penalty_breakdown.get("attention_mla") if hasattr(q, "penalty_breakdown") else None
+        if mla_pen and getattr(mla_pen, "value", 0) != 0:
+            lines.append(
+                f"Coupled MLA quality residual: {mla_pen.value*100:.2f}% "
+                f"(uncertain low-rank attention prior)."
+            )
+        lines.append("")
     else:
-        gqa_label = f"GQA-{gqa_ratio}"
+        gqa_ratio = c.n_heads // c.n_kv_heads if c.n_kv_heads > 0 else 1
+        if c.n_kv_heads == c.n_heads:
+            gqa_label = "MHA"
+        elif c.n_kv_heads == 1:
+            gqa_label = "MQA"
+        else:
+            gqa_label = f"GQA-{gqa_ratio}"
 
-    lines.append(f"### n_kv_heads = {c.n_kv_heads} ({gqa_label})\n")
+        lines.append(f"### n_kv_heads = {c.n_kv_heads} ({gqa_label})\n")
 
-    if c.n_kv_heads == c.n_heads:
-        lines.append("Multi-head attention (MHA) selected. No KV sharing.")
-    else:
-        # Find the GQA penalty
-        gqa_pen = q.penalty_breakdown.get("gqa")
-        gqa_val = gqa_pen.value if gqa_pen else 0
-        lines.append(f"{gqa_label} reduces KV cache by {gqa_ratio}x vs MHA. "
-                     f"Coupled GQA-sharing residual: {gqa_val*100:.2f}% "
-                     f"with uncertainty from KV-head sharing.")
-        if gqa_ratio <= 8 and c.d_model >= 2048:
-            lines.append("GQA-8 at d_model ≥ 2048 is within seed variance per published ablations.")
-    lines.append("")
+        if c.n_kv_heads == c.n_heads:
+            lines.append("Multi-head attention (MHA) selected. No KV sharing.")
+        else:
+            # Find the GQA penalty
+            gqa_pen = q.penalty_breakdown.get("gqa")
+            gqa_val = gqa_pen.value if gqa_pen else 0
+            lines.append(f"{gqa_label} reduces KV cache by {gqa_ratio}x vs MHA. "
+                         f"Coupled GQA-sharing residual: {gqa_val*100:.2f}% "
+                         f"with uncertainty from KV-head sharing.")
+            if gqa_ratio <= 8 and c.d_model >= 2048:
+                lines.append("GQA-8 at d_model ≥ 2048 is within seed variance per published ablations.")
+        lines.append("")
 
     # Weight precision
     lines.append(f"### Weight precision: FFN={c.ffn_precision}, "
@@ -172,6 +242,99 @@ def generate_justification(
     lines.append(f"- Pareto frontier size: {len(result.pareto_frontier)}")
     lines.append(f"- Search time: {result.search_time_sec:.1f}s")
     lines.append("")
+
+    # Contending family — candidates statistically indistinguishable from
+    # the selected one under the quality model's uncertainty band. Surfaces
+    # the *axes* along which they vary so a pretrain lead can see what's
+    # actually being chosen between, instead of treating a single picked
+    # config as deterministic.
+    try:
+        from optimizer import _contending_family, _loss_interval  # type: ignore
+        opt_low, opt_high = _loss_interval(opt)
+        contenders = [ev for ev in result.all_evaluated
+                       if ev is not opt and ev.meets_constraints
+                       and _loss_interval(ev)[0] <= opt_high
+                       and ev.predicted_loss <= opt_high]
+        # Cap the markdown table at 8 rows for readability; the JSON dump
+        # carries up to 32 for programmatic consumers.
+        family = _contending_family(opt, contenders, top_n=8)
+    except Exception:
+        family = {"row_count": 0, "members": [], "varying_axes": []}
+    if family.get("row_count", 0) > 0:
+        lines.append("## Contending Family\n")
+        # Round-2 fix: clarify scope. The markdown family-count counted only
+        # quality-band contenders, while JSON
+        # `metadata.predicted.confidence_envelope.contending_family.row_count`
+        # also includes throughput-band ties (within ±1σ on TPS/TBT/prefill).
+        # Without this note, the two numbers looked inconsistent — they're
+        # not, they're different slices of the same idea, and a reader of
+        # the markdown needed to know which one they were seeing.
+        lines.append(
+            f"The selected configuration is statistically indistinguishable "
+            f"from **{family['row_count']} other feasible candidate(s)** "
+            f"within the *quality* uncertainty band. Treat the \"selected\" "
+            f"pick as one element of this family, not a deterministic answer. "
+            f"(The companion JSON exposes a larger family that also includes "
+            f"candidates within ±1σ on training/serving throughput; see "
+            f"`metadata.predicted.confidence_envelope.contending_family` for "
+            f"that union.)\n"
+        )
+        axes = family.get("varying_axes") or []
+        if axes:
+            lines.append(
+                "**Axes along which the family varies:** "
+                + ", ".join(f"`{a}`" for a in axes)
+                + "\n"
+            )
+        members = family.get("members", [])
+        if members:
+            lines.append(
+                "| pick | d_model | n_layers | n_kv_heads | ffn_prec | "
+                "kv_bits | active_B | pred_loss | TBT (ms) | mem (GB) |"
+            )
+            lines.append(
+                "|---|---:|---:|---:|---|---:|---:|---:|---:|---:|"
+            )
+            sel_row = family.get("selected") or {}
+            sel_key = (sel_row.get("d_model"), sel_row.get("n_layers"),
+                       sel_row.get("n_kv_heads"), sel_row.get("ffn_precision"),
+                       sel_row.get("kv_cache_bits"))
+            # Selected row first
+            lines.append(
+                f"| **selected** | {sel_row.get('d_model')} | "
+                f"{sel_row.get('n_layers')} | {sel_row.get('n_kv_heads')} | "
+                f"{sel_row.get('ffn_precision')} | "
+                f"{sel_row.get('kv_cache_bits')} | "
+                f"{sel_row.get('active_params_b')} | "
+                f"{sel_row.get('predicted_loss')} | "
+                f"{sel_row.get('serving_tbt_ms')} | "
+                f"{sel_row.get('memory_per_gpu_gb')} |"
+            )
+            for r in members:
+                key = (r.get("d_model"), r.get("n_layers"), r.get("n_kv_heads"),
+                       r.get("ffn_precision"), r.get("kv_cache_bits"))
+                if key == sel_key:
+                    continue
+                lines.append(
+                    f"| contender | {r.get('d_model')} | "
+                    f"{r.get('n_layers')} | {r.get('n_kv_heads')} | "
+                    f"{r.get('ffn_precision')} | "
+                    f"{r.get('kv_cache_bits')} | "
+                    f"{r.get('active_params_b')} | "
+                    f"{r.get('predicted_loss')} | "
+                    f"{r.get('serving_tbt_ms')} | "
+                    f"{r.get('memory_per_gpu_gb')} |"
+                )
+            lines.append("")
+    else:
+        lines.append("## Contending Family\n")
+        lines.append(
+            "The selected configuration is robust to the quality model's "
+            "current uncertainty band — no other feasible candidate falls "
+            "inside its loss interval. The selection should be treated as a "
+            "single deterministic pick at this confidence level."
+        )
+        lines.append("")
 
     # Shadow prices
     if shadow_report and shadow_report.prices:

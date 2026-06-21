@@ -7,6 +7,75 @@ from typing import Iterable, List
 from modifier import ModifierRecord, ModifierResult, modifier_score, quality_risk_pct
 
 
+def _modifier_scope_warning(result: ModifierResult) -> List[str]:
+    """Fix #5: announce up front which kinds of moves the modifier *cannot*
+    explore for this baseline. Earlier versions buried this in caveats at the
+    bottom, so users with MoE / MLA / state baselines saw "1 evaluated, 1
+    feasible, 1 Pareto = baseline" without understanding why.
+
+    Reports:
+      - moe         : baseline is MoE; only dense-side local moves can fire.
+      - mla         : baseline uses MLA; head/precision sweeps stay constant.
+      - hybrid_state: baseline has state layers; placement/ratio sweeps are
+                      reserved hooks.
+    """
+    bm = result.baseline_model
+    cand = getattr(bm, "candidate", None) if bm else None
+    if cand is None:
+        return []
+
+    # CandidateArch uses `moe` (not `moe_config`) and surfaces MLA via
+    # `mla_kv_latent_dim > 0` rather than an `attention_type` string.
+    is_moe = (getattr(cand, "moe", None) is not None
+              or getattr(cand, "moe_config", None) is not None
+              or str(getattr(cand, "moe_style", "")).lower() in {"fine", "shared", "first_k_dense"})
+    attn_type = str(getattr(cand, "attention_type", "")).lower()
+    mla_latent = int(getattr(cand, "mla_kv_latent_dim", 0) or 0)
+    is_mla = attn_type == "mla" or mla_latent > 0
+    layer_type_list = getattr(cand, "layer_type_list", None) or []
+    state_cfg = getattr(cand, "state_config", None)
+    is_hybrid = bool(state_cfg) or any(str(t).lower() == "state" for t in layer_type_list)
+
+    if not (is_moe or is_mla or is_hybrid):
+        return []
+
+    flags = []
+    if is_moe:
+        flags.append(
+            "**MoE baseline detected.** The local modifier currently sweeps "
+            "dense-side moves (width / depth / FFN precision / KV bits). It "
+            "does NOT sweep `n_experts`, `top_k`, expert-parallel degree, or "
+            "first-K-dense prefix. Use `ac-delta-eval --apply change_moe_topology` "
+            "or `--apply densify_first_k` to evaluate those."
+        )
+    if is_mla:
+        flags.append(
+            "**MLA baseline detected.** Head-count and KV-bit sweeps that "
+            "would re-allocate the attention shape don't fire on MLA blocks. "
+            "Use `ac-delta-eval --apply swap_attention_to_mla` with a "
+            "different `latent_dim` to compare."
+        )
+    if is_hybrid:
+        flags.append(
+            "**State / hybrid baseline detected.** State ratio, placement "
+            "strategy, and state-block precision are not enumerated by the "
+            "local modifier. Use `ac-delta-eval --apply add_state_layers` for "
+            "ratio sweeps."
+        )
+
+    lines = [
+        "## Modifier Scope",
+        "",
+        "Before reading the results below, note which moves this modifier did "
+        "**not** enumerate for your baseline:",
+        "",
+    ]
+    for flag in flags:
+        lines.append(f"- {flag}")
+    lines.append("")
+    return lines
+
+
 def generate_baseline_delta_report(result: ModifierResult, top_n: int = 8) -> str:
     """Generate baseline_delta.md for modifier mode."""
 
@@ -21,6 +90,13 @@ def generate_baseline_delta_report(result: ModifierResult, top_n: int = 8) -> st
     else:
         lines.append("**Selection mode**: same-quality / model-preserving moves only")
     lines.append("")
+
+    # Fix #5: surface the modifier's limitations at the *top* of the report
+    # before the user starts reading per-candidate tables. The earlier
+    # placement of this caveat (at the bottom of the report) caused users with
+    # MoE/MLA/state baselines to mistake "1 candidate evaluated" for a real
+    # search result.
+    lines.extend(_modifier_scope_warning(result))
 
     lines.append("## Baseline Status\n")
     lines.extend(_metrics_block("Baseline", baseline, baseline))
@@ -226,10 +302,10 @@ def _candidate_table(records: Iterable[ModifierRecord], baseline: ModifierRecord
             f"{rec.change_summary} | "
             f"{rec.risk_label} | "
             f"{quality_risk_pct(rec, baseline):+.3f}% | "
-            f"{_pct_delta_lower_is_better(ev.serving_tbt_ms, baseline.evaluated.serving_tbt_ms):+.1f}% | "
-            f"{_pct_delta(ev.training_tps, baseline.evaluated.training_tps):+.1f}% | "
-            f"{_pct_delta_lower_is_better(ev.memory_per_gpu_gb, baseline.evaluated.memory_per_gpu_gb):+.1f}% | "
-            f"{_pct_delta_lower_is_better(rec.kv_cache_gb, baseline.kv_cache_gb):+.1f}% | "
+            f"{_fmt_pct_lower_is_better(ev.serving_tbt_ms, baseline.evaluated.serving_tbt_ms)} | "
+            f"{_fmt_pct_higher_is_better(ev.training_tps, baseline.evaluated.training_tps)} | "
+            f"{_fmt_pct_lower_is_better(ev.memory_per_gpu_gb, baseline.evaluated.memory_per_gpu_gb)} | "
+            f"{_fmt_pct_lower_is_better(rec.kv_cache_gb, baseline.kv_cache_gb)} | "
             f"{_reason_for_record(rec)} |"
         )
     return lines
@@ -346,3 +422,32 @@ def _pct_delta_lower_is_better(new: float, old: float) -> float:
     if old == 0:
         return 0.0
     return (old - new) / old * 100
+
+
+def _fmt_pct_lower_is_better(new: float, old: float) -> str:
+    """Like _pct_delta_lower_is_better but renders very large worsenings as a
+    multiplicative ratio (`3.0× larger`) instead of `-200.0%`, which readers
+    routinely misinterpret as "the metric got 2× smaller".
+    """
+    if old == 0:
+        return "+0.0%"
+    pct = (old - new) / old * 100
+    # Only switch to ratio form when the metric got dramatically worse and the
+    # percentage would otherwise read as a misleading negative > 100%.
+    if pct < -100 and new > 0 and old > 0:
+        ratio = new / old
+        return f"{ratio:.2g}× larger"
+    return f"{pct:+.1f}%"
+
+
+def _fmt_pct_higher_is_better(new: float, old: float) -> str:
+    """As above but for metrics where 'higher is better' (e.g., training TPS).
+    Renders giant improvements as a ratio (`5.4× higher`) instead of `+440%`.
+    """
+    if old == 0:
+        return "+0.0%"
+    pct = (new - old) / old * 100
+    if pct > 200 and new > 0 and old > 0:
+        ratio = new / old
+        return f"{ratio:.2g}× higher"
+    return f"{pct:+.1f}%"

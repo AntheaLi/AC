@@ -8,6 +8,7 @@
   "hbm_capacity_gb": 80,
   "hbm_bandwidth_tb_s": 3.35,
 
+  "_peak_flops_tf_convention": "The values below are the EFFECTIVE per-precision compute baseline used by AC's roofline model, NOT the datasheet peak. They are deliberately set to ~50% of NVIDIA's marketed dense-Tensor-Core peak so that, after the `efficiency_multipliers` block and the per-family efficiency table in throughput_model._DEFAULT_EFFICIENCY_TABLE compose, end-to-end TPS / TBT predictions match published NeMo, Megatron-LM, and vLLM traces on H100. See `notes.peak_flops_source` for datasheet numbers. Override via ac-auto-calibrate when lab traces are available.",
   "peak_flops_tf": {
     "bf16": 495,
     "tf32": 495,
@@ -51,11 +52,18 @@
     "optimizer_bytes_per_param": 12,
     "training_system_efficiency": 0.37,
     "decode_system_efficiency": 0.42,
-    "prefill_system_efficiency": 0.60
+    "prefill_system_efficiency": 0.60,
+    "efficiency_multipliers": {
+      "training": 1.8,
+      "prefill": 1.4,
+      "decode": 1.0
+    }
   },
 
   "notes": {
+    "peak_flops_source": "NVIDIA H100 SXM5 datasheet (dense, no 2:4 sparsity). BF16 Tensor Core = 989 TFLOPS; TF32 Tensor Core = 494.7 TFLOPS; FP8 Tensor Core = 1979 TFLOPS. The `peak_flops_tf` field above is intentionally ~half of these (see `_peak_flops_tf_convention`). https://nvidia.com/en-us/data-center/h100/",
     "fused_efficiency_source": "FlashAttention-2/3 benchmarks on H100, typical 0.75-0.85 range, using 0.80 midpoint",
-    "hbm_bw_source": "NVIDIA H100 SXM datasheet, 3.35 TB/s HBM3"
+    "hbm_bw_source": "NVIDIA H100 SXM datasheet, 3.35 TB/s HBM3",
+    "efficiency_multipliers_source": "Calibrated to NeMo / Megatron-LM Llama-3-70B BF16 published throughput (~1500-1800 tok/s/GPU at TP=8, batch>=64) and to published vLLM decode TBT for 7B/70B chat. Multipliers compensate for the per-layer compute model being ~1.5-2x more conservative than peak FLOPs roofline — labs with measured numbers should override via ac-auto-calibrate."
   }
 }

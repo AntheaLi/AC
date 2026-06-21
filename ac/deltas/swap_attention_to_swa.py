@@ -6,7 +6,12 @@ override the decode KV length via a sidecar attribute; the stress reporter
 reads it when computing kv_footprint and hbm_bw_decode.
 """
 
-from .base import Transformation, _copy_arch
+from .base import (
+    Transformation,
+    _copy_arch,
+    _record_applied,
+    _attention_already_swapped,
+)
 
 
 class SwapAttentionToSWA(Transformation):
@@ -18,6 +23,13 @@ class SwapAttentionToSWA(Transformation):
     }
 
     def precondition(self, arch):
+        prior = _attention_already_swapped(arch)
+        if prior is not None and prior != self.name:
+            return False, (
+                f"attention block was already swapped by '{prior}'; "
+                f"chaining {self.name} on top would silently overwrite it. "
+                "Apply attention swaps to a fresh baseline or pick one swap."
+            )
         return True, ""
 
     def apply(self, arch, window_size: int = 4096):
@@ -27,7 +39,13 @@ class SwapAttentionToSWA(Transformation):
         # Cap the seq_len used for KV bookkeeping. If the workload's
         # decode_kv_len is smaller than the window, the cap has no effect.
         out._swa_window = window_size  # type: ignore[attr-defined]
-        # We also flag attention_type for the quality side.
+        # Clear any prior MLA sidecar so the two flags don't silently coexist.
+        if hasattr(out, "_mla_latent_dim"):
+            try:
+                delattr(out, "_mla_latent_dim")
+            except AttributeError:
+                pass
+        _record_applied(out, self.name)
         return out
 
     def to_quality_arch(self, arch):

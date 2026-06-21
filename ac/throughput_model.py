@@ -20,22 +20,42 @@ from typing import List, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Import lattice engine (sibling module in the same package)
+#
+# Audit follow-up: the previous version unconditionally inserted the
+# package directory into sys.path before importing. That always works but
+# pollutes sys.path even when this module is imported as part of the
+# installed package. We now prefer a relative import and only fall back
+# to the absolute path-hack form when the module is being run as a
+# direct script (`python ac/throughput_model.py`) without a parent
+# package — which is the case the path-hack was originally written for.
 # ---------------------------------------------------------------------------
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from lattice_engine import (
-    HardwareSpec as LatticeHardwareSpec,
-    TileSpec,
-    HARDWARE as LATTICE_HARDWARE,
-    matmul_tile_utilization,
-    wave_efficiency,
-    compute_lattice,
-    compute_gqa_configs,
-    estimate_params,
-    KNOWN_ARCHITECTURES,
-)
+try:  # importable as part of the `ac` package (normal case)
+    from .lattice_engine import (  # type: ignore[no-redef]
+        HardwareSpec as LatticeHardwareSpec,
+        TileSpec,
+        HARDWARE as LATTICE_HARDWARE,
+        matmul_tile_utilization,
+        wave_efficiency,
+        compute_lattice,
+        compute_gqa_configs,
+        estimate_params,
+        KNOWN_ARCHITECTURES,
+    )
+except ImportError:  # direct-script invocation: synthesize sibling import
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    from lattice_engine import (  # type: ignore[no-redef]
+        HardwareSpec as LatticeHardwareSpec,
+        TileSpec,
+        HARDWARE as LATTICE_HARDWARE,
+        matmul_tile_utilization,
+        wave_efficiency,
+        compute_lattice,
+        compute_gqa_configs,
+        estimate_params,
+        KNOWN_ARCHITECTURES,
+    )
 
 
 # =============================================================================
@@ -311,6 +331,20 @@ class ThroughputResult:
     decode_time_per_token_ms: float = 0.0
     decode_kv_cache_length: int = 0
 
+    # v1-fix throughput uncertainty. One-sigma absolute uncertainty in
+    # milliseconds for the matching phase, derived from the calibrated
+    # (regime × arch_family) efficiency table's sigma. Downstream Pareto /
+    # contender code reads these to treat near-ties as actual ties.
+    training_throughput_sigma_tps: float = 0.0
+    prefill_time_sigma_ms: float = 0.0
+    decode_time_sigma_ms: float = 0.0
+
+    # Which (regime, family) bucket was used to set efficiency. Useful in
+    # reports so a researcher can see "ah, this is using moe_compute_bound,
+    # which is calibrated from only 4 samples." Empty string when the
+    # scalar fallback was used.
+    efficiency_bucket: str = ""
+
     # Memory
     memory_footprint_per_gpu_gb: float = 0.0
 
@@ -400,6 +434,228 @@ class CalibrationTable:
 
 
 _CALIBRATION_CACHE: Dict[str, Optional[CalibrationTable]] = {}
+
+
+# =============================================================================
+# Regime × arch-family efficiency table (v1-fix #27)
+# =============================================================================
+#
+# Replaces the three scalar `*_system_efficiency` knobs with a
+# (phase, regime, arch_family) → {mu, sigma} table. The regime is gated on
+# the dominant cost from the per-layer breakdown's `bottleneck` field
+# ("compute", "memory", "communication", "expert_load", "alltoall"); the
+# family is read from the candidate (`dense`, `dense_gqa`, `moe`, `moe_mla`,
+# `hybrid_state`, `mla_dense`). Defaults below come from public reports and
+# the ±20% caveat in the README; they should be overridden by a real
+# auto-calibrate fit per cluster. The sigma column is the missing piece —
+# we propagate it through `ThroughputResult.*_sigma` so the contender filter
+# in optimizer._contending_family can treat near-ties as ties.
+
+_DEFAULT_EFFICIENCY_TABLE = {
+    "training": {
+        "dense":         {"compute": (0.55, 0.07), "memory": (0.42, 0.08),
+                          "communication": (0.40, 0.10)},
+        "dense_gqa":     {"compute": (0.55, 0.07), "memory": (0.42, 0.08),
+                          "communication": (0.40, 0.10)},
+        "mla_dense":     {"compute": (0.50, 0.09), "memory": (0.40, 0.10),
+                          "communication": (0.38, 0.11)},
+        "moe":           {"compute": (0.45, 0.10), "memory": (0.38, 0.10),
+                          "communication": (0.32, 0.12), "alltoall": (0.28, 0.14),
+                          "expert_load": (0.30, 0.12)},
+        "moe_mla":       {"compute": (0.42, 0.12), "memory": (0.36, 0.12),
+                          "communication": (0.30, 0.13), "alltoall": (0.26, 0.15),
+                          "expert_load": (0.28, 0.13)},
+        "hybrid_state":  {"compute": (0.48, 0.10), "memory": (0.40, 0.10),
+                          "communication": (0.36, 0.12)},
+    },
+    "prefill": {
+        "dense":         {"compute": (0.60, 0.06), "memory": (0.45, 0.09),
+                          "communication": (0.42, 0.10)},
+        "dense_gqa":     {"compute": (0.60, 0.06), "memory": (0.45, 0.09),
+                          "communication": (0.42, 0.10)},
+        "mla_dense":     {"compute": (0.55, 0.08), "memory": (0.42, 0.10),
+                          "communication": (0.40, 0.11)},
+        "moe":           {"compute": (0.50, 0.09), "memory": (0.40, 0.10),
+                          "communication": (0.32, 0.12), "alltoall": (0.26, 0.15),
+                          "expert_load": (0.30, 0.13)},
+        "moe_mla":       {"compute": (0.46, 0.11), "memory": (0.38, 0.12),
+                          "communication": (0.30, 0.13), "alltoall": (0.24, 0.16),
+                          "expert_load": (0.28, 0.14)},
+        "hybrid_state":  {"compute": (0.52, 0.10), "memory": (0.42, 0.10),
+                          "communication": (0.38, 0.11)},
+    },
+    "decode": {
+        # Decode is overwhelmingly memory-bound at small batch on dense
+        # models; compute-bound regimes only appear at large batch.
+        "dense":         {"compute": (0.45, 0.10), "memory": (0.42, 0.08),
+                          "communication": (0.32, 0.12)},
+        "dense_gqa":     {"compute": (0.45, 0.10), "memory": (0.42, 0.08),
+                          "communication": (0.32, 0.12)},
+        "mla_dense":     {"compute": (0.42, 0.11), "memory": (0.40, 0.10),
+                          "communication": (0.30, 0.13)},
+        "moe":           {"compute": (0.36, 0.13), "memory": (0.34, 0.12),
+                          "communication": (0.26, 0.14), "alltoall": (0.22, 0.16),
+                          "expert_load": (0.20, 0.15)},
+        "moe_mla":       {"compute": (0.34, 0.14), "memory": (0.32, 0.13),
+                          "communication": (0.24, 0.15), "alltoall": (0.20, 0.17),
+                          "expert_load": (0.18, 0.16)},
+        "hybrid_state":  {"compute": (0.44, 0.10), "memory": (0.40, 0.10),
+                          "communication": (0.30, 0.13)},
+    },
+}
+
+# Map LayerBreakdown.bottleneck values into the regime axis.
+_REGIME_ALIASES = {
+    "compute": "compute",
+    "memory": "memory",
+    "communication": "communication",
+    "comm": "communication",
+    "alltoall": "alltoall",
+    "expert_load": "expert_load",
+}
+
+
+def _arch_family(arch: ArchConfig) -> str:
+    """Classify an arch into one of the calibrated families."""
+    is_moe = arch.moe_config is not None
+    is_mla = (arch.attention_type == "mla"
+              and int(getattr(arch, "mla_kv_latent_dim", 0) or 0) > 0)
+    is_hybrid = (arch.layer_type_list is not None
+                 and any(lt == "state" for lt in arch.layer_type_list)
+                 and arch.state_config is not None)
+    if is_hybrid:
+        return "hybrid_state"
+    if is_moe and is_mla:
+        return "moe_mla"
+    if is_moe:
+        return "moe"
+    if is_mla:
+        return "mla_dense"
+    # GQA distinguished from MHA by n_kv_heads < n_heads — same calibration
+    # bucket in our defaults, but readable separately if a lab fits them.
+    if arch.n_kv_heads < arch.n_heads:
+        return "dense_gqa"
+    return "dense"
+
+
+def _efficiency_for(
+    phase: str,
+    bottleneck: str,
+    arch: ArchConfig,
+    cal: dict,
+) -> tuple:
+    """Return (mu, sigma, bucket_label) for a phase/regime/family lookup.
+
+    Resolution order:
+      1. cal["efficiency_table"][phase][family][regime]            # full lab fit
+      2. cal["efficiency_table"][phase][family]["overall"]          # family fit
+      3. _DEFAULT_EFFICIENCY_TABLE[phase][family][regime]           # default
+      4. _DEFAULT_EFFICIENCY_TABLE[phase][family]["compute"]        # family default
+      5. cal[f"{phase}_system_efficiency"] (legacy scalar)          # back-compat
+
+    A hardware-wide multiplicative override may also be applied. When a spec's
+    `calibration.efficiency_multipliers[phase]` is present the resolved `mu` is
+    scaled by it; this lets `ac-auto-calibrate` flow a cluster-wide
+    observed/predicted ratio into every family/regime cell without having to
+    populate a per-family lab table. Multiplier is clamped to [0.1, 1.5] and
+    the bucket label is annotated with `*mult=<x>` so downstream reports can
+    tell when calibration was applied.
+    """
+    regime = _REGIME_ALIASES.get(str(bottleneck or "compute"), "compute")
+    family = _arch_family(arch)
+
+    def _unpack(entry):
+        if isinstance(entry, dict):
+            mu = float(entry.get("mu", entry.get("efficiency", 0.0)))
+            sigma = float(entry.get("sigma", 0.0))
+            return mu, sigma
+        if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            return float(entry[0]), float(entry[1])
+        if isinstance(entry, (int, float)):
+            return float(entry), 0.0
+        return None
+
+    bucket = None
+    mu = sigma = None
+
+    lab_table = (cal or {}).get("efficiency_table") or {}
+    lab_phase = lab_table.get(phase) or {}
+    lab_family = lab_phase.get(family) or {}
+    if regime in lab_family:
+        mu_sigma = _unpack(lab_family[regime])
+        if mu_sigma is not None:
+            mu, sigma = mu_sigma
+            bucket = f"lab:{family}/{regime}"
+    if mu is None and "overall" in lab_family:
+        mu_sigma = _unpack(lab_family["overall"])
+        if mu_sigma is not None:
+            mu, sigma = mu_sigma
+            bucket = f"lab:{family}/overall"
+
+    if mu is None:
+        default_phase = _DEFAULT_EFFICIENCY_TABLE.get(phase, {})
+        default_family = default_phase.get(family) or default_phase.get("dense_gqa", {})
+        if regime in default_family:
+            mu, sigma = default_family[regime]
+            bucket = f"default:{family}/{regime}"
+        elif "compute" in default_family:
+            mu, sigma = default_family["compute"]
+            bucket = f"default:{family}/compute"
+
+    if mu is None:
+        # Legacy scalar fallback so unmigrated hardware specs still work.
+        legacy = float(cal.get(f"{phase}_system_efficiency", 0.5))
+        mu, sigma, bucket = legacy, 0.15 * legacy, "legacy_scalar"
+
+    # Hardware-wide multiplicative override (fix #1). When a spec carries a
+    # calibration.efficiency_multipliers[phase] entry (written by
+    # ac-auto-calibrate from the cluster's observed/predicted ratio), apply it
+    # uniformly. This is the single most important path for lab calibration
+    # because most sparse measurement files cannot populate a per-family table.
+    # Two-layer multiplier composition.
+    #
+    # `efficiency_multipliers` is the *base* multiplier shipped with the
+    # spec — it reflects the gap between the per-layer compute model (which
+    # is intentionally ~1.5-2× conservative vs roofline) and what a
+    # well-tuned production stack achieves. AC ships sensible defaults
+    # (e.g. H100 BF16 training = 1.8×) so out-of-the-box predictions land
+    # in the published-benchmark range.
+    #
+    # `calibration_efficiency_multipliers` is the *lab-specific* multiplier
+    # written by `ac-auto-calibrate fit` from observed/predicted ratios.
+    # It multiplies the base, rather than replacing it, so a lab's local
+    # measurement gap (e.g. their cluster runs 0.9× the shipped default)
+    # composes correctly with the modern-baseline default. Without this
+    # split, auto-calibrate's small-sample fit silently overwrote the
+    # modern baseline and pushed predictions back to a 2× pessimistic
+    # regime.
+    base_mults = (cal or {}).get("efficiency_multipliers") or {}
+    cal_mults = (cal or {}).get("calibration_efficiency_multipliers") or {}
+
+    def _coerce(v, fallback=1.0):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return fallback
+
+    base_mult = _coerce(base_mults.get(phase, 1.0), 1.0)
+    cal_mult = _coerce(cal_mults.get(phase, 1.0), 1.0)
+    # Floor base at 0.1 (sanity); cap composed product at 3.0 so a tiny-
+    # sample observed/predicted ratio can't pile a 2× on top of a 2× base.
+    base_mult = max(0.1, min(2.5, base_mult))
+    cal_mult = max(0.1, min(2.5, cal_mult))
+    composed = max(0.05, min(3.0, base_mult * cal_mult))
+    if abs(composed - 1.0) > 1e-6:
+        mu = mu * composed
+        sigma = sigma * composed
+        if abs(base_mult - 1.0) > 1e-6 and abs(cal_mult - 1.0) > 1e-6:
+            bucket = f"{bucket}*base={base_mult:.3f}*cal={cal_mult:.3f}"
+        elif abs(base_mult - 1.0) > 1e-6:
+            bucket = f"{bucket}*base={base_mult:.3f}"
+        elif abs(cal_mult - 1.0) > 1e-6:
+            bucket = f"{bucket}*cal={cal_mult:.3f}"
+
+    return mu, sigma, bucket
 
 def load_calibration(hw_name: str) -> Optional[CalibrationTable]:
     """Load calibration table for a hardware target, if available."""
@@ -1269,11 +1525,59 @@ def compute_layer_time(
     M = B * S  # tokens in this step
 
     # --- QKV projection ---
-    # Q: (M, d) × (d, nh*dh/tp) -> three such matmuls (Q, K, V separately or fused)
-    # Fused: (M, d) × (d, (nh + 2*nkv)*dh / tp)
-    qkv_N = (heads_per_gpu + 2 * kv_heads_per_gpu) * dh
-    t_qkv, _, _ = _matmul_cost(M, qkv_N, d, prec, hw, lattice_hw, tp_degree, calibration)
-    breakdown.qkv_proj_s = t_qkv
+    is_mla = (arch.attention_type == "mla"
+              and int(getattr(arch, "mla_kv_latent_dim", 0) or 0) > 0)
+    if is_mla:
+        # v1-fix MLA compute path (DeepSeek-V2/V3). Instead of one fused
+        # (d → (nh+2nkv)*dh) projection, MLA has:
+        #   - Q  down-project   : (d) → c_q          (per-token)
+        #   - Q  up-project     : c_q → nh*dh        (per-token)
+        #   - KV down-project   : (d) → c_kv + d_rope (per-token, shared)
+        #   - KV up-project     : c_kv → nh*(dh-d_rope)  (folded into attention
+        #     via matmul absorption at decode time)
+        # In compute terms, the down/up factorization saves FLOPs whenever
+        # c_q + c_kv < (nh + 2*nkv) * dh. At decode the absorption trick
+        # collapses the KV up-projection into the attention dot product so
+        # we only pay the small Q up-project per generated token.
+        c_q = int(getattr(arch, "mla_q_latent_dim", 0) or 0)
+        c_kv = int(getattr(arch, "mla_kv_latent_dim", 0) or 0)
+        d_rope = int(getattr(arch, "mla_rope_head_dim", 0) or 0)
+        # Q path: (M, d) × (d, c_q) + (M, c_q) × (c_q, nh*dh/tp)
+        if c_q > 0:
+            t_q_down, _, _ = _matmul_cost(M, c_q, d, prec, hw, lattice_hw,
+                                            tp_degree, calibration)
+            t_q_up, _, _ = _matmul_cost(M, heads_per_gpu * dh, c_q, prec,
+                                          hw, lattice_hw, tp_degree, calibration)
+        else:
+            # Without an explicit q-latent, treat Q as a direct projection.
+            t_q_down, _, _ = _matmul_cost(M, heads_per_gpu * dh, d, prec,
+                                            hw, lattice_hw, tp_degree, calibration)
+            t_q_up = 0.0
+        # KV down-projection: shared latent + RoPE'd key, NOT sharded by TP
+        # (because the latent feeds every query head; replicating is cheaper
+        # than the all-gather required to shard).
+        kv_proj_N = c_kv + d_rope
+        t_kv_down, _, _ = _matmul_cost(M, kv_proj_N, d, prec, hw, lattice_hw,
+                                         1, calibration)
+        if phase == "decode":
+            # Absorbed: KV up-projection is folded into the attention dot;
+            # we only pay Q-up here.
+            breakdown.qkv_proj_s = t_q_down + t_q_up + t_kv_down
+        else:
+            # Prefill / training: explicit KV up-projection per token.
+            kv_up_N = heads_per_gpu * max(0, dh - d_rope)
+            if kv_up_N > 0:
+                t_kv_up, _, _ = _matmul_cost(M, kv_up_N, c_kv, prec, hw,
+                                               lattice_hw, tp_degree, calibration)
+            else:
+                t_kv_up = 0.0
+            breakdown.qkv_proj_s = t_q_down + t_q_up + t_kv_down + t_kv_up
+    else:
+        # Q: (M, d) × (d, nh*dh/tp) -> three such matmuls (Q, K, V separately or fused)
+        # Fused: (M, d) × (d, (nh + 2*nkv)*dh / tp)
+        qkv_N = (heads_per_gpu + 2 * kv_heads_per_gpu) * dh
+        t_qkv, _, _ = _matmul_cost(M, qkv_N, d, prec, hw, lattice_hw, tp_degree, calibration)
+        breakdown.qkv_proj_s = t_qkv
 
     # --- Attention ---
     if phase == "decode":
@@ -1609,7 +1913,9 @@ def throughput(
     result.bubble_fraction = bubble
 
     # Training: forward + backward ~ 3x forward compute
-    sys_eff_train = cal.get("training_system_efficiency", 0.55)
+    train_bottleneck = getattr(layer_train, "bottleneck", "compute")
+    sys_eff_train, sigma_train, bucket_train = _efficiency_for(
+        "training", train_bottleneck, arch, cal)
     train_step_s = (raw_train_s * 3.0 + kernel_overhead_total * 3 + optimizer_step_s) * (1 + bubble) / sys_eff_train
 
     # v1-fix MTP: extra training compute from MTP heads (DeepSeek-V3 §2.2).
@@ -1646,7 +1952,9 @@ def throughput(
     result.training_throughput_tokens_per_sec = tokens_per_step / train_step_s if train_step_s > 0 else 0
 
     # --- Prefill (inference) ---
-    sys_eff_prefill = cal.get("prefill_system_efficiency", 0.60)
+    prefill_bottleneck = getattr(layer_prefill, "bottleneck", "compute")
+    sys_eff_prefill, sigma_prefill, bucket_prefill = _efficiency_for(
+        "prefill", prefill_bottleneck, arch, cal)
     raw_prefill = raw_prefill_s + kernel_overhead_total
     if cp > 1 and (prefill_seq_len or arch.seq_len) >= 32768:
         bpe_act = hw.bytes_per_elem(arch.precision)
@@ -1661,9 +1969,34 @@ def throughput(
     result.prefill_time_ms = raw_prefill / sys_eff_prefill * 1000
 
     # --- Decode ---
-    sys_eff_decode = cal.get("decode_system_efficiency", 0.42)
+    decode_bottleneck = getattr(layer_decode, "bottleneck", "memory")
+    sys_eff_decode, sigma_decode, bucket_decode = _efficiency_for(
+        "decode", decode_bottleneck, arch, cal)
     raw_decode = raw_decode_s + kernel_overhead_total
     result.decode_time_per_token_ms = raw_decode / sys_eff_decode * 1000
+
+    # --- Sigma propagation (v1-fix #28) ---
+    # Convert efficiency sigma into absolute uncertainty on each phase's
+    # reported metric so downstream tooling (optimizer._contending_family,
+    # report renderers) can read it directly. Sigma is propagated as
+    #   sigma_metric = metric * (sigma_eff / mu_eff)
+    # because metric ∝ 1/efficiency.
+    if sys_eff_train > 0:
+        train_rel_sigma = sigma_train / sys_eff_train
+        result.training_throughput_sigma_tps = (
+            result.training_throughput_tokens_per_sec * train_rel_sigma)
+    if sys_eff_prefill > 0:
+        result.prefill_time_sigma_ms = (
+            result.prefill_time_ms * (sigma_prefill / sys_eff_prefill))
+    if sys_eff_decode > 0:
+        result.decode_time_sigma_ms = (
+            result.decode_time_per_token_ms * (sigma_decode / sys_eff_decode))
+    # Record the bucket used for the dominant inference phase so the report
+    # can show which calibrated cell drove the prediction.
+    result.efficiency_bucket = (
+        f"decode={bucket_decode}; prefill={bucket_prefill}; "
+        f"training={bucket_train}"
+    )
 
     # --- Memory ---
     if is_hybrid:

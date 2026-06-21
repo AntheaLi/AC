@@ -1,6 +1,6 @@
 """change_moe_topology — modify (n_experts, top_k, expert_dim) for MoE."""
 
-from .base import Transformation, _copy_arch
+from .base import Transformation, _copy_arch, _record_applied
 
 
 class ChangeMoeTopology(Transformation):
@@ -39,4 +39,5 @@ class ChangeMoeTopology(Transformation):
         # top_k must not exceed n_experts.
         cfg["top_k"] = min(cfg["top_k"], cfg["n_experts"])
         out.moe_config = cfg
+        _record_applied(out, self.name)
         return out

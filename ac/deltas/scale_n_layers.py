@@ -1,6 +1,6 @@
 """scale_n_layers — ±N preserving Chinchilla-like depth/width ratio."""
 
-from .base import Transformation, _copy_arch
+from .base import Transformation, _copy_arch, _record_applied
 
 
 class ScaleNLayers(Transformation):
@@ -24,4 +24,5 @@ class ScaleNLayers(Transformation):
             else:
                 ltl = ltl[:out.n_layers]
             out.layer_type_list = ltl
+        _record_applied(out, self.name)
         return out

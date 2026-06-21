@@ -6,6 +6,7 @@ greenfield compiler. v0.5 accepts the compiler JSON schema only; adapters for
 HuggingFace configs or live model objects can be layered on later.
 """
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -68,7 +69,18 @@ def load_baseline_model(path: str) -> BaselineModel:
     last/largest entry as canonical and surface the dense prefix as a warning).
     """
 
-    config = load_config(path)
+    if not os.path.exists(path):
+        raise BaselineUnsupportedError(
+            f"baseline config not found at {path!r}. "
+            f"Pass --baseline-config with a path to an AC schema JSON "
+            f"(see configs/mistral_7b.json for the reference format)."
+        )
+    try:
+        config = load_config(path)
+    except json.JSONDecodeError as e:
+        raise BaselineUnsupportedError(
+            f"baseline config at {path!r} is not valid JSON: {e}"
+        ) from e
     arch = config["architecture"]
     layer_configs = arch.get("layer_configs", [])
 
@@ -173,9 +185,36 @@ def load_baseline_model(path: str) -> BaselineModel:
             mla_nope_head_dim=int(attention.get("nope_head_dim", 128)),
         )
 
-    total_params = estimate_params(
+    # For dense, total_params == active_params and estimate_params is correct.
+    # For MoE, estimate_params treats ffn_dim (=expert_dim) as a single dense
+    # FFN, which under-counts total by a factor of ~n_experts and slightly
+    # over-counts active relative to top_k. Compute both explicitly so the
+    # downstream report renders the real model total instead of "one expert
+    # worth of FFN".
+    active_params = estimate_params(
         d_model, n_heads, d_head, ffn_dim, n_layers, n_kv_heads, vocab_size
     )
+    if moe_block is not None:
+        # Replace the single-expert FFN mass with top_k experts (active) and
+        # n_experts experts (total), plus shared expert if present.
+        n_experts = int(moe_block.get("n_experts", 1))
+        top_k = max(1, int(moe_block.get("top_k", 1)))
+        expert_dim = int(moe_block.get("expert_dim", ffn_dim))
+        per_expert_ffn = 3 * d_model * expert_dim
+        # Strip the one-expert mass that estimate_params already added.
+        active_params = active_params - per_expert_ffn * n_layers
+        total_params = active_params + n_experts * per_expert_ffn * n_layers
+        active_params = active_params + top_k * per_expert_ffn * n_layers
+        # Add shared-expert mass (always-on, counts toward both active and total).
+        shared = moe_block.get("shared_expert")
+        if isinstance(shared, dict):
+            shared_ffn_dim = int(shared.get("ffn_dim", 0))
+            if shared_ffn_dim > 0:
+                shared_mass = 3 * d_model * shared_ffn_dim * n_layers
+                active_params += shared_mass
+                total_params += shared_mass
+    else:
+        total_params = active_params
 
     # Parallelism block: surface ep / cp into the candidate so MoE memory
     # estimation uses the right per-rank expert count instead of replicating
@@ -203,8 +242,8 @@ def load_baseline_model(path: str) -> BaselineModel:
         total_params_b=round(total_params / 1e9, 2),
         moe=moe_block,
         ep_degree=ep_degree,
-        active_params=total_params,
-        active_params_b=round(total_params / 1e9, 2),
+        active_params=active_params,
+        active_params_b=round(active_params / 1e9, 2),
         moe_style=("fine" if moe_block else "dense"),
         cp_degree=cp_degree,
         cp_method=cp_method,

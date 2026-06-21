@@ -8,7 +8,12 @@ d_head substitute, plus an mla_latent_dim hint on the quality side.
 
 import copy
 
-from .base import Transformation, _copy_arch
+from .base import (
+    Transformation,
+    _copy_arch,
+    _record_applied,
+    _attention_already_swapped,
+)
 from quality_model import ArchConfig as QArchConfig
 
 
@@ -21,26 +26,40 @@ class SwapAttentionToMLA(Transformation):
     }
 
     def precondition(self, arch):
+        prior = _attention_already_swapped(arch)
+        if prior is not None and prior != self.name:
+            return False, (
+                f"attention block was already swapped by '{prior}'; "
+                f"chaining {self.name} on top would silently overwrite it. "
+                "Apply attention swaps to a fresh baseline or pick one swap."
+            )
         return True, ""
 
-    def apply(self, arch, latent_dim: int = 512):
+    def apply(self, arch, latent_dim: int = 512, d_rope: int = 64):
         if latent_dim < 16:
             raise ValueError("latent_dim must be >= 16")
         out = _copy_arch(arch)
-        # Approximate MLA: one "kv head" of size latent_dim.
-        # The throughput model's KV cache term becomes
-        #   2 × B × 1 × L × latent_dim × bpe
-        # which matches the MLA paper's storage formula. We stash the
-        # original head shapes in moe_config-style sidecar... actually
-        # simpler: just stash it on a custom attribute the quality bridge
-        # can read.
+        # Drive the throughput model's real MLA branch by setting the proper
+        # TArchConfig fields. The branch in kv_bytes_per_token_per_layer
+        # computes per-token KV bytes as (c_kv + d_rope) * bpe when
+        # attention_type == "mla", which matches the DeepSeek-V2/V3 storage
+        # formula. We also keep the sidecar so the quality-side bridge
+        # (to_quality_arch) can read it without re-deriving from the field.
+        out.attention_type = "mla"
+        out.mla_kv_latent_dim = int(latent_dim)
+        out.mla_rope_head_dim = int(d_rope)
+        # n_kv_heads is no longer the storage axis under MLA, but we leave
+        # the value at 1 so any code path that still reads it falls back to
+        # a single compressed latent. The MLA throughput branch ignores it.
         out.n_kv_heads = 1
-        # Encode latent_dim by using d_head=latent_dim for the KV path.
-        # Q/O still use the original d_head, but the throughput KV-cache
-        # term reads `dh = arch.d_head` so we have to compromise: keep
-        # d_head but reduce n_kv_heads to the smallest possible value.
-        # The quality side carries mla_latent_dim explicitly.
-        out._mla_latent_dim = latent_dim  # type: ignore[attr-defined]
+        out._mla_latent_dim = int(latent_dim)  # type: ignore[attr-defined]
+        # Clear any prior SWA sidecar so the two flags don't silently coexist.
+        if hasattr(out, "_swa_window"):
+            try:
+                delattr(out, "_swa_window")
+            except AttributeError:
+                pass
+        _record_applied(out, self.name)
         return out
 
     def to_quality_arch(self, arch):

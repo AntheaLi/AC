@@ -1,6 +1,6 @@
 """change_precision_per_component — set FFN / attention / KV cache precision."""
 
-from .base import Transformation, _copy_arch
+from .base import Transformation, _copy_arch, _record_applied
 
 
 class ChangePrecisionPerComponent(Transformation):
@@ -30,6 +30,7 @@ class ChangePrecisionPerComponent(Transformation):
         # Activation precision currently has no throughput-side knob — it
         # lives on the quality side, set via to_quality_arch override.
         out._target_activation_precision = activation  # type: ignore[attr-defined]
+        _record_applied(out, self.name)
         return out
 
     def to_quality_arch(self, arch):

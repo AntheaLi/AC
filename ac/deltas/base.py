@@ -31,15 +31,63 @@ from throughput_model import ArchConfig as TArchConfig  # noqa: E402
 from quality_model import ArchConfig as QArchConfig  # noqa: E402
 
 
+_SIDECAR_ATTRS = (
+    "_mla_latent_dim",
+    "_swa_window",
+    "_tp_override", "_pp_override", "_ep_override", "_cp_override",
+    # Provenance: the ordered list of delta names already applied to this
+    # arch. Used by compose-time precondition checks so a later
+    # transformation can refuse to silently overwrite an earlier one.
+    "_applied_deltas",
+)
+
+
 def _copy_arch(arch: TArchConfig) -> TArchConfig:
-    """Deep-ish copy of an ArchConfig so transformations don't mutate input."""
+    """Deep-ish copy of an ArchConfig so transformations don't mutate input.
+
+    Preserves the small set of sidecar attributes the delta library uses to
+    communicate non-dataclass facts (MLA latent dim, SWA window, parallelism
+    overrides, applied-delta provenance) so multi-delta composition does not
+    silently drop them.
+    """
     fields = asdict(arch)
     # Deep-copy nested dicts/lists so a candidate's moe_config / state_config
     # are independent of the baseline's.
     for k, v in fields.items():
         if isinstance(v, (dict, list)):
             fields[k] = copy.deepcopy(v)
-    return TArchConfig(**fields)
+    out = TArchConfig(**fields)
+    for attr in _SIDECAR_ATTRS:
+        if hasattr(arch, attr):
+            setattr(out, attr, copy.deepcopy(getattr(arch, attr)))
+    return out
+
+
+def _record_applied(arch: TArchConfig, name: str) -> None:
+    """Append `name` to the arch's applied-deltas trail (in place)."""
+    trail = list(getattr(arch, "_applied_deltas", []) or [])
+    trail.append(name)
+    arch._applied_deltas = trail  # type: ignore[attr-defined]
+
+
+def _has_applied(arch: TArchConfig, name: str) -> bool:
+    return name in (getattr(arch, "_applied_deltas", []) or [])
+
+
+def _attention_already_swapped(arch: TArchConfig) -> Optional[str]:
+    """Return the name of any prior attention-swap delta, or None."""
+    trail = getattr(arch, "_applied_deltas", []) or []
+    for n in trail:
+        if n in ("swap_attention_to_mla",
+                 "swap_attention_to_swa",
+                 "swap_attention_to_gqa"):
+            return n
+    # Also check sidecars in case provenance wasn't recorded (older arches).
+    if getattr(arch, "_mla_latent_dim", None) is not None:
+        return "swap_attention_to_mla"
+    if getattr(arch, "_swa_window", None) is not None:
+        return "swap_attention_to_swa"
+    return None
 
 
 class Transformation:

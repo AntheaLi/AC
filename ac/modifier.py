@@ -562,6 +562,24 @@ def _select_modified_candidate(
     quality_risk_budget_pct: float,
     allow_quality_spending: bool,
 ) -> ModifierRecord:
+    # Tier 1 — "free wins": candidates that performance-dominate the baseline
+    # AND don't worsen predicted quality beyond a tiny tolerance. These are
+    # strict Pareto improvements and should always be preferred over a
+    # quality-spending change, regardless of allow_quality_spending.
+    quality_tolerance_pct = 0.05  # treat <=0.05% loss drift as noise
+    free_wins = [
+        r for r in pareto
+        if not r.is_baseline
+        and r.evaluated.meets_constraints
+        and _performance_dominates(baseline, r)
+        and _quality_risk_pct(r, baseline) <= quality_tolerance_pct
+    ]
+    if free_wins:
+        free_wins.sort(key=lambda r: _modifier_sort_key(r, baseline))
+        return free_wins[0]
+
+    # Tier 2 — strictly quality-preserving deployment edits (TP/EP placement,
+    # etc.) that improve at least one resource axis.
     pool = [
         r for r in pareto
         if not r.is_baseline
@@ -569,7 +587,12 @@ def _select_modified_candidate(
         and r.quality_preserving
         and _improves_any_resource(r, baseline)
     ]
-    if not pool and allow_quality_spending:
+    if pool:
+        pool.sort(key=lambda r: _modifier_sort_key(r, baseline))
+        return pool[0]
+
+    # Tier 3 — quality-spending changes within the user's risk budget.
+    if allow_quality_spending:
         pool = [
             r for r in pareto
             if not r.is_baseline
@@ -577,10 +600,11 @@ def _select_modified_candidate(
             and _within_quality_budget(r, baseline, quality_risk_budget_pct)
             and _improves_any_resource(r, baseline)
         ]
-    if not pool:
-        return baseline
-    pool.sort(key=lambda r: _modifier_sort_key(r, baseline))
-    return pool[0]
+        if pool:
+            pool.sort(key=lambda r: _modifier_sort_key(r, baseline))
+            return pool[0]
+
+    return baseline
 
 
 def _record_key(cand: CandidateArch, tp: int) -> Tuple[Any, ...]:

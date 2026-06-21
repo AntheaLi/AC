@@ -8,6 +8,7 @@
   "hbm_capacity_gb": 192,
   "hbm_bandwidth_tb_s": 8.0,
 
+  "_peak_flops_tf_convention": "The values below are the EFFECTIVE per-precision compute baseline used by AC's roofline model, NOT the datasheet peak. They are deliberately set to ~50% of NVIDIA's marketed dense-Tensor-Core peak so that, after the `efficiency_multipliers` block and the per-family efficiency table in throughput_model._DEFAULT_EFFICIENCY_TABLE compose, end-to-end TPS / TBT predictions match published Blackwell early-access traces. See `notes.peak_flops_source` for datasheet numbers. Override via ac-auto-calibrate when lab traces are available.",
   "peak_flops_tf": {
     "bf16": 1125,
     "fp8":  2250,
@@ -55,10 +56,16 @@
     "optimizer_bytes_per_param": 12,
     "training_system_efficiency": 0.39,
     "decode_system_efficiency": 0.45,
-    "prefill_system_efficiency": 0.62
+    "prefill_system_efficiency": 0.62,
+    "efficiency_multipliers": {
+      "training": 1.8,
+      "prefill": 1.4,
+      "decode": 1.0
+    }
   },
 
   "notes": {
+    "peak_flops_source": "NVIDIA B200 datasheet (dense, no 2:4 sparsity). BF16 Tensor Core = 2250 TFLOPS; FP8 Tensor Core = 4500 TFLOPS; FP4 Tensor Core = 9000 TFLOPS. The `peak_flops_tf` field above is intentionally ~half of these (see `_peak_flops_tf_convention`). https://nvidia.com/en-us/data-center/dgx-b200/",
     "fused_efficiency_source": "FlashAttention-3 benchmarks, FP4 attention newer with lower expected efficiency",
     "hbm_bw_source": "NVIDIA B200 datasheet, 8 TB/s HBM3e",
     "compute_units_note": "~160 SMs estimated for B200, verify per SKU",

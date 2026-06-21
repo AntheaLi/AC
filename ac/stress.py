@@ -110,9 +110,18 @@ class Workload:
     phase: str = "decode"  # "prefill" | "decode" | "training" | "serving_mixed"
 
     def workload_id(self) -> str:
-        """Stable hash for KG keys."""
-        canonical = json.dumps(asdict(self), sort_keys=True).encode()
-        return hashlib.sha1(canonical).hexdigest()[:12]
+        """Human-readable workload identifier, e.g. ``decode-b1-prefill2048-kv4096``.
+
+        Used both as a stable key for KG entries and as the user-facing label
+        in ac-stress output. Previously a hex hash, which carried no
+        information for a single-shot CLI invocation; the slug form lets the
+        reader verify the workload without parsing JSON.
+        """
+        return (
+            f"{self.phase}-b{int(self.batch_size)}"
+            f"-prefill{int(self.prefill_seq_len)}"
+            f"-kv{int(self.decode_kv_len)}"
+        )
 
 
 # =============================================================================
@@ -132,6 +141,53 @@ STRESS_AXES = (
     "all_to_all",
     "training_mem",
 )
+
+
+def active_axes_for_phase(phase: str) -> tuple:
+    """Axes considered binding for the requested workload phase."""
+    phase_key = str(phase or "decode").lower()
+    if phase_key == "decode":
+        return (
+            "hbm_bw_decode",
+            "hbm_capacity",
+            "kv_footprint",
+            "tc_util_decode",
+            "sram_tile_fit",
+            "all_reduce",
+            "all_to_all",
+        )
+    if phase_key == "prefill":
+        return (
+            "hbm_bw_prefill",
+            "hbm_capacity",
+            "tc_util_prefill",
+            "sram_tile_fit",
+            "all_reduce",
+            "all_to_all",
+        )
+    if phase_key == "training":
+        return (
+            "hbm_bw_prefill",
+            "hbm_capacity",
+            "tc_util_prefill",
+            "sram_tile_fit",
+            "all_reduce",
+            "all_to_all",
+            "training_mem",
+        )
+    if phase_key == "serving_mixed":
+        return (
+            "hbm_bw_decode",
+            "hbm_bw_prefill",
+            "hbm_capacity",
+            "kv_footprint",
+            "tc_util_prefill",
+            "tc_util_decode",
+            "sram_tile_fit",
+            "all_reduce",
+            "all_to_all",
+        )
+    return STRESS_AXES
 
 
 @dataclass
@@ -178,22 +234,34 @@ class StressVector:
     def as_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["bands"] = {a: self.band(a) for a in STRESS_AXES}
+        d["active_axes"] = list(active_axes_for_phase(self.phase))
         return d
 
     def pretty(self) -> str:
         """Human-readable summary for CLI use."""
         rows = []
+        active_axes = set(active_axes_for_phase(self.phase))
         for axis in STRESS_AXES:
             v = self.axis_value(axis)
             b = self.band(axis)
-            marker = "*" if b in PRESSURED_OR_WORSE else " "
-            rows.append(f"  {marker} {axis:18s} {v:6.3f}  {b}")
+            shown_band = b
+            # Annotate >100% utilisation so the reader sees that 1.030 means
+            # "kernel needs more bandwidth than the hardware can supply" —
+            # the band name alone (binding / violated) doesn't carry that.
+            if v >= 1.0:
+                shown_band = f"{shown_band} ({v*100:.0f}% of peak — over)"
+            if axis not in active_axes and b in PRESSURED_OR_WORSE:
+                shown_band = f"{shown_band} [inactive for {self.phase}]"
+            marker = "*" if axis in self.binding_axes else " "
+            rows.append(f"  {marker} {axis:18s} {v:6.3f}  {shown_band}")
         binding = ", ".join(self.binding_axes) or "(none)"
         return (
             f"StressVector  arch={self.arch_name}  hw={self.hardware_id}  "
             f"phase={self.phase}  workload={self.workload_id}\n"
             + "\n".join(rows)
             + f"\n  binding: {binding}"
+            + "\n  bands: relaxed [0,0.7), loaded [0.7,0.9), "
+              "pressured [0.9,1.0), binding [1.0,1.2), violated [1.2,∞)"
         )
 
 
@@ -549,6 +617,36 @@ def compute_throughput_stress(
         phase="decode",
     )
 
+    # SWA cap: if the candidate uses sliding-window attention, KV reads
+    # during decode and the per-token attention cost during prefill both
+    # see the windowed length, not the full sequence length. We apply the
+    # cap here so the throughput call and every downstream byte/FLOP
+    # calculation in this function uses the effective length.
+    # Two sources, in order: `local_window` (canonical, set by quality
+    # ArchConfig and by baseline-loaded SWA configs) and `_swa_window`
+    # (sidecar set by the SwapAttentionToSWA delta — needed because the
+    # throughput ArchConfig has no `local_window` field).
+    swa_window = int(
+        getattr(arch, "local_window", 0)
+        or getattr(arch, "_swa_window", 0)
+        or 0
+    )
+    effective_decode_kv = workload.decode_kv_len
+    effective_prefill_seq = workload.prefill_seq_len
+    if swa_window > 0:
+        if effective_decode_kv:
+            effective_decode_kv = min(effective_decode_kv, swa_window)
+        if effective_prefill_seq:
+            effective_prefill_seq = min(effective_prefill_seq, swa_window)
+        # Replace the workload object (shallow) so byte/FLOP helpers see
+        # the capped values without mutating the caller's instance.
+        workload = Workload(
+            batch_size=workload.batch_size,
+            prefill_seq_len=effective_prefill_seq,
+            decode_kv_len=effective_decode_kv,
+            phase=workload.phase,
+        )
+
     hw = load_hardware(hardware)
 
     # Reset the arch's batch/seq to workload context for the stress calc.
@@ -559,8 +657,8 @@ def compute_throughput_stress(
         tput = throughput(
             arch, hardware,
             tp_degree=tp_degree, pp_degree=pp_degree,
-            decode_kv_len=workload.decode_kv_len,
-            prefill_seq_len=workload.prefill_seq_len,
+            decode_kv_len=effective_decode_kv,
+            prefill_seq_len=effective_prefill_seq,
             ep_degree=ep_degree,
         )
     else:
@@ -652,7 +750,8 @@ def compute_throughput_stress(
         "opt_bytes": opt_bytes,
         "train_act_bytes": train_act_bytes,
     }
-    sv.binding_axes = [a for a in STRESS_AXES
+    active_axes = active_axes_for_phase(workload.phase)
+    sv.binding_axes = [a for a in active_axes
                        if severity_band(getattr(sv, a)) in PRESSURED_OR_WORSE]
     return sv
 
