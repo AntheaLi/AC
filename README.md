@@ -1,6 +1,6 @@
 # 算模 AC — Architecture Compiler - v0
 
-![算模AC - ArchCalc](assets/image.png)
+![算模AC - ArchCalc](assets/image1.png)
 
 AC is a hardware-aware architecture compiler that turns a compute budget, hardware target, and optional base model into multi-objective Pareto-front model architectures and architecture deltas. It serves as a quantitative **pre-flight** check, it does NOT replace training. 
 
