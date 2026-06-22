@@ -116,7 +116,7 @@ ac-delta-eval \
 
 ---
 
-### Greenfield
+## Greenfield
 
 Search the full architecture lattice for the Pareto-front winner under the
 given hardware and constraints. No baseline config required.
@@ -131,10 +131,10 @@ required
 
 ```
 
-#### ac-compile args 
+### ac-compile args 
 
 <details>
-<summary> ac-compile args </summary>
+<summary> other ac-compile args </summary>
 
 ```
 workload
@@ -224,7 +224,7 @@ ac-compile --recipe configs/recipes/<YOUR RECIPE>.yaml
 ``` 
 
 
-#### Output and example
+### Output and example
 
 One row per Pareto-frontier candidate, sorted by the same uncertainty-aware
 tiebreak the picker uses, so `rank=1` always agrees with the row that has
@@ -263,7 +263,7 @@ ac-compile \
 
 ---
 
-### Modifier
+## Modifier
 
 Holds the architecture *family* fixed (uses the baseline as anchor) and
 searches the local Pareto-frontier of modifications around it.
@@ -276,7 +276,7 @@ required
 ```
 
 
-#### modifer args 
+### modifer args 
 
 <details>
 <summary> modifer args </summary>
@@ -305,7 +305,7 @@ state, MoE, MLA, MTP, CP, RoPE, NSA, YOCO).
 
 ---
 
-### Delta influence
+## Delta influence
 
 Quantitative effect of one (or a chain of) named transformations against a
 specific baseline architecture. Outputs a one-page Markdown report + JSON
@@ -321,10 +321,10 @@ required
 
 ```
 
-#### delta args 
+### Delta args 
 
 <details>
-<summary> delta args </summary>
+<summary> other delta args </summary>
  
 ```
 baseline / hw
@@ -382,17 +382,19 @@ Pareto position.
 
 ---
 
-### Base-model config format
+## Base-model config format
 
-#### Input base model config format
+### Input base model config format
 
 Schema version 0.3. JSON. One `layer_configs` entry per uniform layer
 band. A first-K-dense MoE config uses two entries (first K layers dense,
 rest MoE). See `configs/mistral_7b.json` for the dense reference and
 `configs/{gpt_oss_120b, mai_thinking_1}.json` for MoE and MoE+MLA.
 
+### Base model config in json
+
 <details>
-<summary> Model config example </summary>
+<summary> config example </summary>
 
 ```jsonc
 {
@@ -465,8 +467,7 @@ every rank and the quality model will return its INFEASIBLE marker.**
 </details>
 
 
-
-#### Alternative using YAML or TOML for recipe configurations instead of flags:
+### Alternative using YAML or TOML for recipe configurations instead of flags:
 
 ```bash
 ac-compile --recipe configs/recipes/h100_dense_7b.yaml \
@@ -499,11 +500,12 @@ ac-delta-eval --apply 'swap_attention_to_mla{latent_dim=256,heads=8}'
 
 ---
 
+## Other Layers 
+
 ### Stress diagnostic layer
 
 `ac-stress` gives you the 10-axis stress vector for any architecture: HBM bandwidth, KV footprint, tensor-core utilization, SRAM tile fit, all-reduce pressure, all-to-all pressure, training memory, and more. ac-stress transition ranks every named architectural change by binding-axis relief. The justification output names the constraint explicitly — "Selected MLA because HBM-BW-decode is binding at 0.94; MLA relieves to 0.46. Cost: +0.008 attention residual" — not just the change.
 
----
 
 ### Auto-calibration
 
@@ -511,6 +513,7 @@ Use `ac-auto-calibrate` to fit lab-local uncertainty and hardware-efficiency
 overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible
 field names.
 
+#### Minimal data needed for auto calibration
 
 <details>
 <summary> Minimal row </summary> 
