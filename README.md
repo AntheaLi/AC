@@ -261,7 +261,7 @@ ac-compile \
   --output-config out/mai_arch.json --no-shadow-prices
 ```
 
----
+
 
 ## Modifier
 
@@ -303,7 +303,6 @@ output
 The modifier and greenfield share all other flags (precision, parallelism,
 state, MoE, MLA, MTP, CP, RoPE, NSA, YOCO).
 
----
 
 ## Delta influence
 
