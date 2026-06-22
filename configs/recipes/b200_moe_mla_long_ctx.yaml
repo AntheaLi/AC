@@ -1,0 +1,27 @@
+# b200_moe_mla_long_ctx — MoE + MLA model with a long context window on B200.
+flags:
+  hardware: b200
+  params: 32
+  tokens: 4
+  context: 65536
+  serving_tbt: 35
+  serving_ttft: 800
+  serving_batch: 16
+  tp: 8
+  pp: 1
+  dp: 8
+  cp: 2
+  cp_method: ring
+  objective_profile: research_quality
+  precision_modes: bf16,fp8_ffn,mxfp4_ffn
+  kv_dtypes: bf16,int8,int4
+  allow_mla: true
+  mla_kv_latent: 256,384,512
+  mla_q_latent: 1024,1536
+  allow_moe: true
+  moe_n_experts: 64,128
+  moe_top_k: 4,8
+  ep_options: 4,8
+  max_total_params_b: 200
+  allow_rope_scaling: true
+  rope_scaling_methods: yarn,longrope

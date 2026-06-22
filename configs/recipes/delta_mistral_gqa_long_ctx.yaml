@@ -1,0 +1,19 @@
+# delta_mistral_gqa_long_ctx — modifier-mode recipe: take a Mistral-shaped
+# baseline.json and search GQA / long-context modifications around it.
+flags:
+  hardware: h100
+  baseline_config: configs/mistral_7b.json
+  out: outputs/mistral_gqa_long_ctx
+  context: 32768
+  serving_tbt: 60
+  serving_ttft: 700
+  serving_batch: 32
+  tp_options: "4,8"
+  pp: 1
+  dp: 8
+  objective_profile: serving_cost
+  precision_modes: bf16,fp8_ffn
+  kv_dtypes: bf16,int8,int4
+  allow_quality_spending: true
+  quality_risk_budget_pct: 1.5
+  top_modifications: 10

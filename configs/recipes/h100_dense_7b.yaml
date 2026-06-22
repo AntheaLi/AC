@@ -1,0 +1,17 @@
+# h100_dense_7b — greenfield 7B dense pretraining target on a single H100 node.
+# Replays the canonical "greenfield 7B" demo flag set; override any field
+# from the CLI with `--override key=value` (e.g. `--override params=8`).
+flags:
+  hardware: h100
+  params: 7
+  tokens: 2
+  context: 8192
+  serving_tbt: 50
+  serving_ttft: 500
+  serving_batch: 32
+  tp: 8
+  pp: 1
+  dp: 8
+  objective_profile: research_quality
+  precision_modes: bf16,fp8_ffn
+  kv_dtypes: bf16,int8
