@@ -131,9 +131,9 @@ required
 
 ```
 
+
 <details>
- 
-<summary> **other ac-compile args** </summary>
+<summary> ac-compile args </summary>
 
 ```
 workload
@@ -216,8 +216,14 @@ outputs (paths)
 ```
 </details>
 
+Alternatively you can also use yaml to pass in args:
 
-#### pareto.csv columns
+```bash
+ac-compile --recipe configs/recipes/<YOUR RECIPE>.yaml
+``` 
+
+
+#### Output and example
 
 One row per Pareto-frontier candidate, sorted by the same uncertainty-aware
 tiebreak the picker uses, so `rank=1` always agrees with the row that has
@@ -269,7 +275,7 @@ required
 ```
 
 <details>
-<summary> other modifer args </summary>
+<summary> modifer args </summary>
  
 ```
 scoring
@@ -312,7 +318,7 @@ required
 ```
 
 <details>
-<summary> other delta args </summary>
+<summary> delta args </summary>
  
 ```
 baseline / hw
@@ -369,40 +375,9 @@ Pareto position.
 
 ---
 
-#### Too many flags :( ... -- alternative using YAML or TOML configurations:
-
-```bash
-ac-compile --recipe configs/recipes/h100_dense_7b.yaml \
-  --override params=70 \
-  --output-config out/arch.json
-```
-
-Key commands:
-
-* `--recipe PATH`: Load a saved configuration.
-* `--override KEY=VALUE`: Modify individual recipe values.
-* `--print-recipe PATH`: Save the resolved configuration from a run.
-* `ac-compile config show`: Preview the resolved config, output paths, and warnings without running a search.
-* `ac-compile init TEMPLATE --out PATH`: Create a recipe from a built-in template.
-* `--help-group GROUP`: Show help for one flag group, such as `serving`, `moe`, `precision`, or `recipe`.
-
-Example templates are available in `configs/recipes/`:
-
-```text
-h100_dense_7b.yaml
-b200_moe_mla_long_ctx.yaml
-delta_mistral_gqa_long_ctx.yaml
-```
-
-`ac-delta-eval` also supports inline delta arguments:
-
-```bash
-ac-delta-eval --apply 'swap_attention_to_mla{latent_dim=256,heads=8}'
-```
-
----
-
 ### Base-model config format
+
+#### Input base model config format
 
 Schema version 0.3. JSON. One `layer_configs` entry per uniform layer
 band. A first-K-dense MoE config uses two entries (first K layers dense,
@@ -482,6 +457,39 @@ every rank and the quality model will return its INFEASIBLE marker.**
 
 </details>
 
+
+
+#### Alternative using YAML or TOML for recipe configurations instead of flags:
+
+```bash
+ac-compile --recipe configs/recipes/h100_dense_7b.yaml \
+  --override params=70 \
+  --output-config out/arch.json
+```
+
+Key commands:
+
+* `--recipe PATH`: Load a saved configuration.
+* `--override KEY=VALUE`: Modify individual recipe values.
+* `--print-recipe PATH`: Save the resolved configuration from a run.
+* `ac-compile config show`: Preview the resolved config, output paths, and warnings without running a search.
+* `ac-compile init TEMPLATE --out PATH`: Create a recipe from a built-in template.
+* `--help-group GROUP`: Show help for one flag group, such as `serving`, `moe`, `precision`, or `recipe`.
+
+Example templates are available in `configs/recipes/`:
+
+```text
+h100_dense_7b.yaml
+b200_moe_mla_long_ctx.yaml
+delta_mistral_gqa_long_ctx.yaml
+```
+
+`ac-delta-eval` also supports inline delta arguments:
+
+```bash
+ac-delta-eval --apply 'swap_attention_to_mla{latent_dim=256,heads=8}'
+```
+
 ---
 
 ### Stress diagnostic layer
@@ -495,6 +503,7 @@ every rank and the quality model will return its INFEASIBLE marker.**
 Use `ac-auto-calibrate` to fit lab-local uncertainty and hardware-efficiency
 overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible
 field names.
+
 
 <details>
 <summary> Minimal row </summary> 
@@ -529,6 +538,7 @@ field names.
 }
 ```
 </details>
+
 
 Fit a pack:
 
