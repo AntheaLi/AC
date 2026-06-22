@@ -134,7 +134,7 @@ required
 ### ac-compile args 
 
 <details>
-<summary> other ac-compile args </summary>
+<summary> other ac-compile args </summary> 
 
 ```
 workload
@@ -217,7 +217,7 @@ outputs (paths)
 ```
 </details>
 
-Alternatively you can also use yaml to pass in args:
+Alternatively you can also use yaml to pass in args (more details below):
 
 ```bash
 ac-compile --recipe configs/recipes/<YOUR RECIPE>.yaml
