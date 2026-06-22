@@ -50,8 +50,6 @@ No external runtime dependencies beyond Python ≥ 3.10 and PyYAML.
 ---
 
 
----
-
 ## Calibration vs. Ordinal Use
 
 AC is a **forward proxy**, not a measurement system. Without calibration, AC is **ordinal**:
