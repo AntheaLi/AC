@@ -347,6 +347,14 @@ class ThroughputResult:
 
     # Memory
     memory_footprint_per_gpu_gb: float = 0.0
+    # v1-fix demo-audit-2 (Jun 2026): the field above is *inference* memory
+    # (weights + KV cache + activations). The field below is the per-GPU
+    # *training* memory under FSDP/ZeRO-3 sharding across DP replicas, which
+    # is what actually has to fit in HBM during pretraining. Without this
+    # the optimizer happily declared 7B BF16 feasible on a single H100 with
+    # TP=1 PP=1 even though real training memory (weights + grads + AdamW
+    # opt states + activations) is 90-150 GB before sharding.
+    training_memory_per_gpu_gb: float = 0.0
 
     # Breakdown
     per_layer_breakdown: Optional[LayerBreakdown] = None  # training
@@ -670,6 +678,47 @@ def load_calibration(hw_name: str) -> Optional[CalibrationTable]:
     return None
 
 
+# Hardware aliases that share a calibration table (alias -> canonical name
+# used for the calibration file lookup). Keep in sync with `load_hardware`.
+_HARDWARE_CALIBRATION_ALIAS: Dict[str, str] = {
+    "trn2": "trainium2",
+    "trn3": "trainium3",
+}
+
+# Track which hardware names we've already warned about in this process so
+# the user sees at most one WARNING per (CLI invocation, hardware name).
+_CALIBRATION_WARNED: set = set()
+
+
+def warn_if_uncalibrated(hw_name: str, stream=None) -> bool:
+    """Emit a one-shot WARNING if `hw_name` has no calibration table on disk.
+
+    Returns True if a warning was emitted, False otherwise. The warning is
+    de-duplicated per-process via `_CALIBRATION_WARNED`. The throughput
+    model still runs (with default efficiency multipliers); this just
+    surfaces the fact that the user is on uncalibrated priors so the
+    headline TPS / TBT numbers can be read with appropriate skepticism.
+    """
+    import sys as _sys
+    canonical = _HARDWARE_CALIBRATION_ALIAS.get(hw_name, hw_name)
+    if canonical in _CALIBRATION_WARNED:
+        return False
+    if load_calibration(canonical) is not None:
+        return False
+    _CALIBRATION_WARNED.add(canonical)
+    out = stream if stream is not None else _sys.stderr
+    print(
+        f"WARNING: hardware `{hw_name}` has no calibration table "
+        f"(searched {os.path.join(_CALIBRATION_DIR, canonical + '_calibration.json')}). "
+        f"Throughput predictions will use AC's default efficiency "
+        f"multipliers. Run `ac-auto-calibrate fit --measurements "
+        f"<traces>.jsonl` to fit lab-local efficiency. Treat absolute "
+        f"TPS/TBT/loss numbers as uncalibrated priors until then.",
+        file=out,
+    )
+    return True
+
+
 def load_hardware(name: str) -> HardwareConfig:
     """Load a hardware config by short name.
 
@@ -783,6 +832,30 @@ def _attention_cost(
 
     fused_eff = hw.fused_attention_efficiency.get(precision,
                 hw.fused_attention_efficiency.get("bf16", 0.75))
+
+    # v1-fix demo-audit: d_head-aware efficiency. Hopper/Blackwell tensor
+    # cores ingest 128-element MMA tiles along the K dimension. d_head=128
+    # fills exactly one tile and hits peak fused-attention efficiency. At
+    # d_head=64, FlashAttention pads to a half-tile and incurs ~30%
+    # throughput loss on H100 (measured: Dao et al. FA2 paper Table 5;
+    # Llama2-vs-Llama3 head-dim ablations). d_head=256 is slightly less
+    # efficient than 128 because of register pressure. We model the
+    # multiplier as a piecewise factor anchored at d_head=128 = 1.0.
+    if d_head <= 32:
+        d_head_eff = 0.55
+    elif d_head <= 48:
+        d_head_eff = 0.62
+    elif d_head <= 64:
+        d_head_eff = 0.70
+    elif d_head <= 96:
+        d_head_eff = 0.88
+    elif d_head <= 128:
+        d_head_eff = 1.00
+    elif d_head <= 192:
+        d_head_eff = 0.92
+    else:  # >=256, register-pressure regime
+        d_head_eff = 0.82
+    fused_eff = fused_eff * d_head_eff
 
     t_compute = flops_attn / (hw.peak_flops_s(precision) * fused_eff)
     t_memory = hbm_bytes / hw.hbm_bandwidth_bytes_s
@@ -1849,11 +1922,42 @@ def throughput(
     prefill_arch = arch
     if prefill_seq_len is not None and int(prefill_seq_len) != arch.seq_len:
         prefill_arch = replace(arch, seq_len=max(1, int(prefill_seq_len)))
+    # v1-fix audit (TTFT-per-user): TTFT is a per-request SLO, not a
+    # batched-throughput metric. Previously prefill_arch inherited
+    # arch.batch_size = serving_batch (typically 32), so the reported
+    # prefill_time_ms was the latency to GEMM all 32 prompts in one shot —
+    # ~30× larger than the per-user first-token latency that ttft budgets
+    # are written against. We force batch_size=1 for the prefill phase
+    # so the reported TTFT is comparable to constraints.serving_ttft_ms.
+    # Batched-prefill throughput (if needed) can still be derived from
+    # decode/training metrics; the per-user latency is what matters for
+    # SLO feasibility.
+    prefill_arch = replace(prefill_arch, batch_size=1)
+
+    # v1-fix audit (training-batch-per-replica): training throughput must
+    # not depend on the serving SLO. Previously every phase inherited
+    # `arch.batch_size = constraints.serving_batch`, so when the optimizer
+    # explored a tight TBT cell (e.g. serving_batch=2) the training-step
+    # matmul shapes shrank to B=2 and slid into the memory-bound regime —
+    # making the reported `train_tps` 12-21% lower for *identical*
+    # architectures whose only difference was the serving SLO knob.
+    # In real training, per-replica micro-batch is set independently of
+    # serving (4-32 is typical: Llama-2/3, DeepSeek-V3). We pin a sensible
+    # default here; future work: thread an explicit
+    # `constraints.training_micro_batch` through evaluate_candidate.
+    TRAINING_MICRO_BATCH_PER_REPLICA = 8
+    train_arch = replace(
+        arch,
+        batch_size=max(
+            int(getattr(arch, "training_micro_batch", 0) or 0),
+            TRAINING_MICRO_BATCH_PER_REPLICA,
+        ),
+    )
 
     if is_hybrid:
         # --- Heterogeneous path: sum per-layer costs ---
         train_layers = compute_heterogeneous_layer_times(
-            arch, hw, lattice_hw, tp_degree, "training",
+            train_arch, hw, lattice_hw, tp_degree, "training",
             calibration=cal_table, ep_degree=ep_degree, ep_topology=ep_topology,
         )
         # Sum costs for layers in this pipeline stage
@@ -1877,7 +1981,7 @@ def throughput(
         layer_decode = decode_layers[0]
     else:
         # --- Uniform path (v0 behavior) ---
-        layer_train = compute_layer_time(arch, hw, lattice_hw, tp_degree, "training",
+        layer_train = compute_layer_time(train_arch, hw, lattice_hw, tp_degree, "training",
                                          calibration=cal_table,
                                          ep_degree=ep_degree, ep_topology=ep_topology)
         raw_train_s = layer_train.total_s * layers_per_stage
@@ -1935,9 +2039,9 @@ def throughput(
     # Ulysses is roughly 2× cheaper in comm than Ring (head scatter vs ring KV).
     cp = max(1, int(getattr(arch, "cp_degree", 1) or 1))
     if cp > 1:
-        # Compute & memory share of the seq-parallel work
+        # Compute & memory share of the seq-parallel work (training batch)
         bpe_act = hw.bytes_per_elem(arch.precision)
-        seq_bytes_per_layer = arch.batch_size * arch.seq_len * arch.d_model * bpe_act
+        seq_bytes_per_layer = train_arch.batch_size * train_arch.seq_len * train_arch.d_model * bpe_act
         comm_factor = (cp - 1) / cp
         cp_method_factor = 0.5 if getattr(arch, "cp_method", "ring") == "ulysses" else 1.0
         cp_comm_bytes = comm_factor * arch.n_layers * seq_bytes_per_layer * cp_method_factor
@@ -1947,7 +2051,8 @@ def throughput(
         # CP reduces the attention compute proportionally; sequence-parallel
         # FLOP savings are folded into raw_train_s here.
         train_step_s = train_step_s / cp + cp_comm_s
-    tokens_per_step = arch.batch_size * arch.seq_len
+    # Per-replica tokens per step uses the *training* batch, not serving.
+    tokens_per_step = train_arch.batch_size * train_arch.seq_len
     result.training_time_per_step_s = train_step_s
     result.training_throughput_tokens_per_sec = tokens_per_step / train_step_s if train_step_s > 0 else 0
 
@@ -2012,6 +2117,42 @@ def throughput(
             ep_degree=ep_degree,
         )
     result.memory_footprint_per_gpu_gb = mem_bytes / (1024**3)
+
+    # v1-fix demo-audit-2 (Jun 2026): training memory under FSDP/ZeRO-3.
+    # Components per GPU after sharding across dp:
+    #   - weights (bpe bytes/param), sharded across (TP * dp)
+    #   - grads (bpe bytes/param), sharded across (TP * dp)
+    #   - optimizer states (cal.optimizer_bytes_per_param, default 12 for
+    #     AdamW = 4 fp32 master + 4 m + 4 v), sharded across (TP * dp)
+    #   - activations: same per-replica cost as inference activations,
+    #     scaled by training_micro_batch / serving_batch
+    # We surface this so the optimizer / report can flag training-infeasible
+    # configs even when inference-memory fits.
+    try:
+        total_params_for_train = estimate_params(
+            arch.d_model, arch.n_heads, arch.d_head, arch.ffn_dim,
+            arch.n_layers, arch.n_kv_heads, arch.vocab_size,
+        )
+        bpe_train = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(
+            arch.precision, 2)
+        opt_bpp = float(cal.get("optimizer_bytes_per_param", 12))
+        dp_shard = max(1, int(getattr(arch, "dp_degree", 1)))
+        full_shard = max(1, tp_degree * dp_shard)
+        weight_bytes = total_params_for_train * bpe_train / full_shard
+        grad_bytes = total_params_for_train * bpe_train / full_shard
+        opt_bytes_total = total_params_for_train * opt_bpp / full_shard
+        # Activations: rough O(microbatch * seq * d_model * 10 * bpe) per
+        # gradient checkpoint region. We reuse the activations term computed
+        # by estimate_memory_per_gpu by recomputing it for the training
+        # micro-batch.
+        train_mb = max(1, int(train_arch.batch_size))
+        act_bytes_train = train_mb * arch.seq_len * arch.d_model * bpe_train * 10
+        train_total = weight_bytes + grad_bytes + opt_bytes_total + act_bytes_train
+        result.training_memory_per_gpu_gb = train_total / (1024 ** 3)
+    except Exception:
+        # If anything is missing (e.g. estimate_params unavailable for
+        # exotic state-space configs), leave at 0.0 and skip the check.
+        result.training_memory_per_gpu_gb = 0.0
 
     # Per-layer breakdowns for all phases
     result.per_layer_breakdown = layer_train

@@ -52,6 +52,24 @@ def generate_justification(
             f"selected: {float(actual_b):.2f}B). "
             f"Override with `--param-tolerance 0.05` for a tighter match."
         )
+        # v1-fix D (demo audit): when the selected active-params lands a
+        # non-trivial fraction above the target, surface *why*. The
+        # shape-law prior often prefers a slightly wider d_model than the
+        # exact-target shape; the user typed `--params 1` and got 1.14B,
+        # which looks like a bug. Naming the mechanism (shape-law /
+        # lattice quantisation) and the override (`--param-tolerance`)
+        # closes the loop without making the optimizer's default tighter.
+        drift_pct = (float(actual_b) - target_b) / max(1e-9, target_b) * 100.0
+        if abs(drift_pct) >= 5.0:
+            direction = "above" if drift_pct > 0 else "below"
+            lines.append(
+                f"Active-params landed {abs(drift_pct):.1f}% {direction} target "
+                f"({float(actual_b):.2f}B vs {target_b:.2f}B requested). "
+                "The shape-law penalty preferred this shape over the exact-target "
+                "candidate within the lattice quantisation; tighten with "
+                "`--param-tolerance 0.05` if you need a closer match, or pass "
+                "`--param-band 0.02` to force a hard band."
+            )
     budget_parts = []
     if con.serving_tbt_ms is not None:
         budget_parts.append(f"TBT <= {con.serving_tbt_ms}ms")

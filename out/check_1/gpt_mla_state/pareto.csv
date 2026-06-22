@@ -1,4 +1,0 @@
-row,kind,predicted_loss,serving_tbt_ms,prefill_time_ms,training_tps,memory_per_gpu_gb,kv_cache_gb,total_params_b,stress_hbm_bw_decode,stress_kv_footprint,stress_hbm_capacity,stress_training_mem,stress_all_reduce,binding_axes
-1,baseline,1.8455,9.0371,42.185,9524.7278,19.8561,0.0176,8.09,3.8606,0.0002,0.2482,0.4187,0.0014,hbm_bw_decode
-2,candidate,1.8983,9.0547,44.3978,9077.0459,2.0472,0.0022,7.96,0.3919,0.0002,0.0257,0.1936,0.0014,
-3,delta,0.0528,0.0176,2.2127,-447.6819,-17.8089,-0.0154,-0.13,-3.4686,-0.0001,-0.2225,-0.2251,-0.0,hbm_bw_decode

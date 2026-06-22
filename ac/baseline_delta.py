@@ -273,7 +273,20 @@ def generate_modifier_justification(result: ModifierResult, top_n: int = 6) -> s
     q = selected.evaluated.quality
     lines.append(f"- Confidence: {q.confidence}")
     lines.append(f"- Total residual: {q.total_penalty_fraction * 100:.2f}%")
-    lines.append(f"- Uncertainty interval: +{q.uncertainty_low_pct:.2f}% to +{q.uncertainty_high_pct:.2f}% residual range")
+    # v1-fix A (demo audit): the previous renderer always prepended `+` to
+    # both bounds, which produced unreadable output when the upper bound
+    # was negative (e.g. for an MoE config whose modeled residual is a
+    # net *improvement*: `+0.00% to +-3.71%`). A reader would conclude
+    # the output is corrupt. Render signed values explicitly and label
+    # the field as "residual range" so a negative bound is unambiguous
+    # ("the modeled improvement could be up to N%").
+    lo_pct = q.uncertainty_low_pct
+    hi_pct = q.uncertainty_high_pct
+    lines.append(
+        f"- Residual range: {lo_pct:+.2f}% to {hi_pct:+.2f}% "
+        "(negative values = predicted quality improvement; "
+        "this is the loss-residual band, not a perplexity CI)"
+    )
     lines.append("- Treat this as an architecture-ranking signal, not a final perplexity prediction.")
     return "\n".join(lines)
 

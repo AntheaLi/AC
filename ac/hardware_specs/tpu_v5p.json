@@ -46,7 +46,8 @@
     "training_system_efficiency": 0.55,
     "decode_system_efficiency": 0.40,
     "prefill_system_efficiency": 0.57,
-    "calibration_source": "v1-validation Phase 0 — Llama-3-8B v5p MaxText anchor (was 0.35; MaxText reports ~50% MFU)"
+    "efficiency_multipliers": {"training": 1.30, "prefill": 1.20, "decode": 1.30},
+    "calibration_source": "v1-validation Phase 0 — Llama-3-8B v5p MaxText anchor (was 0.35; MaxText reports ~50% MFU). v1 demo audit (June 2026) added efficiency_multipliers so reported MFU lands in the published Pallas/MaxText 45-55% band instead of the raw-roofline 30-35%."
   },
 
   "notes": {

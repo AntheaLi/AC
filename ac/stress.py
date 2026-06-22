@@ -238,20 +238,31 @@ class StressVector:
         return d
 
     def pretty(self) -> str:
-        """Human-readable summary for CLI use."""
+        """Human-readable summary for CLI use.
+
+        Inactive-axis handling: a phase-inactive axis (e.g. `training_mem`
+        when phase=decode) gets shown as `inactive` instead of its raw
+        band. Previously we printed `binding (117% — over) [inactive for
+        decode]`, which is internally contradictory: an axis cannot be
+        binding AND inactive simultaneously, and a quick scanner will
+        latch onto "binding" before reading the bracket. Demote inactive
+        rows to the `inactive` label and tuck the underlying number into
+        a parenthetical so power users can still see what would happen if
+        the axis became live.
+        """
         rows = []
         active_axes = set(active_axes_for_phase(self.phase))
         for axis in STRESS_AXES:
             v = self.axis_value(axis)
             b = self.band(axis)
-            shown_band = b
-            # Annotate >100% utilisation so the reader sees that 1.030 means
-            # "kernel needs more bandwidth than the hardware can supply" —
-            # the band name alone (binding / violated) doesn't carry that.
-            if v >= 1.0:
-                shown_band = f"{shown_band} ({v*100:.0f}% of peak — over)"
-            if axis not in active_axes and b in PRESSURED_OR_WORSE:
-                shown_band = f"{shown_band} [inactive for {self.phase}]"
+            if axis not in active_axes:
+                # Demote to `inactive`; surface the raw band only as
+                # parenthetical context, never as the headline word.
+                shown_band = f"inactive ({b} {v*100:.0f}% if active)"
+            else:
+                shown_band = b
+                if v >= 1.0:
+                    shown_band = f"{shown_band} ({v*100:.0f}% of peak — over)"
             marker = "*" if axis in self.binding_axes else " "
             rows.append(f"  {marker} {axis:18s} {v:6.3f}  {shown_band}")
         binding = ", ".join(self.binding_axes) or "(none)"
@@ -261,7 +272,8 @@ class StressVector:
             + "\n".join(rows)
             + f"\n  binding: {binding}"
             + "\n  bands: relaxed [0,0.7), loaded [0.7,0.9), "
-              "pressured [0.9,1.0), binding [1.0,1.2), violated [1.2,∞)"
+              "pressured [0.9,1.0), binding [1.0,1.2), violated [1.2,∞), "
+              "inactive (axis off this phase)"
         )
 
 

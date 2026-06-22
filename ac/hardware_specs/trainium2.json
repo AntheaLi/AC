@@ -9,10 +9,10 @@
   "hbm_bandwidth_tb_s": 2.9,
 
   "peak_flops_tf": {
-    "bf16": 650,
-    "fp16": 650,
-    "fp8":  1300,
-    "int8": 1300
+    "bf16": 667,
+    "fp16": 667,
+    "fp8":  1334,
+    "int8": 1334
   },
 
   "bytes_per_element": {
@@ -47,7 +47,8 @@
     "optimizer_bytes_per_param": 12,
     "training_system_efficiency": 0.40,
     "decode_system_efficiency": 0.43,
-    "prefill_system_efficiency": 0.58
+    "prefill_system_efficiency": 0.58,
+    "efficiency_multipliers": {"training": 1.55, "prefill": 1.30, "decode": 1.40}
   },
 
   "notes": {

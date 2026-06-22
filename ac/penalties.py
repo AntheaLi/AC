@@ -52,8 +52,14 @@ SHAPE_GAMMA_W = 0.341  # width exponent
 SHAPE_K_D = 0.014     # depth coefficient
 SHAPE_GAMMA_D = 0.341  # depth exponent
 
-# Penalty strength: calibrated so 2× deviation ≈ 2% relative PPL
-SHAPE_C = 0.03
+# Penalty strength: previously 0.03 (calibrated so 2× deviation ≈ 2% PPL),
+# but the v1 demo audit caught the optimizer picking pathological shapes
+# (d_model=6144 with L=15 at 7B params) when the SLO got tight — the
+# 2% penalty was easily eaten by the wide-shallow throughput win.
+# Re-calibrated to 0.05, consistent with Tay et al. 2021 ("Scale
+# Efficiently") and Levine et al. 2020 figures of ~5-8% PPL at 0.5×
+# depth — i.e. wide-shallow degeneracy hurts more than the v0 fit said.
+SHAPE_C = 0.05
 
 # Lower bounds (sanity floors)
 SHAPE_D_MIN = 256

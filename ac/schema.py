@@ -571,14 +571,26 @@ def validate_config(config: dict) -> List[str]:
     if errors:
         return errors  # can't check deeper if top-level missing
 
-    # Schema version
+    # Schema version. A version mismatch is the most actionable error: the
+    # rest of the validator's complaints will look like a wall of missing
+    # fields, but the real fix is "update schema_version" or "regenerate the
+    # config with the current ac-compile". Return early on a version error so
+    # the user sees it cleanly instead of buried in 5+ unrelated lines.
     sv = config.get("schema_version", "")
     if not sv:
-        errors.append("schema_version is empty")
-    elif sv not in ACCEPTED_SCHEMA_VERSIONS:
-        errors.append(
-            f"schema_version {sv!r} not in accepted set {sorted(ACCEPTED_SCHEMA_VERSIONS)}"
-        )
+        return [
+            "schema_version is empty. Expected one of "
+            f"{sorted(ACCEPTED_SCHEMA_VERSIONS)} (current: {SCHEMA_VERSION!r}). "
+            "Set schema_version on the top-level config or regenerate it with "
+            "ac-compile."
+        ]
+    if sv not in ACCEPTED_SCHEMA_VERSIONS:
+        return [
+            f"schema_version {sv!r} is not supported by this build. "
+            f"Accepted versions: {sorted(ACCEPTED_SCHEMA_VERSIONS)} "
+            f"(current: {SCHEMA_VERSION!r}). Either upgrade the config to "
+            f"{SCHEMA_VERSION!r} or install a build of ac that accepts {sv!r}."
+        ]
 
     # Metadata
     meta = config.get("metadata", {})

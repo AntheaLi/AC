@@ -715,15 +715,26 @@ def modifier_pareto_to_csv(result: ModifierResult) -> str:
 
     output = io.StringIO()
     writer = csv.writer(output)
+    # Schema parity with greenfield pareto.csv: include the loss CI band and
+    # total uncertainty percentage so the "treat two rows as
+    # quality-equivalent if their loss CIs overlap" recipe from the README
+    # works on the modifier output too.
     writer.writerow([
         "rank", "selected", "is_baseline", "changes", "risk_label", "risk_score",
         "quality_preserving", "move_class", "quality_risk_pct", "tp", "d_model", "n_layers", "n_heads", "d_head",
         "n_kv_heads", "ffn_dim", "ffn_precision", "kv_bits", "params_B",
-        "predicted_loss", "training_tps", "serving_tbt_ms", "serving_ttft_ms",
+        "predicted_loss", "loss_ci_low", "loss_ci_high", "uncertainty_total_pct",
+        "training_tps", "serving_tbt_ms", "serving_ttft_ms",
         "memory_gb", "kv_cache_gb", "confidence",
     ])
     for idx, rec in enumerate(result.pareto_frontier, 1):
         c = rec.evaluated.arch
+        loss = float(rec.evaluated.predicted_loss)
+        # uncertainty_total is stored as a fraction (e.g. 0.031 = 3.1%).
+        u_frac = float(getattr(rec.evaluated.quality, "uncertainty_total", 0.0) or 0.0)
+        half = abs(loss) * u_frac
+        loss_ci_low = loss - half
+        loss_ci_high = loss + half
         writer.writerow([
             idx,
             rec is result.selected,
@@ -744,7 +755,10 @@ def modifier_pareto_to_csv(result: ModifierResult) -> str:
             c.ffn_precision,
             c.kv_cache_bits,
             c.total_params_b,
-            round(rec.evaluated.predicted_loss, 4),
+            round(loss, 4),
+            round(loss_ci_low, 4),
+            round(loss_ci_high, 4),
+            round(u_frac * 100, 3),
             round(rec.evaluated.training_tps),
             round(rec.evaluated.serving_tbt_ms, 2),
             round(rec.evaluated.throughput.prefill_time_ms, 2),

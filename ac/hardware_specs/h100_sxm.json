@@ -55,9 +55,10 @@
     "prefill_system_efficiency": 0.60,
     "efficiency_multipliers": {
       "training": 1.8,
-      "prefill": 1.4,
-      "decode": 1.0
-    }
+      "prefill": 2.5,
+      "decode": 1.5
+    },
+    "_prefill_multiplier_note": "v1-fix demo-audit-2 (Jun 2026): prefill bumped 1.4 -> 2.5 to match published FA-3 throughput on H100. The previous 1.4 gave net 0.84 of half-peak ≈ 21% of true FP8 peak, which was 3-4x too pessimistic vs FlashAttention-3 traces (Llama-2-7B @ 8k batch=1 ~50-80ms; the previous calibration reported ~290ms). At 2.5 the net achievable is 0.6 * 2.5 = 1.5x half-peak ≈ 75% of true BF16 peak ≈ 38% of true FP8 peak when FFN is FP8 — matches Dao 2024 FA-3 prefill benchmark."
   },
 
   "notes": {

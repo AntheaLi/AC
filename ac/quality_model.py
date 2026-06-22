@@ -985,18 +985,23 @@ def _large_shape_stability_prior(
     n_active = max(1, getattr(arch, "n_active_params", n_total) or n_total)
     anchor_n = n_active
     total_b = anchor_n / 1e9
-    if total_b < 120:
-        return TermResult(
-            name="large_shape_stability_prior",
-            confidence="not_applicable",
-            source="below_120b_active",
-        )
-
+    # v1-fix demo-audit D2: extend the shape prior below 120B. The 120B
+    # cutoff was originally rationalized as "scaling laws don't pin down
+    # internal shapes here", but in practice the absence of *any* shape
+    # signal let the serving-constrained branch select L=5 / L=7 / L=13
+    # transformers at 3B-7B targets. We now apply a softer version of the
+    # same band check across the whole 1B-1T range, with sub-120B anchors
+    # tied to Llama / Mistral / Qwen published shapes.
     anchors = (
-        (120.0, 12288.0, 80.0),
-        (250.0, 16384.0, 88.0),
+        (1.0,    2048.0,  22.0),  # Llama-3 1B / Qwen2-1.5B
+        (3.0,    3072.0,  28.0),  # Qwen2-3B
+        (7.0,    4096.0,  32.0),  # Llama-3 8B / Mistral-7B
+        (13.0,   5120.0,  40.0),  # Llama-2 13B
+        (70.0,   8192.0,  80.0),  # Llama-3 70B
+        (120.0, 12288.0,  80.0),
+        (250.0, 16384.0,  88.0),
         (500.0, 24576.0, 104.0),
-        (1000.0, 28672.0, 112.0),
+        (1000.0,28672.0, 112.0),
     )
     target_log = math.log(max(total_b, 1.0))
     center_b, center_d, center_l = min(
@@ -1031,7 +1036,24 @@ def _large_shape_stability_prior(
         penalty += 0.020 * math.log(shape_ratio / 2.20) ** 2
         reasons.append("depth/width ratio too deep")
 
-    penalty = min(0.060, max(0.0, penalty))
+    # v1-fix demo-audit D2: raise the cap. The previous 6% cap was too low
+    # to deselect catastrophic depth/width violations — depth_ratio=19
+    # (L=1980 at d=6144 vs anchor L=104) had a raw penalty of ~0.18 that
+    # the old `min(0.060, ...)` clipped to 6%. The new cap is 35%, and
+    # extreme excursions (>3× off-band) get a hard quadratic term on top
+    # so the optimizer can actually see them.
+    if depth_ratio > 3.0 or width_ratio < 0.30:
+        # Quadratic blow-up for "this is not a transformer anyone would
+        # train" territory. Capped at 0.35.
+        extreme = 0.0
+        if depth_ratio > 3.0:
+            extreme += 0.10 * (math.log(depth_ratio / 3.0)) ** 2
+        if width_ratio < 0.30:
+            extreme += 0.10 * (math.log(0.30 / max(width_ratio, 1e-6))) ** 2
+        penalty += extreme
+        reasons.append("extreme aspect ratio (depth>3× or width<0.3× of anchor)")
+
+    penalty = min(0.35, max(0.0, penalty))
     if penalty <= 0:
         return TermResult(
             name="large_shape_stability_prior",
@@ -1057,7 +1079,7 @@ def _large_shape_stability_prior(
         confidence=confidence,
         source="frontier_scale_depth_width_prior",
         notes=[
-            "Coarse prior for 120B-1T candidates; verify with training stability sweeps.",
+            "Coarse shape prior across 1B-1T; verify with training stability sweeps.",
             "; ".join(reasons),
         ],
         features={
@@ -1123,9 +1145,49 @@ def _architecture_residual(
     )
     f_d_head = float(weights.get("d_head", 0.001)) * _safe_log_ratio(d_head, preferred_d_head) ** 2
     f_query_heads = float(weights.get("query_heads", 0.001)) * _safe_log_ratio(n_query_heads, default_query_heads) ** 2
+
+    # v1-fix C1 (demo audit): two-sided KV-heads penalty with a flat-zero
+    # plateau across the "GQA sweet spot" [n_heads/8, n_heads/4]. Before
+    # this fix the penalty was one-sided (only fired when n_kv_heads was
+    # below a fixed kv_reference=8), so the optimizer was rewarded for
+    # adding KV heads — extra KV-cache weights bump total_params, which
+    # *lowers* the Chinchilla spine loss for "free". Combined with the
+    # weak throughput cost of extra KV heads at TP ≥ n_kv_heads, every
+    # greenfield run in the v1 demo corpus selected MHA. The shallow-KV
+    # branch (kept) and the new excess-KV branch (added) together produce
+    # a U-shaped penalty whose minimum is the plateau [GQA-8, GQA-4].
+    #
+    # Thresholds:
+    #   kv_lower_threshold = max(1, n_query_heads / 8)  — GQA-8
+    #   kv_upper_threshold = max(kv_lower_threshold, n_query_heads / 4)  — GQA-4
+    #
+    # The legacy `kv_reference = min(default_query_heads, 8)` constant is
+    # also honoured as a lower floor so existing calibration regressions
+    # on small models (where n_heads ≤ 32 and n_heads/8 ≤ 4) keep their
+    # original behaviour: kv_lower_threshold = max(kv_reference, …).
+    #
+    # Calibration: the excess-side weight 0.008 was tuned against the v1
+    # demo Mistral-7B-class Pareto frontier so MHA (kv=72) lands 0.02–0.03
+    # absolute loss above GQA-4 (kv=18), in line with published Ainslie
+    # 2023 / Llama-2-70B / Qwen-3 ablations. The shallow-side weight
+    # stays at the legacy 0.001.
+    kv_lower_threshold = max(kv_reference, n_query_heads / 8.0)
+    kv_upper_threshold = max(kv_lower_threshold, n_query_heads / 4.0)
     f_kv_heads = 0.0
-    if n_kv_heads < kv_reference:
-        f_kv_heads = float(weights.get("kv_heads", 0.001)) * math.log(kv_reference / n_kv_heads) ** 2
+    if n_kv_heads < kv_lower_threshold:
+        # Shallow GQA / MQA: per-head group is too aggressive. Quadratic
+        # in log(kv_lower_threshold / n_kv_heads).
+        f_kv_heads = (
+            float(weights.get("kv_heads", 0.001))
+            * math.log(kv_lower_threshold / max(1.0, n_kv_heads)) ** 2
+        )
+    elif n_kv_heads > kv_upper_threshold:
+        # Excess KV heads (toward MHA): per-head group is too shallow.
+        # Quadratic in log(n_kv_heads / kv_upper_threshold).
+        f_kv_heads = (
+            float(weights.get("kv_heads_excess", 0.008))
+            * math.log(n_kv_heads / kv_upper_threshold) ** 2
+        )
 
     # Compatibility with the original ablation prior, without adding it twice.
     # v1-fix (review): clamp the modeled GQA-sharing term to zero in the
@@ -1244,13 +1306,25 @@ def _architecture_residual(
     # v1-fix MLA: small compression-quality penalty for MLA. DeepSeek-V2 §3
     # shows MLA at c_kv ≥ 512 is roughly quality-neutral vs MHA (~0.05 PPL
     # delta on their eval suite). The cost grows when c_kv shrinks far below
-    # the per-head working dim. Shape: penalty = w · max(0, log(c_ref / c_kv))
-    # with c_ref = 4 × d_head (heuristic — MLA latent typically sits ~ 4×
-    # the per-head dim at reasonable quality).
+    # the per-head working dim.
+    #
+    # v1-fix demo-audit (June 2026 follow-up): the reference scale for
+    # "per-head working dim" used to be `d_head`, but on MLA candidates
+    # `d_head` was the dense lattice's leaked value (64/128/256), not the
+    # actual MLA Q per-head dim (d_nope + d_rope, typically 192). That made
+    # the penalty fire asymmetrically — cell-9 MLA paid 0.28 % at dh=256
+    # while cell-5 MLA escaped the penalty entirely at dh=64 because c_kv
+    # > 4·64. Use the true MLA per-head dim so the threshold is calibrated
+    # against DeepSeek's c_kv≈4·(d_nope+d_rope) sweet spot.
     f_attention_mla = 0.0
     if arch.attention_type == "mla" and arch.mla_latent_dim:
         c_kv = float(arch.mla_latent_dim)
-        c_ref = 4.0 * float(d_head)
+        d_nope_mla = float(getattr(arch, "mla_nope_head_dim", 0) or 0)
+        d_rope_mla = float(getattr(arch, "mla_rope_head_dim", 0) or 0)
+        # Fall back to d_head only if the MLA dims aren't populated (legacy
+        # path / older deltas). New emitter always populates them.
+        per_head_mla = (d_nope_mla + d_rope_mla) if (d_nope_mla + d_rope_mla) > 0 else float(d_head)
+        c_ref = 4.0 * per_head_mla
         if c_kv < c_ref:
             f_attention_mla = (
                 float(weights.get("mla_compression", 0.004))
@@ -1278,6 +1352,37 @@ def _architecture_residual(
                 float(weights.get("nsa_undercoverage", 0.005))
                 * math.log(ref_coverage / coverage)
             )
+
+    # v1-fix demo-audit (June 2026 follow-up): MLA / NSA candidates were
+    # paying MHA-style GQA penalties because the enumerator emits them with
+    # n_kv_heads = n_heads as a carrier value (later zeroed in the JSON
+    # serializer for display). That carrier value tripped the "excess KV
+    # heads" branch of `f_kv_heads`, adding ~1.5% loss to every MLA pareto
+    # entry — enough to push MLA off the frontier in every demo cell despite
+    # f_attention_mla itself being small.
+    #
+    # The MHA/GQA residual subterms (d_head/query-heads/KV-heads/GQA-sharing/
+    # attention-bottleneck/kernel-underrun) all assume per-head softmax
+    # attention with a per-head KV cache. None of that is the cost model
+    # for MLA's compressed-latent KV or NSA's compressed+selected branches.
+    # Short-circuit those subterms when attention_type is not "full" and
+    # let f_attention_mla / f_attention_nsa carry the architecture residual,
+    # calibrated against DeepSeek-V2/V3 and DeepSeek-NSA-2025 ablations.
+    is_non_mha = (arch.attention_type in ("mla", "nsa"))
+    if is_non_mha:
+        f_d_head = 0.0
+        f_query_heads = 0.0
+        f_kv_heads = 0.0
+        f_gqa_sharing = 0.0
+        f_attention_bottleneck = 0.0
+        f_attn_kernel_underrun = 0.0
+        # MHA long-context penalty still applies for MLA (it's still softmax
+        # attention over the full token set, just with compressed K/V), but
+        # NSA is explicitly a long-context construction and is charged via
+        # f_attention_nsa coverage instead.
+        if arch.attention_type == "nsa":
+            f_attention_long_context = 0.0
+            f_attention_swa_locality = 0.0
 
     f_attention_heads = (
         f_d_head + f_query_heads + f_kv_heads
@@ -1321,14 +1426,21 @@ def _architecture_residual(
     value_extra_sparsity = f_sparsity_2_4
     value = f_width_depth + f_mlp_attention_ratio + f_attention_heads + value_extra_sparsity + value_extra_yoco
 
+    # v1-fix demo-audit (June 2026 follow-up): for MLA the residual's GQA
+    # carrier value is meaningless once the MHA subterms are zeroed above.
+    # Report it the same way the JSON schema does (0 = N/A) so users don't
+    # see a 64-headed "MHA" feature row on an MLA candidate.
+    _features_n_kv_heads = 0 if arch.attention_type == "mla" else n_kv_heads
+    _features_gqa_group = 0.0 if arch.attention_type == "mla" else round(gqa_group, 4)
+
     features = {
         "d_model": arch.d_model,
         "n_layers": arch.n_layers,
         "n_query_heads": n_query_heads,
         "n_query_heads_default": default_query_heads,
         "d_head": d_head,
-        "n_kv_heads": n_kv_heads,
-        "gqa_group_size": round(gqa_group, 4),
+        "n_kv_heads": _features_n_kv_heads,
+        "gqa_group_size": _features_gqa_group,
         "ffn_ratio": round(ffn_ratio, 4),
         "mlp_to_attention_param_ratio": round(mlp_attn, 4),
         "depth_width_ratio": depth_width,
@@ -1393,8 +1505,8 @@ def _architecture_residual(
     ]
     if d_head not in acceptable_d_head:
         notes.append(f"d_head={d_head} is outside the conventional set {sorted(acceptable_d_head)}.")
-    if gqa_group >= 8:
-        notes.append("Aggressive GQA/MQA increases quality uncertainty; validate with ablations before treating as free.")
+    if gqa_group > 16:
+        notes.append("Aggressive GQA/MQA (group_size>16) increases quality uncertainty; validate with ablations before treating as free.")
     if bottleneck_note:
         notes.append(bottleneck_note)
 
@@ -2070,8 +2182,17 @@ def _risk_residual(
 
     notes = []
     uncertainty = 0.0
-    if gqa_group >= 8:
-        notes.append("Aggressive GQA sharing is modeled as uncertainty, not as a precise standalone scaling law.")
+    # v1-fix demo-audit-2 (Jun 2026): threshold raised from >=8 to >16.
+    # Llama-3-70B / Mistral-Large / Qwen-3 all ship with GQA group_size=8
+    # (n_q_heads=64, n_kv_heads=8) and group_size=8 is the production
+    # standard, not "aggressive". The previous threshold added a 2pp
+    # uncertainty penalty to every modern production-shaped 7B/70B,
+    # which then leaked into the optimizer as risk_uncertainty_pct=2%
+    # on B200 1B even though the chosen config was a normal Llama-3
+    # GQA-8 shape. >16 is true MQA-territory (group_size=16 is
+    # Falcon-style, >=32 starts approaching pure MQA).
+    if gqa_group > 16:
+        notes.append("Aggressive GQA sharing (group_size>16) is modeled as uncertainty, not as a precise standalone scaling law.")
         uncertainty += float(cfg.get("uncertainty", 0.02))
     if bottleneck:
         notes.append("Width/head coupling indicates possible attention bottleneck risk.")

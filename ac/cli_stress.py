@@ -213,6 +213,11 @@ def _resolve_arch(args) -> tuple:
 
 def cmd_stress(args) -> int:
     arch, name = _resolve_arch(args)
+    try:
+        from throughput_model import warn_if_uncalibrated
+        warn_if_uncalibrated(args.hw)
+    except Exception:
+        pass
     wl = Workload(batch_size=args.batch, prefill_seq_len=args.prefill_seq,
                   decode_kv_len=args.decode_kv, phase=args.phase)
     sv = compute_throughput_stress(
@@ -255,6 +260,11 @@ def cmd_quality(args) -> int:
 
 def cmd_transition(args) -> int:
     arch, name = _resolve_arch(args)
+    try:
+        from throughput_model import warn_if_uncalibrated
+        warn_if_uncalibrated(args.hw)
+    except Exception:
+        pass
     wl = Workload(batch_size=args.batch, prefill_seq_len=args.prefill_seq,
                   decode_kv_len=args.decode_kv, phase=args.phase)
 

@@ -29,7 +29,8 @@ if _HERE not in sys.path:
 
 from lattice_engine import (
     HARDWARE as LATTICE_HW, compute_lattice, compute_gqa_configs,
-    estimate_params, LatticePoint, GQAConfig,
+    estimate_params, estimate_mla_total_params, estimate_mla_per_layer_params,
+    LatticePoint, GQAConfig,
     # v1 MoE additions
     compute_moe_options, default_ep_options, MoEOption,
     # v2 state/hybrid additions
@@ -84,6 +85,12 @@ class DeploymentConstraints:
     # full frontier, but `optimal` uses this weighted objective. Including
     # TTFT prevents long-context runs from optimizing decode TBT while
     # silently accepting huge cold-prefill latency.
+    # v1-fix demo-audit: stay on "research_quality" by default (loss-dominant),
+    # but rely on the uncertainty-band tiebreak in
+    # `build_display_sort_key` to break ties on memory/TBT/-tps within ~25%
+    # of the model's own uncertainty. "balanced" reweights throughput so
+    # aggressively that it accepts 8–10% loss regressions for throughput
+    # gains, which is too far on a quality model with ~3% uncertainty.
     objective_profile: str = "research_quality"
     # Vocab
     vocab_size: int = 32000
@@ -392,17 +399,23 @@ def _candidate_metric(ev: EvaluatedCandidate, key: str) -> float:
     raise KeyError(key)
 
 
-def _aspect_ratio_prior_penalty(ev: EvaluatedCandidate) -> float:
-    """Tiny tiebreaker that nudges toward d_model/n_layers ratios that match
-    published frontier-lab choices.
+def _aspect_ratio_prior_penalty(ev: EvaluatedCandidate, pool_size: int = 16) -> float:
+    """Penalty against d_model/n_layers ratios outside the published
+    frontier-lab band.
 
     Empirical d_model/n_layers from the 14-model reference set spans roughly
     80–140 (Qwen3-32B ~80, Llama-3-70B ~102, DeepSeek-V3 ~117, Mistral
     7B/Llama 7-8B ~128, Mistral-Large-123B ~140). Outside that corridor we
-    add a small penalty proportional to log-distance from the band; inside
-    the corridor the penalty is zero. Magnitude is capped so it can only
-    break near-ties on the objective score, never override a real
-    Pareto-dominant pick.
+    add a penalty proportional to log-distance from the band; inside the
+    corridor the penalty is zero.
+
+    v1-fix demo-audit D3: the cap is now adaptive. When the feasible
+    Pareto frontier is rich (>= 8 candidates), this stays a 3% tiebreaker
+    as before — it never overrides a real Pareto move. When the frontier
+    collapses to one or two points (e.g., H100 750B at PP=1, TP=32 where
+    HBM forces a single feasible lattice point), the cap relaxes to 25%
+    so a 19× depth/width violation is no longer a 3% nudge against
+    nothing.
     """
     L = max(1, int(ev.arch.n_layers))
     d = max(1, int(ev.arch.d_model))
@@ -415,9 +428,38 @@ def _aspect_ratio_prior_penalty(ev: EvaluatedCandidate) -> float:
         dist = math.log(lo / ratio)
     else:
         dist = math.log(ratio / hi)
-    # 0.01 == 1% penalty per natural-log unit outside the corridor; capped
-    # so the tiebreaker remains a tiebreaker (max ~3%).
-    return min(0.03, 0.01 * dist)
+    # Base penalty 1% per natural-log unit outside the band.
+    raw = 0.01 * dist
+    # Sparse-frontier multiplier: when the optimizer has no real Pareto
+    # signal to break the tie on, this prior becomes the only voice
+    # against unshippable shapes. Scale linearly between 1× (≥8 candidates)
+    # and 8× (1 candidate).
+    sparse_mult = max(1.0, min(8.0, 8.0 / max(pool_size, 1)))
+
+    # v1-fix demo-audit-2 (Jun 2026): two-tier penalty.
+    # Mild violations (≤2x outside the band, log-dist ≤ ~0.69) stay capped
+    # at the previous 3%*sparse_mult so the prior remains a soft tiebreaker
+    # for borderline choices like 4096x40 (ratio=102) vs 4608x33 (ratio=140).
+    # Severe violations (>2x outside the band — i.e. ratio < 40 or > 320) grow
+    # *quadratically* with no cap so unshippable shapes like 11776x4
+    # (ratio=2944, log-dist=2.9) cost ~9% even on a rich frontier and
+    # 25-50% on sparse frontiers. The previous flat 3%/24% cap meant a
+    # 73x band violation cost the same as a 2x violation, which is what let
+    # the H100 7B serving_20ms Pareto fill up with wide-shallow monsters.
+    SOFT_DIST = math.log(2.0)  # ≈ 0.693
+    if dist <= SOFT_DIST:
+        cap = 0.03 * sparse_mult
+        return min(cap, raw * sparse_mult)
+    soft_part = 0.01 * SOFT_DIST  # the penalty earned up to the soft boundary
+    hard_dist = dist - SOFT_DIST
+    # Quadratic growth past the soft boundary: each additional ln-unit costs
+    # 4% (vs 1% in the linear regime). At log-dist 2.9 (ratio 2944, i.e.
+    # 11776x4) this is ~0.01*0.69 + 0.04*(2.2)^2 ≈ 0.20 = 20% raw before
+    # sparse_mult; well above any reasonable predicted-loss delta on the
+    # Pareto so the optimizer will only pick a wide-shallow if it really
+    # has no other choice.
+    hard_part = 0.04 * (hard_dist ** 2)
+    return (soft_part + hard_part) * sparse_mult
 
 
 def _objective_score(
@@ -442,10 +484,10 @@ def _objective_score(
             continue
         delta = (b - v) / abs(b) if key == "tps" else (v - b) / abs(b)
         score += weight * max(0.0, delta)
-    # Aspect-ratio tiebreaker, calibrated to the 14-model published
-    # frontier-lab reference set. Never large enough to override a real
-    # Pareto move.
-    score += _aspect_ratio_prior_penalty(ev)
+    # Aspect-ratio prior, calibrated to the 14-model published frontier-lab
+    # reference set. Adaptive cap based on frontier richness so a singleton
+    # frontier doesn't silently ship a pathological aspect ratio.
+    score += _aspect_ratio_prior_penalty(ev, pool_size=len(pool))
     return score
 
 
@@ -559,16 +601,66 @@ def _kv_heads_compatible_with_tp(n_kv_heads: int, tp_degree: int) -> bool:
 
 
 def _gqa_ratios_for_point(pt: LatticePoint, constraints: DeploymentConstraints) -> List[int]:
-    """Enumerate GQA ratios whose KV-head count is TP-placeable."""
-    ratios = [1]  # MHA
-    for r in [2, 4, 8, 16]:
-        if pt.n_heads % r == 0:
-            n_kv = pt.n_heads // r
-            if _kv_heads_compatible_with_tp(n_kv, constraints.tp):
-                ratios.append(r)
-    if pt.n_heads > 1:
-        ratios.append(pt.n_heads)  # MQA / replicated single KV head
-    return sorted(set(ratios))
+    """Enumerate GQA ratios whose KV-head count is TP-placeable.
+
+    v1-fix C1 (demo audit follow-up): the previous version iterated a
+    fixed list of GQA ratios [2, 4, 8, 16] and accepted them only when
+    BOTH n_heads % r == 0 AND (n_heads / r) was TP-divisible. For
+    "non-round" n_heads counts (e.g. n_heads=72 at TP=8) none of the
+    fixed ratios produced a TP-compatible n_kv, so the lattice emitted
+    only MHA (kv=72) and MQA (kv=1) — even though n_kv=24 (group=3)
+    and n_kv=8 (group=9) are both valid and TP-divisible. Combined
+    with the one-sided KV-heads quality term, this guaranteed MHA
+    selection on every greenfield run.
+
+    The fix considers a small, fixed *candidate target* set of GQA
+    n_kv values — the canonical published targets at the published
+    n_heads/4, n_heads/8 (Llama-3 / Qwen-3 / Mistral / Gemma-2 style)
+    plus the legacy [2,4,8,16] ratios for round head counts — and
+    keeps the ones that are TP-placeable. That stays bounded at ~6-8
+    candidates per lattice point (no perf regression from the old
+    [2,4,8,16] sweep) while restoring the non-round GQA targets that
+    the demo audit named.
+    """
+    nh = int(pt.n_heads)
+    tp = int(constraints.tp)
+    ratios: set = set()
+    ratios.add(1)  # MHA
+    if nh > 1:
+        ratios.add(nh)  # MQA / replicated single KV head
+
+    # Legacy round ratios (preserved so existing calibration snapshots
+    # don't shift).
+    for r in (2, 4, 8, 16):
+        if nh % r == 0:
+            n_kv = nh // r
+            if _kv_heads_compatible_with_tp(n_kv, tp):
+                ratios.add(r)
+
+    # Demo-audit fix: also try GQA targets that come from "natural"
+    # n_kv values for non-round head counts. Each candidate n_kv is
+    # promoted to a ratio iff (a) it divides nh evenly, (b) the
+    # resulting ratio is at least 2, and (c) the n_kv is TP-placeable.
+    candidate_n_kvs = (
+        # n_heads-derived (every published GQA-N model lands on one of
+        # these): n_kv = nh/4, nh/8, nh/16 → group sizes 4, 8, 16.
+        nh // 2, nh // 3, nh // 4, nh // 6, nh // 8,
+        # Common production absolute n_kv counts: Llama-3 family uses
+        # nkv=8; DeepSeek-V2/V3-style GQA-1 uses nkv=128, etc.
+        8, 16, 24, 32, 64,
+    )
+    for n_kv in candidate_n_kvs:
+        if n_kv <= 0 or n_kv > nh:
+            continue
+        if nh % n_kv != 0:
+            continue
+        r = nh // n_kv
+        if r < 2:
+            continue
+        if _kv_heads_compatible_with_tp(n_kv, tp):
+            ratios.add(r)
+
+    return sorted(ratios)
 
 
 def _search_option_lists(constraints: DeploymentConstraints) -> Tuple[List[int], List[int], List[str], float]:
@@ -642,6 +734,18 @@ def generate_candidates(
                 continue
 
             n_layers_raw = (target - embed_params) / per_layer_net
+            # v1-fix demo-audit D1: cap n_layers_raw to a sane band before
+            # enumerating. Without this cap, narrow lattice points combined
+            # with very large param targets at PP=1 produce n_layers_raw in
+            # the 1000-2000 range, and the optimizer happily emits 1980-layer
+            # "transformers" because the shape-stability penalty downstream
+            # is capped at 6%. The MoE branch already does `1 <= n_layers_raw
+            # <= 256`; we match that here. 256 is comfortably above every
+            # published frontier model (Llama-3-405B L=126, DeepSeek-V3 L=61,
+            # GPT-3 175B L=96) — anything beyond this band is the lattice
+            # exploiting depth to chase param count, not a real architecture.
+            if not (1 <= n_layers_raw <= 256):
+                continue
             # Try a few layer counts around the target
             for n_layers in [max(4, round(n_layers_raw) + delta) for delta in [-2, -1, 0, 1, 2]]:
                 total = estimate_params(
@@ -694,42 +798,96 @@ def generate_candidates(
                         # shares d_model/n_heads/n_layers/ffn_dim with the
                         # legacy candidate but replaces the KV cache shape
                         # with a single compressed latent + RoPE'd key.
-                        if getattr(constraints, "allow_mla", False):
+                        #
+                        # v1-fix demo-audit D4: only emit MLA once per
+                        # lattice point — NOT once per GQA ratio. MLA's
+                        # KV cost is a function of (c_kv, d_rope), not
+                        # n_kv_heads, so emitting it N times for N GQA
+                        # ratios produced N identical MLA candidates that
+                        # only differed in the (downstream-meaningless)
+                        # n_kv_heads tag, polluting the Pareto sample.
+                        if getattr(constraints, "allow_mla", False) and gqa_r == gqa_ratios[0]:
+                            # v1-fix demo-audit (June 2026 follow-up): MLA
+                            # candidates previously inherited the dense MHA
+                            # `total` and `d_head` from the surrounding loop.
+                            # That made (a) `total_params` count an MHA Q+K+V+O
+                            # block (~26% too large at low-n_heads MLA shapes
+                            # like cell 9), (b) the `d_head` field describe a
+                            # matmul that doesn't exist in MLA (DeepSeek-V2/V3
+                            # uses a per-head Q dim of d_nope + d_rope, not
+                            # the lattice's dh), and (c) the Chinchilla
+                            # baseline use the inflated N, artificially
+                            # Pareto-favoring MLA. Fix: snap d_head to
+                            # (d_nope + d_rope), recompute total_params via
+                            # the true MLA layout, and re-solve n_layers for
+                            # the MLA shape so the candidate hits the param
+                            # target band (it almost never does at the dense
+                            # n_layers because MLA attention is smaller).
+                            d_nope_mla = int(constraints.mla_nope_head_dim)
+                            d_rope_mla = int(constraints.mla_rope_head_dim)
+                            dh_mla = d_nope_mla + d_rope_mla
                             for c_kv in constraints.mla_kv_latent_options:
                                 for c_q in constraints.mla_q_latent_options:
-                                    # Sanity: latent should compress KV
-                                    uncompressed = 2 * pt.n_heads * pt.d_head
-                                    if c_kv >= uncompressed:
+                                    # Sanity: latent should compress KV vs
+                                    # the MLA per-head KV (2 * dh_mla per head),
+                                    # not vs the dense lattice's KV.
+                                    uncompressed_mla = 2 * pt.n_heads * dh_mla
+                                    if c_kv >= uncompressed_mla:
                                         continue
-                                    candidates.append(CandidateArch(
-                                        d_model=pt.d_model,
-                                        n_layers=n_layers,
-                                        n_heads=pt.n_heads,
-                                        d_head=pt.d_head,
-                                        n_kv_heads=n_kv_heads,
-                                        ffn_dim=pt.ffn_dim_swiglu,
-                                        vocab_size=constraints.vocab_size,
-                                        weight_precision=prec["weight_precision"],
-                                        ffn_precision=prec["ffn_precision"],
-                                        attn_precision=dict(prec["attn_precision"]),
-                                        kv_cache_bits=kv_bits,
-                                        total_params=total,
-                                        total_params_b=round(total / 1e9, 2),
-                                        # MLA-specific fields
-                                        attention_type="mla",
-                                        mla_kv_latent_dim=c_kv,
-                                        mla_q_latent_dim=c_q,
-                                        mla_rope_head_dim=constraints.mla_rope_head_dim,
-                                        mla_nope_head_dim=constraints.mla_nope_head_dim,
-                                        mtp_n_predict_depths=int(mtp_k),
-                                        mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
-                                        mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
-                                        cp_degree=int(cp_d),
-                                        cp_method=str(constraints.cp_method),
-                                        rope_scaling_method=str(rope_m),
-                                        rope_scaling_factor=rope_factor if rope_m != "none" else 1.0,
-                                        rope_original_max_position=int(constraints.rope_original_max_position),
-                                    ))
+                                    # Solve n_layers for THIS MLA shape so
+                                    # the candidate hits the param target.
+                                    per_layer_mla = estimate_mla_per_layer_params(
+                                        pt.d_model, pt.n_heads,
+                                        c_kv, c_q, d_nope_mla, d_rope_mla,
+                                        pt.ffn_dim_swiglu,
+                                    )
+                                    embed_p = 2 * constraints.vocab_size * pt.d_model
+                                    if per_layer_mla <= 0:
+                                        continue
+                                    n_layers_mla_raw = (target - embed_p) / per_layer_mla
+                                    if not (1 <= n_layers_mla_raw <= 256):
+                                        continue
+                                    for dL in (-2, -1, 0, 1, 2):
+                                        n_layers_mla = max(4, round(n_layers_mla_raw) + dL)
+                                        if constraints.pp > 1 and n_layers_mla % constraints.pp != 0:
+                                            continue
+                                        mla_total = estimate_mla_total_params(
+                                            pt.d_model, pt.n_heads, n_layers_mla,
+                                            c_kv, c_q, d_nope_mla, d_rope_mla,
+                                            pt.ffn_dim_swiglu, constraints.vocab_size,
+                                        )
+                                        if mla_total < lo or mla_total > hi:
+                                            continue
+                                        candidates.append(CandidateArch(
+                                            d_model=pt.d_model,
+                                            n_layers=n_layers_mla,
+                                            n_heads=pt.n_heads,
+                                            # Snap d_head to the real MLA per-head Q dim.
+                                            d_head=dh_mla,
+                                            n_kv_heads=n_kv_heads,
+                                            ffn_dim=pt.ffn_dim_swiglu,
+                                            vocab_size=constraints.vocab_size,
+                                            weight_precision=prec["weight_precision"],
+                                            ffn_precision=prec["ffn_precision"],
+                                            attn_precision=dict(prec["attn_precision"]),
+                                            kv_cache_bits=kv_bits,
+                                            total_params=mla_total,
+                                            total_params_b=round(mla_total / 1e9, 2),
+                                            # MLA-specific fields
+                                            attention_type="mla",
+                                            mla_kv_latent_dim=c_kv,
+                                            mla_q_latent_dim=c_q,
+                                            mla_rope_head_dim=d_rope_mla,
+                                            mla_nope_head_dim=d_nope_mla,
+                                            mtp_n_predict_depths=int(mtp_k),
+                                            mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
+                                            mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
+                                            cp_degree=int(cp_d),
+                                            cp_method=str(constraints.cp_method),
+                                            rope_scaling_method=str(rope_m),
+                                            rope_scaling_factor=rope_factor if rope_m != "none" else 1.0,
+                                            rope_original_max_position=int(constraints.rope_original_max_position),
+                                        ))
 
     return candidates
 
@@ -957,16 +1115,65 @@ def generate_moe_candidates(
                                                 n_dense_ffn_layers=n_dense_clamped,
                                             ))
                                             if getattr(constraints, "allow_mla", False):
+                                                # v1-fix demo-audit (June 2026
+                                                # follow-up): MoE+MLA emission
+                                                # had the same MHA-inheritance
+                                                # bug as the dense-MLA path —
+                                                # `total_total` was the MoE-MHA
+                                                # total, and `d_head` was the
+                                                # lattice's. For MoE we keep
+                                                # n_layers because the FFN
+                                                # branch (experts) dominates
+                                                # the per-layer count, so the
+                                                # MoE-MHA→MoE-MLA delta is
+                                                # comparatively small. Just
+                                                # recompute total_total against
+                                                # the real MLA attention block
+                                                # and snap d_head.
+                                                d_nope_mla = int(constraints.mla_nope_head_dim)
+                                                d_rope_mla = int(constraints.mla_rope_head_dim)
+                                                dh_mla = d_nope_mla + d_rope_mla
+                                                # MLA attention params (no FFN).
+                                                mla_attn_per_layer = estimate_mla_per_layer_params(
+                                                    pt.d_model, pt.n_heads,
+                                                    0, 0, d_nope_mla, d_rope_mla,
+                                                    0,
+                                                )  # placeholder for c_kv/c_q below
                                                 for c_kv in constraints.mla_kv_latent_options:
                                                     for c_q in constraints.mla_q_latent_options:
-                                                        uncompressed = 2 * pt.n_heads * pt.d_head
-                                                        if c_kv >= uncompressed:
+                                                        uncompressed_mla = 2 * pt.n_heads * dh_mla
+                                                        if c_kv >= uncompressed_mla:
+                                                            continue
+                                                        # Replace the MHA attn block in total_total
+                                                        # with the true MLA block. total_total
+                                                        # already accounts for embeddings, norms
+                                                        # and the MoE FFN; we subtract the dense
+                                                        # MHA attention contribution and add the
+                                                        # MLA attention contribution.
+                                                        mha_attn_per_layer = (
+                                                            2 * pt.d_model * pt.d_model           # Q + O
+                                                            + 2 * pt.d_model * n_kv_heads * pt.d_head  # K + V
+                                                        )
+                                                        mla_attn_block = estimate_mla_per_layer_params(
+                                                            pt.d_model, pt.n_heads,
+                                                            c_kv, c_q, d_nope_mla, d_rope_mla,
+                                                            0,                                    # no FFN here
+                                                        ) - 2 * pt.d_model                        # strip norm double-count
+                                                        delta_per_layer = mla_attn_block - mha_attn_per_layer
+                                                        mla_total_total = total_total + delta_per_layer * n_layers
+                                                        # MoE block only gates on active-params
+                                                        # (already satisfied for the parent) and
+                                                        # a max_total cap. The MLA swap doesn't
+                                                        # change active per-token compute, so we
+                                                        # only need to re-check max_total.
+                                                        if mla_total_total > max_total:
                                                             continue
                                                         candidates.append(CandidateArch(
                                                             d_model=pt.d_model,
                                                             n_layers=n_layers,
                                                             n_heads=pt.n_heads,
-                                                            d_head=pt.d_head,
+                                                            # Snap d_head to MLA per-head Q dim
+                                                            d_head=dh_mla,
                                                             n_kv_heads=n_kv_heads,
                                                             ffn_dim=pt.ffn_dim_swiglu,
                                                             vocab_size=constraints.vocab_size,
@@ -974,8 +1181,8 @@ def generate_moe_candidates(
                                                             ffn_precision=prec["ffn_precision"],
                                                             attn_precision=dict(prec["attn_precision"]),
                                                             kv_cache_bits=kv_bits,
-                                                            total_params=total_total,
-                                                            total_params_b=round(total_total / 1e9, 2),
+                                                            total_params=mla_total_total,
+                                                            total_params_b=round(mla_total_total / 1e9, 2),
                                                             mtp_n_predict_depths=int(mtp_k),
                                                             mtp_depth_n_layers=int(constraints.mtp_depth_n_layers),
                                                             mtp_train_loss_weight=float(constraints.mtp_train_loss_weight),
@@ -993,8 +1200,8 @@ def generate_moe_candidates(
                                                             attention_type="mla",
                                                             mla_kv_latent_dim=c_kv,
                                                             mla_q_latent_dim=c_q,
-                                                            mla_rope_head_dim=constraints.mla_rope_head_dim,
-                                                            mla_nope_head_dim=constraints.mla_nope_head_dim,
+                                                            mla_rope_head_dim=d_rope_mla,
+                                                            mla_nope_head_dim=d_nope_mla,
                                                         ))
 
     return candidates
@@ -1083,6 +1290,9 @@ def generate_state_candidates(
                 continue
 
             n_layers_raw = (target - embed_params) / per_layer_net
+            # v1-fix demo-audit D1: same depth band as the dense path.
+            if not (1 <= n_layers_raw <= 256):
+                continue
 
             for n_layers in [max(4, round(n_layers_raw) + delta) for delta in [-2, -1, 0, 1, 2]]:
                 total = estimate_params(
@@ -2031,55 +2241,11 @@ def optimize(
     optimal = None
     if feasible:
         scoring_pool = pareto if pareto else feasible
-        # k=0.25 means "treat loss as equal within ~quarter of the uncertainty
-        # band". This is conservative: real measurement noise plus optimizer
-        # variance routinely exceed this, so we never trade a meaningful
-        # quality win away.
-        TIEBREAK_K = 0.25
-
-        def _quality_bucket(ev: EvaluatedCandidate) -> int:
-            u = float(getattr(ev.quality, "uncertainty_total", 0.0)) or 0.0
-            # uncertainty_total is a relative %, so the absolute loss noise
-            # floor is u * loss. Fall back to 0.5% of loss if missing.
-            band = max(u, 0.005) * max(ev.predicted_loss, 0.01) * TIEBREAK_K
-            if band <= 0:
-                return 0
-            return int(round(ev.predicted_loss / band))
-
-        # Bucket the objective score itself: when the quality-weighted
-        # objective is dominated by predicted_loss (research_quality profile
-        # gives loss weight ≥ 0.85), two candidates whose loss differs by
-        # less than the noise floor have objective scores that differ by
-        # less than the smallest meaningful step. Bucketing makes the
-        # downstream axes (memory, TBT) the actual decider in that regime.
-        weights = OBJECTIVE_PROFILES[constraints.objective_profile]
-        loss_weight = float(weights.get("loss", 0.0))
-
-        def _score_bucket(ev: EvaluatedCandidate) -> int:
-            score = _objective_score(ev, scoring_pool, constraints.objective_profile)
-            # Bucket size = loss_weight × TIEBREAK_K × uncertainty band on
-            # the loss axis, i.e. the maximum objective-score change that
-            # can come from a within-noise loss difference. Two candidates
-            # whose objective score differs by less than this band are
-            # treated as quality-equivalent.
-            u = float(getattr(ev.quality, "uncertainty_total", 0.0)) or 0.03
-            band = loss_weight * TIEBREAK_K * max(u, 0.01)
-            return int(round(score / band)) if band > 0 else 0
-
-        optimal = min(
-            scoring_pool,
-            key=lambda x: (
-                _score_bucket(x),
-                _quality_bucket(x),
-                # Within a quality bucket, prefer faster, smaller, and cheaper.
-                x.memory_per_gpu_gb,
-                x.serving_tbt_ms,
-                x.throughput.prefill_time_ms,
-                -x.training_tps,
-                # Final deterministic tiebreaker on raw loss to keep sort stable.
-                x.predicted_loss,
-            ),
-        )
+        # Build the SAME sort key used by both the picker and the CSV
+        # writer. Anchoring both paths to one builder is what guarantees
+        # that `rank=1` in pareto.csv always agrees with `selected=True`.
+        display_sort_key = build_display_sort_key(scoring_pool, constraints)
+        optimal = min(scoring_pool, key=display_sort_key)
 
     elapsed = time.time() - t0
 
@@ -2098,6 +2264,115 @@ def optimize(
         constraints=constraints,
         binding_constraints=binding,
     )
+
+
+def build_display_sort_key(scoring_pool, constraints):
+    """Single source of truth for the displayed-Pareto ordering.
+
+    Both the picker (which produces `selected=True`) and the pareto.csv
+    writer (which produces the `rank` column) call this. Any divergence
+    between them will desynchronize rank=1 from selected=True, which is
+    a footgun visible in every README example. Don't re-implement the
+    key in either site; extend this builder.
+    """
+    # Pure-loss profiles: argmin(predicted_loss) with an aspect-ratio prior
+    # and a deterministic secondary key. v1-fix demo-audit: prior versions
+    # did NOT collapse losses inside a noise band, which let argmin pick
+    # configurations 0.05% better on a 3% uncertainty signal while being
+    # 2–5× worse on TBT/memory. We now bucket loss by ~25% of the model's
+    # own median uncertainty before tiebreaking on memory/tbt/-tps — the
+    # same uncertainty-aware tiebreak the balanced profile uses, but with
+    # loss still strictly dominant via the bucket index.
+    profile_name = constraints.objective_profile if constraints else "balanced"
+    if profile_name in ("research_quality", "loss_only"):
+        pool_size = len(scoring_pool)
+        TIEBREAK_K_LOSS = 0.25
+        _pool_best = min(x.predicted_loss for x in scoring_pool)
+        _u_sorted = sorted(
+            float(getattr(x.quality, "uncertainty_total", 0.0) or 0.0)
+            for x in scoring_pool
+        )
+        _u_med = _u_sorted[len(_u_sorted) // 2] if _u_sorted else 0.0
+        _BAND = max(_u_med, 0.005) * max(_pool_best, 0.01) * TIEBREAK_K_LOSS
+
+        def _loss_key(x):
+            prior = _aspect_ratio_prior_penalty(x, pool_size=pool_size)
+            adj_loss = x.predicted_loss * (1.0 + prior)
+            bucket = (
+                max(0, int((adj_loss - _pool_best) / _BAND))
+                if _BAND > 0 else 0
+            )
+            return (
+                bucket,
+                x.memory_per_gpu_gb,
+                x.serving_tbt_ms,
+                -x.training_tps,
+                round(adj_loss, 6),
+                float(x.arch.total_params),
+            )
+
+        return _loss_key
+
+    # General profiles: uncertainty-aware noise bucket on both the
+    # objective score and on raw loss, then lexicographic on (memory,
+    # tbt, prefill, -tps, loss).
+    #
+    # k=0.25 means "treat loss as equal within ~quarter of the
+    # uncertainty band". This is conservative: real measurement noise
+    # plus optimizer variance routinely exceed this, so we never trade a
+    # meaningful quality win away.
+    TIEBREAK_K = 0.25
+
+    # Pool-wide bucket denominator (same for every candidate, so noisier
+    # candidates do not get a free shift toward bucket 0). Median is more
+    # robust to outliers than mean.
+    pool_best_loss = min(x.predicted_loss for x in scoring_pool)
+    _pool_u_sorted = sorted(
+        float(getattr(x.quality, "uncertainty_total", 0.0) or 0.0)
+        for x in scoring_pool
+    )
+    _u_median = _pool_u_sorted[len(_pool_u_sorted) // 2] if _pool_u_sorted else 0.0
+    POOL_BAND = max(_u_median, 0.005) * max(pool_best_loss, 0.01) * TIEBREAK_K
+
+    def _quality_bucket(ev) -> int:
+        if POOL_BAND <= 0:
+            return 0
+        return max(0, int((ev.predicted_loss - pool_best_loss) / POOL_BAND))
+
+    weights = OBJECTIVE_PROFILES.get(profile_name, {})
+    loss_weight = float(weights.get("loss", 0.0))
+    # Pool-wide objective-score band so two close candidates collapse to
+    # the same score bucket and get tiebroken on throughput/memory.
+    _pool_scores = {
+        id(x): _objective_score(x, scoring_pool, profile_name)
+        for x in scoring_pool
+    }
+    _best_score = min(_pool_scores.values()) if _pool_scores else 0.0
+    SCORE_BAND = (
+        loss_weight * TIEBREAK_K * max(_u_median, 0.01)
+        if loss_weight > 0 else POOL_BAND
+    )
+
+    def _score_bucket(ev) -> int:
+        if SCORE_BAND <= 0:
+            return 0
+        score = _pool_scores.get(id(ev), 0.0)
+        return max(0, int((score - _best_score) / SCORE_BAND))
+
+    def _general_key(x):
+        return (
+            _score_bucket(x),
+            _quality_bucket(x),
+            # Within a quality bucket, prefer faster, smaller, cheaper.
+            x.memory_per_gpu_gb,
+            x.serving_tbt_ms,
+            x.throughput.prefill_time_ms,
+            -x.training_tps,
+            # Deterministic final tiebreak on raw loss.
+            x.predicted_loss,
+        )
+
+    return _general_key
 
 
 def _same_candidate(a: EvaluatedCandidate, b: EvaluatedCandidate) -> bool:
@@ -2282,6 +2557,54 @@ def _is_throughput_contender(
     return overlapping > 0 and at_least_as_good
 
 
+def compute_confidence_envelope(
+    result: OptimizationResult, opt: EvaluatedCandidate
+) -> Dict[str, Any]:
+    """Public wrapper around the loss-CI overlap analysis.
+
+    Exposed so the CLI (`cli_compile.py`) can surface a non-robust pick
+    as a `WARNING:` without re-implementing the contender accounting.
+    The private alias `_confidence_envelope` is retained for backward
+    compat with existing callers inside this module.
+    """
+    return _confidence_envelope(result, opt)
+
+
+def compute_contending_family_full(
+    result: OptimizationResult,
+    opt: EvaluatedCandidate,
+    top_n: int = 32,
+) -> Dict[str, Any]:
+    """Return the full contending-family snapshot (up to `top_n` rows).
+
+    Embedded `confidence_envelope.contending_family.members` carries
+    only the top 5 rows so the emitted config stays small. Downstream
+    tooling that needs the broader view (notebooks, dashboards,
+    auto-calibrate) should read the sidecar JSON the CLI writes, which
+    is produced by this function.
+    """
+    opt_low, opt_high = _loss_interval(opt)
+    contenders = []
+    contender_reasons = {}
+    for ev in result.all_evaluated:
+        if ev is opt or not ev.meets_constraints:
+            continue
+        ev_low, ev_high = _loss_interval(ev)
+        loss_contender = _intervals_overlap(opt_low, opt_high, ev_low, ev_high)
+        thr_contender = _is_throughput_contender(opt, ev)
+        if loss_contender or thr_contender:
+            contenders.append(ev)
+            if loss_contender and thr_contender:
+                contender_reasons[id(ev)] = "both"
+            elif loss_contender:
+                contender_reasons[id(ev)] = "loss"
+            else:
+                contender_reasons[id(ev)] = "throughput"
+    return _contending_family(
+        opt, contenders, top_n=top_n, contender_reasons=contender_reasons,
+    )
+
+
 def _confidence_envelope(result: OptimizationResult, opt: EvaluatedCandidate) -> Dict[str, Any]:
     opt_low, opt_high = _loss_interval(opt)
     contenders = []
@@ -2314,11 +2637,27 @@ def _confidence_envelope(result: OptimizationResult, opt: EvaluatedCandidate) ->
         )
     except Exception:
         target_coverage = None
-    # Carry a deeper slice into the JSON for downstream tooling (notebooks,
-    # dashboards, downstream calibration); the markdown renderer caps its
-    # own table for readability.
+    # Cap the embedded family at top_n=5 to keep the inline metadata
+    # small (under a kilobyte even for wide pareto fronts). The full
+    # top_n=32 view is emitted to a sidecar file by the CLI when the
+    # envelope is non-robust; downstream tooling that needs all rows
+    # should read the sidecar, not parse this dict. Forensics-mode
+    # callers can bump the inline cap via AC_CONTENDING_FAMILY_INLINE=N.
+    inline_top_n = 5
+    try:
+        _env_cap = os.environ.get("AC_CONTENDING_FAMILY_INLINE")
+        if _env_cap is not None:
+            parsed_cap = int(_env_cap)
+            if parsed_cap > 0:
+                inline_top_n = parsed_cap
+    except (ValueError, TypeError):
+        # Malformed env value → fall back to the default cap; the env
+        # var is a forensics knob, not a correctness lever, so we don't
+        # raise.
+        pass
     family = _contending_family(opt, [ev for ev, _, _ in contenders],
-                                  top_n=32, contender_reasons=contender_reasons)
+                                  top_n=inline_top_n,
+                                  contender_reasons=contender_reasons)
     # Throughput-uncertainty fields, exposed so the report renderer can show
     # the propagated sigmas alongside the point estimates.
     t = opt.throughput
@@ -2416,7 +2755,22 @@ def result_to_config(
     risk_term = terms.get("risk_residual")
     selection_diag = _selection_diagnostics(result, opt)
 
+    # v1-fix E (demo audit): include hardware + parallelism so a downstream
+    # reviewer can re-derive what was compiled without re-running the
+    # pipeline. The previous emitted block recorded only workload knobs
+    # (params, tokens, context, serving) and architecture flags; the
+    # hardware lived only implicitly inside the calibrated efficiency
+    # numbers, so a reader reading the config in isolation could not tell
+    # whether this was an H100 or B200 run. We also surface TP/PP/DP/CP
+    # so the throughput-per-replica vs aggregate split makes sense
+    # downstream.
     input_constraints = {
+        "hardware": result.hardware,
+        "tp": result.constraints.tp,
+        "pp": result.constraints.pp,
+        "dp": result.constraints.dp,
+        "cp": getattr(result.constraints, "cp", 1),
+        "cp_method": getattr(result.constraints, "cp_method", "ring"),
         "target_params": f"{result.constraints.target_params_b}B",
         "training_tokens": f"{result.constraints.training_tokens / 1e12:.1f}T",
         "context_length": result.constraints.context_length,
@@ -2645,37 +2999,14 @@ def result_to_pareto_csv(result: OptimizationResult) -> str:
         "predicted_loss,loss_ci_low,loss_ci_high,uncertainty_total_pct,"
         "training_tps,serving_tbt_ms,serving_ttft_ms,memory_gb,confidence"
     ]
-    # Sort the displayed frontier by the same uncertainty-aware key the
-    # picker uses, so the CSV "rank" column matches the "selected" marker.
-    # Before the tiebreak fix rank-1 was always the argmin-loss point and
-    # the selected marker could land on a higher-ranked row, which looked
-    # like a bug to anyone scanning the CSV. We bucket by 0.25 × the
-    # quality-uncertainty band, exactly mirroring the picker.
-    profile = result.constraints.objective_profile if result.constraints else "balanced"
-    weights = OBJECTIVE_PROFILES.get(profile, {})
-    loss_weight = float(weights.get("loss", 0.0))
-    TIEBREAK_K = 0.25
-
-    def _csv_sort_key(ev):
-        score = (
-            _objective_score(ev, result.pareto_frontier, profile)
-            if result.constraints else 0.0
-        )
-        u = float(getattr(ev.quality, "uncertainty_total", 0.0)) or 0.03
-        score_band = max(loss_weight * TIEBREAK_K * max(u, 0.01), 1e-9)
-        loss_band = max(u, 0.005) * max(ev.predicted_loss, 0.01) * TIEBREAK_K
-        loss_bucket = int(round(ev.predicted_loss / loss_band)) if loss_band > 0 else 0
-        return (
-            int(round(score / score_band)),
-            loss_bucket,
-            ev.memory_per_gpu_gb,
-            ev.serving_tbt_ms,
-            ev.throughput.prefill_time_ms,
-            -ev.training_tps,
-            ev.predicted_loss,
-        )
-
-    sorted_frontier = sorted(result.pareto_frontier, key=_csv_sort_key)
+    # Use the *exact* same sort key the picker used to choose `selected`.
+    # This is the only way to guarantee rank=1 == selected=True. See
+    # build_display_sort_key for the definition.
+    if result.constraints and result.pareto_frontier:
+        sort_key = build_display_sort_key(result.pareto_frontier, result.constraints)
+        sorted_frontier = sorted(result.pareto_frontier, key=sort_key)
+    else:
+        sorted_frontier = list(result.pareto_frontier)
     for i, ev in enumerate(sorted_frontier):
         c = ev.arch
         if c.moe is not None:

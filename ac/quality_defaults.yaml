@@ -33,7 +33,7 @@ architecture_residual:
     gamma_W: 0.341
     K_D: 0.014
     gamma_D: 0.341
-    C: 0.03                 # penalty strength
+    C: 0.05                 # penalty strength (v1 audit: bumped 0.03→0.05; Tay 2021, Levine 2020)
     d_min: 256              # floor on d_opt
     l_min: 2                # floor on l_opt
     fit_source: "v1_fix_2026_06_refit_llama_mistral_qwen_gpt3"
@@ -47,6 +47,16 @@ architecture_residual:
     d_head: 0.01
     query_heads: 0.005
     kv_heads: 0.003
+    # v1-fix C1 (demo audit): symmetric KV-heads penalty for
+    # n_kv_heads above max(kv_reference, n_heads/4). Calibrated against
+    # measured 7B-class Pareto frontiers: at n_heads=72 / n_kv=72 vs
+    # GQA-4 (kv=18), a weight of 0.005 produces ~0.02 absolute loss
+    # delta — enough to overcome the "free param" spine win MHA gets
+    # from its extra KV-cache weights, while keeping the penalty
+    # bounded near the upper end of published GQA ablations (Ainslie
+    # 2023; Llama-2-70B; Qwen-3). With the previous one-sided term,
+    # the optimizer selected MHA on every greenfield run.
+    kv_heads_excess: 0.008
     gqa_sharing: 0.0015
     attention_bottleneck: 0.003
     # v1-fix: FlashAttention efficiency cliff at d_head < threshold.

@@ -142,16 +142,16 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--training-tokens", type=_positive_int,
                         default=2_000_000_000_000)
     parser.add_argument("--apply", action="append", required=True,
-                        metavar="DELTA_NAME",
-                        help="A transformation name (repeatable for "
-                             "sequences). Use --apply-args after each "
-                             "--apply for that delta's args.")
+                        metavar="DELTA_NAME[:k=v,k=v]",
+                        help="A transformation name with optional inline "
+                             "kwargs. Examples: "
+                             "`--apply swap_attention_to_mla:latent_dim=256` "
+                             "or `--apply 'swap_attention_to_mla{latent_dim=256,heads=8}'`. "
+                             "Repeat for sequences.")
+    # Deprecated two-flag form: --apply NAME --apply-args k=v ...
+    # Kept for back-compat, hidden from --help. See FEEDBACK item #12.
     parser.add_argument("--apply-args", action="append", default=[],
-                        metavar="k=v",
-                        help="Args for the most recent --apply. Repeat "
-                             "to set multiple args for the same delta. "
-                             "Separator between delta groups: --apply-args "
-                             "is bound to the closest preceding --apply.")
+                        metavar="k=v", help=argparse.SUPPRESS)
     parser.add_argument("--no-pareto", action="store_true",
                         help="Skip Pareto-position classification.")
     parser.add_argument("--out", default=None,
@@ -164,45 +164,104 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _build_delta_groups(argv: List[str]) -> List[Tuple[str, Dict[str, Any]]]:
-    """Walk argv to associate each --apply-args with its preceding --apply.
+def _parse_inline_args(spec: str) -> Tuple[str, Dict[str, Any]]:
+    """Parse an inline --apply value: NAME, NAME:k=v,k=v, or NAME{k=v,k=v}.
 
-    argparse's `action="append"` puts all --apply names in one list and all
-    --apply-args strings in another, losing the association. We re-walk argv
-    here to restore it.
+    Eliminates the "args bound to the closest preceding --apply" rule that
+    was easy to get wrong in shell history (FEEDBACK item #12).
+    """
+    s = (spec or "").strip()
+    if not s:
+        return "", {}
+    if s.endswith("}") and "{" in s:
+        name, _, body = s[:-1].partition("{")
+        return name.strip(), _parse_kv_body(body)
+    if ":" in s:
+        name, _, body = s.partition(":")
+        return name.strip(), _parse_kv_body(body)
+    return s, {}
+
+
+def _parse_kv_body(body: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for chunk in body.split(","):
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        k, _, v = chunk.partition("=")
+        out[k.strip()] = _coerce_arg_value(v.strip())
+    return out
+
+
+def _build_delta_groups(argv: List[str]) -> List[Tuple[str, Dict[str, Any]]]:
+    """Walk argv to build (name, kwargs) groups from --apply / --apply-args.
+
+    Two syntaxes are supported:
+
+        --apply NAME[:k=v,k=v]                 (inline form, preferred)
+        --apply NAME --apply-args k=v ...      (legacy two-flag form)
+
+    The legacy form remains for back-compat; the inline form removes the
+    positional binding (FEEDBACK item #12).
     """
     groups: List[Tuple[str, Dict[str, Any]]] = []
     i = 0
     while i < len(argv):
         tok = argv[i]
-        if tok == "--apply":
-            name = argv[i + 1] if i + 1 < len(argv) else ""
-            groups.append((name, {}))
-            i += 2
+        if tok == "--apply" or tok.startswith("--apply="):
+            if tok == "--apply":
+                raw = argv[i + 1] if i + 1 < len(argv) else ""
+                i += 2
+            else:
+                raw = tok.split("=", 1)[1]
+                i += 1
+            name, kw = _parse_inline_args(raw)
+            groups.append((name, kw))
             continue
         if tok == "--apply-args":
             if not groups:
                 i += 2
                 continue
             kv = argv[i + 1] if i + 1 < len(argv) else ""
+            # Reject empty / malformed --apply-args. Previously
+            # `--apply-args ""` (or any value without `=`) was silently
+            # swallowed by the `if "=" in kv:` branch below, so users got
+            # no signal that their key-value pair never made it into the
+            # delta. Fail fast in the same style as bogus-key validation.
+            if not kv.strip() or "=" not in kv:
+                last_delta = groups[-1][0] if groups else "<unknown>"
+                print(
+                    f"ERROR: --apply {last_delta}: --apply-args value {kv!r} "
+                    "is not a valid `key=value` pair. Pass one key=value per "
+                    "--apply-args, e.g. `--apply-args group_size=8`.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             # Fix #2: detect the legacy comma-separated form `k1=v1,k2=v2`
             # and emit an actionable error instead of letting the value
             # fall through as a string and surfacing later as a misleading
             # "k must be an integer". This is the most common migration
             # failure from v1-release / ac-cli-release-v1.
-            if "=" in kv:
-                k, _, v = kv.partition("=")
-                if "," in v and "=" in v:
-                    print(
-                        f"ERROR: --apply-args value {kv!r} looks like the "
-                        "legacy comma-separated form `k1=v1,k2=v2`. "
-                        "Repeat --apply-args once per key instead: "
-                        f"`--apply-args {k}=<val> --apply-args "
-                        f"{v.split(',', 1)[1].split('=', 1)[0]}=<val>`.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(2)
-                groups[-1][1][k] = _coerce_arg_value(v)
+            k, _, v = kv.partition("=")
+            if "," in v and "=" in v:
+                print(
+                    f"ERROR: --apply-args value {kv!r} looks like the "
+                    "legacy comma-separated form `k1=v1,k2=v2`. "
+                    "Repeat --apply-args once per key instead: "
+                    f"`--apply-args {k}=<val> --apply-args "
+                    f"{v.split(',', 1)[1].split('=', 1)[0]}=<val>`.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if not k.strip():
+                last_delta = groups[-1][0] if groups else "<unknown>"
+                print(
+                    f"ERROR: --apply {last_delta}: --apply-args value {kv!r} "
+                    "has an empty key. Pass `key=value`.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            groups[-1][1][k] = _coerce_arg_value(v)
             i += 2
             continue
         i += 1
@@ -340,6 +399,13 @@ def main(argv: List[str] = None) -> int:
                 file=sys.stderr,
             )
 
+    # Warn once if the chosen hardware has no calibration table.
+    try:
+        from throughput_model import warn_if_uncalibrated
+        warn_if_uncalibrated(args.hardware)
+    except Exception:
+        pass
+
     # 1) Load baseline
     try:
         bm = load_baseline_model(args.baseline_config)
@@ -454,6 +520,11 @@ def main(argv: List[str] = None) -> int:
                 f"baseline `{ev.baseline_name}`: {ev.reason_if_infeasible}",
                 file=sys.stderr,
             )
+        # Exit non-zero so automation pipelines notice that the delta
+        # evaluation hit infeasibility (e.g. the INFEASIBLE-sentinel
+        # leak from a malformed MoE baseline). The output files are
+        # still written so the user can inspect what happened.
+        return 2
     return 0
 
 

@@ -55,7 +55,8 @@
     "optimizer_bytes_per_param": 12,
     "training_system_efficiency": 0.42,
     "decode_system_efficiency": 0.46,
-    "prefill_system_efficiency": 0.61
+    "prefill_system_efficiency": 0.61,
+    "efficiency_multipliers": {"training": 1.55, "prefill": 1.30, "decode": 1.40}
   },
 
   "notes": {

@@ -275,6 +275,18 @@ def compute_lattice(
             if n_heads % tp != 0:
                 continue
 
+            # v1-fix audit (warp-friendly heads): tensor cores tile heads
+            # into groups of 8 lanes; n_heads that aren't multiples of
+            # max(TP, 8) leave fractional warps and hurt FA-2/3 attention
+            # kernel occupancy. Production decoders (Llama, Mistral, GPT-OSS,
+            # Qwen) all pick n_heads ∈ {8, 16, 32, 48, 64, 96, 128}; the
+            # previous lattice was emitting 15, 18, 40, 72 as "optimal"
+            # because the constraint was only n_heads % tp == 0. Enforce
+            # warp-alignment here so the Pareto can't pick them.
+            warp_align = max(tp, 8)
+            if n_heads % warp_align != 0:
+                continue
+
             heads_per_gpu = n_heads // tp
 
             # QKV projection: N = 3 * d_head * heads_per_gpu
@@ -976,6 +988,60 @@ def estimate_params(d_model, n_heads, d_head, ffn_dim, n_layers, n_kv_heads=None
 
     total = per_layer * n_layers + embed_params + norm_params
     return total
+
+
+# v1-fix demo-audit (June 2026 follow-up): MLA candidates were being emitted
+# with `total_params` inherited from the dense MHA estimator at the same
+# lattice point. The MHA Q+K+V+O block is 4·d² (no GQA) but real MLA uses
+# down/up factorizations with a compressed KV latent and a shared RoPE'd key
+# — for cell 9 (B200 7B unconstrained) that meant a reported 7.49 B whose
+# true MLA-layout parameter count was 5.93 B (1.56 B / 21 % over-stated).
+# Beyond the cosmetic discrepancy, the Chinchilla baseline used the inflated
+# N, so MLA candidates were artificially Pareto-favored. This helper returns
+# the true DeepSeek-V2/V3 MLA per-layer parameter count.
+#
+# Layout (DeepSeek-V3):
+#   W_dkv : d_model -> c_kv                (KV down-projection)
+#   W_kr  : d_model -> d_rope              (RoPE'd K, shared across heads)
+#   W_uk  : c_kv    -> n_heads * d_nope    (K up-projection per head)
+#   W_uv  : c_kv    -> n_heads * d_nope    (V up-projection per head; d_v_head = d_nope)
+#   W_dq  : d_model -> c_q                 (Q down-projection)
+#   W_uq  : c_q     -> n_heads * (d_nope + d_rope)  (Q up; per-head Q dim)
+#   W_o   : n_heads * d_nope -> d_model    (output projection over V-space)
+def estimate_mla_per_layer_params(
+    d_model: int, n_heads: int,
+    c_kv: int, c_q: int, d_nope: int, d_rope: int,
+    ffn_dim: int,
+) -> int:
+    """Return per-layer parameter count for a DeepSeek-V2/V3-style MLA block
+    paired with a SwiGLU FFN. Excludes embeddings and final lm_head; includes
+    two RMSNorms per layer."""
+    W_dkv = d_model * c_kv
+    W_kr  = d_model * d_rope
+    W_uk  = c_kv * n_heads * d_nope
+    W_uv  = c_kv * n_heads * d_nope
+    W_dq  = d_model * c_q
+    W_uq  = c_q * n_heads * (d_nope + d_rope)
+    W_o   = n_heads * d_nope * d_model
+    attn_params = W_dkv + W_kr + W_uk + W_uv + W_dq + W_uq + W_o
+    ffn_params = 3 * d_model * ffn_dim     # SwiGLU up + gate + down
+    norm_params = 2 * d_model              # two RMSNorms per block
+    return attn_params + ffn_params + norm_params
+
+
+def estimate_mla_total_params(
+    d_model: int, n_heads: int, n_layers: int,
+    c_kv: int, c_q: int, d_nope: int, d_rope: int,
+    ffn_dim: int, vocab_size: int = 32000,
+) -> int:
+    """Total parameter count for an MLA transformer (per-layer × n_layers +
+    embeddings). Mirrors the API of `estimate_params` so the emitter can
+    swap one for the other without rejigging the rest of the loop."""
+    per_layer = estimate_mla_per_layer_params(
+        d_model, n_heads, c_kv, c_q, d_nope, d_rope, ffn_dim
+    )
+    embed_params = 2 * vocab_size * d_model
+    return per_layer * n_layers + embed_params
 
 
 def efficient_configs(

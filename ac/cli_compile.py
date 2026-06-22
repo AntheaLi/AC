@@ -27,6 +27,7 @@ import json
 import os
 import sys
 import time
+from typing import Any, Dict, Optional
 
 # Wire up paths
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +35,13 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from optimizer import optimize, result_to_config, result_to_pareto_csv, DeploymentConstraints
+from cli_recipe import (
+    expand_argv,
+    render_group_help,
+    snapshot_recipe,
+    run_init as _recipe_run_init,
+    run_config_show as _recipe_run_config_show,
+)
 from shadow_prices import compute_shadow_prices, shadow_prices_to_json
 from justification import generate_justification, generate_assumptions, generate_model_card
 from schema import save_config
@@ -51,10 +59,71 @@ from baseline_delta import (
 )
 
 
+# Canonical hardware names shown in --help. Trainium short forms
+# (`trn2`/`trn3`) are still parsed via `_normalize_hardware` below but
+# hidden from --help so users only see one name per platform.
 VALID_HARDWARE = [
     "h100", "b200", "tpu_v5p", "tpu_v5e",
-    "trainium2", "trn2", "trainium3", "trn3",
+    "trainium2", "trainium3",
 ]
+
+_HARDWARE_ALIASES = {
+    "trn2": "trainium2",
+    "trn3": "trainium3",
+}
+
+
+def _normalize_hardware(value: str) -> str:
+    v = (value or "").strip().lower()
+    return _HARDWARE_ALIASES.get(v, v)
+
+
+def _format_optimal_line(opt) -> str:
+    """One-line summary of the picked candidate.
+
+    The earlier template printed `kv=<n_kv_heads>` unconditionally, which
+    was misleading on MLA runs (n_kv_heads is irrelevant under MLA, but
+    the surrounding numerals looked normal). It also didn't surface MoE
+    topology, MTP depth, or RoPE-scaling, so on the MAI-Thinking-1
+    example the user couldn't tell from the log line that MLA+MoE+MTP
+    were active. This helper makes the line arch-aware.
+    """
+    a = opt.arch
+    parts = [f"d={a.d_model}", f"L={a.n_layers}"]
+    # Attention block.
+    attn = a.attention_type
+    if attn == "mla":
+        latent = a.mla_kv_latent_dim or 0
+        q_latent = a.mla_q_latent_dim or 0
+        parts.append(f"attn=mla(kv_latent={latent},q_latent={q_latent})")
+    elif attn == "nsa":
+        parts.append("attn=nsa")
+    else:
+        parts.append(f"attn=full h={a.n_heads} kv={a.n_kv_heads}")
+    parts.append(f"ffn={a.ffn_dim}")
+    # FFN family.
+    if getattr(a, "moe_style", "dense") != "dense" and a.moe is not None:
+        parts.append(
+            f"moe={a.moe.get('n_experts')}x"
+            f"top{a.moe.get('top_k')}(ep={a.ep_degree})"
+        )
+        if a.n_dense_ffn_layers:
+            parts.append(f"dense_prefix={a.n_dense_ffn_layers}")
+    # State / hybrid.
+    if a.n_state_layers > 0:
+        parts.append(
+            f"state={a.n_state_layers}/{a.n_layers} "
+            f"d_state={a.derived_d_state} placement={a.placement_strategy}"
+        )
+    # MTP.
+    if a.mtp_n_predict_depths and a.mtp_n_predict_depths > 0:
+        parts.append(f"mtp={a.mtp_n_predict_depths}")
+    # RoPE scaling.
+    if a.rope_scaling_method and a.rope_scaling_method != "none":
+        parts.append(f"rope={a.rope_scaling_method}")
+    # Precision.
+    parts.append(f"prec={a.ffn_precision} kv_bits={a.kv_cache_bits}")
+    return "[arch-compiler] Optimal: " + " ".join(parts)
 
 
 def parse_billions(value: str) -> float:
@@ -175,16 +244,121 @@ def ensure_parent_dir(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
-def parse_args(argv=None):
+def infer_output_paths(args) -> Dict[str, str]:
+    """Populate sibling output paths on `args` from --output-config.
+
+    Returns the resolved {field_name: path} map so `config show` can
+    surface the same paths the real run will use. Idempotent: if a
+    field is already set, we leave it alone and just record the path.
+
+    Rule: derive a basename "stem" from --output-config and use
+    "{stem}.md", "{stem}_pareto.csv", "{stem}_shadow_prices.json", etc.
+    Special case: when the user accepts the default ("arch.json") the
+    stem strips down to "arch" and the historical short names
+    (pareto.csv, shadow_prices.json) are kept so existing scripts that
+    globbed those names still work.
+    """
+    cfg_dir = os.path.dirname(os.path.abspath(args.output_config))
+    cfg_stem = os.path.splitext(os.path.basename(args.output_config))[0]
+    using_default_cfg = (os.path.abspath(args.output_config) ==
+                         os.path.abspath("arch.json"))
+
+    def _sibling(suffix: str, default_short: str) -> str:
+        if using_default_cfg:
+            return default_short
+        # Strip a trailing "_arch" or "_config" so a stem like
+        # "mistral_arch" produces "mistral_pareto.csv" rather than
+        # "mistral_arch_pareto.csv". Documented in --help.
+        stem = cfg_stem
+        for tail in ("_arch", "_config"):
+            if stem.endswith(tail) and len(stem) > len(tail):
+                stem = stem[: -len(tail)]
+                break
+        return os.path.join(cfg_dir, f"{stem}{suffix}")
+
+    if args.output_justification is None:
+        # Justification inherits cfg_stem exactly (back-compat with the
+        # README example: --output-config out/mistral_arch.json →
+        # out/mistral_arch.md).
+        args.output_justification = (
+            "arch.md" if using_default_cfg
+            else os.path.join(cfg_dir, f"{cfg_stem}.md"))
+    if args.output_pareto is None:
+        args.output_pareto = _sibling("_pareto.csv", "pareto.csv")
+    if args.output_shadow_prices is None:
+        args.output_shadow_prices = _sibling("_shadow_prices.json", "shadow_prices.json")
+    if args.output_assumptions is None and getattr(args, "auto_emit_sidecars", False):
+        args.output_assumptions = _sibling("_assumptions.md", "assumptions.md")
+    if args.output_model_card is None and getattr(args, "auto_emit_sidecars", False):
+        args.output_model_card = _sibling("_model_card.md", "model_card.md")
+
+    # The contending-family sidecar is only written when the envelope
+    # is non-robust, but show it in `config show` so users see the
+    # full footprint a run may write.
+    contending_sidecar = (
+        f"{cfg_stem}_contending_family.json"
+        if using_default_cfg
+        else os.path.join(cfg_dir, f"{cfg_stem}_contending_family.json")
+    )
+    return {
+        "output_config": args.output_config,
+        "output_justification": args.output_justification,
+        "output_pareto": args.output_pareto,
+        "output_shadow_prices": args.output_shadow_prices,
+        "output_assumptions": args.output_assumptions,
+        "output_model_card": args.output_model_card,
+        "output_implementation": getattr(args, "output_implementation", None),
+        "contending_family_sidecar_if_non_robust": contending_sidecar,
+    }
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the ac-compile argparse parser.
+
+    Split out from `parse_args` so subcommands (`ac-compile config show`)
+    and the help-group filter can introspect groups without invoking
+    `.parse_args()`. Argument GROUPS are named so `--help-group <name>`
+    can filter to just one section.
+    """
     p = argparse.ArgumentParser(
         prog="ac-compile",
-        description="Hardware-aware architecture compiler v0.3. "
-                    "Takes hardware spec + deployment constraints, "
-                    "emits optimal architecture config + justification.",
+        description=(
+            "Hardware-aware architecture compiler v0.3. "
+            "Takes hardware spec + deployment constraints, "
+            "emits optimal architecture config + justification.\n\n"
+            "Recipe-friendly: run `ac-compile --recipe configs/recipes/"
+            "h100_dense_7b.yaml` and add `--override key=value` to tweak. "
+            "Use `ac-compile --help-group <name>` to see just one flag "
+            "group; available groups are listed at the bottom of --help."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    # Meta flags. These are intercepted by `cli_recipe.expand_argv`
+    # before the parser ever sees them, so the action here is just a
+    # placeholder that surfaces them in --help. (action="store" with no
+    # downstream consumer keeps argparse happy and lets users discover
+    # the flag.)
+    meta = p.add_argument_group("recipe & help")
+    meta.add_argument("--recipe", metavar="PATH",
+                      help="YAML/JSON recipe of flag values; see "
+                           "configs/recipes/. Replaceable by `key=value` "
+                           "pairs in --override.")
+    meta.add_argument("--override", metavar="KEY=VALUE", action="append",
+                      default=[],
+                      help="Override a recipe field, e.g. "
+                           "`--override params=70`. Repeatable.")
+    meta.add_argument("--print-recipe", metavar="PATH", default=None,
+                      help="After a successful run, snapshot the resolved "
+                           "flags to a YAML recipe at PATH (replayable with "
+                           "--recipe).")
+    meta.add_argument("--help-group", metavar="NAME", default=None,
+                      help="Print help only for the named argument group "
+                           "and exit (e.g. --help-group moe).")
+
     # Required for greenfield mode; optional in baseline modifier mode.
-    p.add_argument("--hardware", required=True, choices=VALID_HARDWARE,
+    p.add_argument("--hardware", required=True, type=_normalize_hardware,
+                   choices=VALID_HARDWARE,
                    help="Target hardware platform")
     p.add_argument("--params", default=None, type=parse_billions,
                    help="Target parameter count in billions (e.g., 7 or 7B)")
@@ -202,8 +376,10 @@ def parse_args(argv=None):
                          "shape whose total-param count lands in "
                          "[params*(1-tol), params*(1+tol)]. Tighten with "
                          "--param-tolerance 0.05 for a closer match."))
-    p.add_argument("--param-band", dest="param_tolerance", type=parse_non_negative_float, default=argparse.SUPPRESS,
-                   help="Alias for --param-tolerance")
+    # Deprecated alias — kept for back-compat, hidden from --help.
+    p.add_argument("--param-band", dest="param_tolerance",
+                   type=parse_non_negative_float, default=argparse.SUPPRESS,
+                   help=argparse.SUPPRESS)
 
     # Serving constraints
     p.add_argument("--serving-tbt", type=parse_positive_float, default=None,
@@ -212,12 +388,16 @@ def parse_args(argv=None):
                    help="Serving time-to-first-token budget in ms")
     p.add_argument("--serving-batch", type=parse_positive_int, default=32,
                    help="Serving batch size (default: 32)")
-    p.add_argument("--batch-size", dest="serving_batch", type=parse_positive_int, default=argparse.SUPPRESS,
-                   help="Alias for --serving-batch")
-    p.add_argument("--tbt-p95-ms", dest="serving_tbt", type=parse_positive_float, default=argparse.SUPPRESS,
-                   help="Alias for --serving-tbt")
-    p.add_argument("--ttft-p95-ms", dest="serving_ttft", type=parse_positive_float, default=argparse.SUPPRESS,
-                   help="Alias for --serving-ttft")
+    # Deprecated aliases — parsed for back-compat, hidden from --help.
+    p.add_argument("--batch-size", dest="serving_batch",
+                   type=parse_positive_int, default=argparse.SUPPRESS,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--tbt-p95-ms", dest="serving_tbt",
+                   type=parse_positive_float, default=argparse.SUPPRESS,
+                   help=argparse.SUPPRESS)
+    p.add_argument("--ttft-p95-ms", dest="serving_ttft",
+                   type=parse_positive_float, default=argparse.SUPPRESS,
+                   help=argparse.SUPPRESS)
 
     # Workload profile
     p.add_argument("--prompt-len", type=parse_positive_int, default=None,
@@ -244,7 +424,8 @@ def parse_args(argv=None):
     p.add_argument("--dp", type=parse_positive_int, default=8,
                    help="Data parallelism degree (default: 8)")
     p.add_argument("--num-gpus", type=parse_positive_int, default=None,
-                   help="Accepted for v0.5 command compatibility; TP/PP/DP still control modeling")
+                   help="Forward-compat shim. Ignored for modeling; --tp * --pp * --dp wins. "
+                        "If passed and the product disagrees, AC prints a WARNING.")
 
     # Precision/KV search controls
     p.add_argument("--kv-dtypes", type=parse_kv_dtype_options, default=None,
@@ -367,39 +548,87 @@ def parse_args(argv=None):
     p.add_argument("--quiet", action="store_true",
                    help="Suppress progress output")
 
-    return p.parse_args(argv)
+    p.epilog = (
+        "logical groups for --help-group: hardware, workload, serving, "
+        "parallelism, precision, state, moe, mla, mtp, rope, nsa, yoco, "
+        "modifier, outputs, recipe."
+    )
+    return p
+
+
+def parse_args(argv=None):
+    """Recipe-aware wrapper around the argparse parser.
+
+    Pipeline:
+      1. Strip and apply --recipe / --override / --help-group /
+         --print-recipe from argv (cli_recipe.expand_argv).
+      2. If --help-group was passed, render only that group and exit.
+      3. Otherwise, parse the expanded argv.
+      4. Stash the print-recipe path on the namespace so main() can
+         snapshot after a successful run.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    expanded, print_recipe_path, help_group = expand_argv(argv)
+    parser = _build_parser()
+    if help_group:
+        print(render_group_help(parser, help_group))
+        sys.exit(0)
+    # Capture the parser-default snapshot BEFORE parsing user input so
+    # snapshot_recipe() can elide values the user didn't actually set.
+    defaults_snapshot = {
+        a.dest: a.default
+        for a in parser._actions
+        if a.dest != argparse.SUPPRESS and a.default is not argparse.SUPPRESS
+    }
+    args = parser.parse_args(expanded)
+    setattr(args, "_print_recipe_path", print_recipe_path)
+    setattr(args, "_defaults_snapshot", defaults_snapshot)
+    return args
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    # Subcommand dispatch — we keep argparse as the single source of
+    # truth for the main flag surface and intercept only the two
+    # recipe-related verbs at the front.
+    if argv and argv[0] == "init":
+        return _recipe_run_init("ac-compile init", argv[1:])
+    if (
+        len(argv) >= 2
+        and argv[0] == "config"
+        and argv[1] == "show"
+    ):
+        return _recipe_run_config_show(
+            "ac-compile config show",
+            _build_parser,
+            argv[2:],
+            infer_paths=infer_output_paths,
+        )
     args = parse_args(argv)
 
     def log(msg):
         if not args.quiet:
             print(msg, file=sys.stderr)
 
-    # Round-2 fix: cwd pollution on failure or default usage. When the user
-    # points --output-config at a non-default location (e.g. /tmp/run42/
-    # arch.json) but leaves --output-justification / --output-pareto /
-    # --output-shadow-prices at their defaults, route those sibling outputs
-    # into the same directory rather than writing arch.md / pareto.csv /
-    # shadow_prices.json into the cwd. Previously, an infeasible search
-    # also wrote arch.md to cwd which was visible noise on shared boxes.
-    cfg_dir = os.path.dirname(os.path.abspath(args.output_config))
-    cfg_stem = os.path.splitext(os.path.basename(args.output_config))[0]
-    using_default_cfg = (os.path.abspath(args.output_config) ==
-                         os.path.abspath("arch.json"))
-    if args.output_justification is None:
-        args.output_justification = (
-            "arch.md" if using_default_cfg
-            else os.path.join(cfg_dir, f"{cfg_stem}.md"))
-    if args.output_pareto is None:
-        args.output_pareto = (
-            "pareto.csv" if using_default_cfg
-            else os.path.join(cfg_dir, "pareto.csv"))
-    if args.output_shadow_prices is None:
-        args.output_shadow_prices = (
-            "shadow_prices.json" if using_default_cfg
-            else os.path.join(cfg_dir, "shadow_prices.json"))
+    # When the user points --output-config at a non-default location (e.g.
+    # /tmp/run42/mistral_arch.json) and leaves the sibling outputs at
+    # their defaults, route ALL siblings into the same directory AND have
+    # them share the config's basename so a single `out/` directory can
+    # hold runs from multiple recipes side by side. The prior behaviour
+    # had .md inheriting the basename while pareto.csv and
+    # shadow_prices.json hard-coded their names, which collided across
+    # runs and was surprising to users who saw `mistral_arch.md` and
+    # `pareto.csv` written together.
+    #
+    # Rule: derive a basename "stem" from --output-config and use
+    # "{stem}.md", "{stem}_pareto.csv", "{stem}_shadow_prices.json", etc.
+    # Special case: when the user accepts the default ("arch.json") the
+    # stem strips down to "arch" and the historical short names
+    # (pareto.csv, shadow_prices.json) are kept so existing scripts that
+    # globbed those names still work.
+    infer_output_paths(args)
 
     if args.baseline_config:
         return _run_modifier_mode(args, log)
@@ -433,11 +662,12 @@ def main(argv=None):
                 file=sys.stderr,
             )
 
-    # B3 fix: --num-gpus is accepted for v0.5 command-line compatibility but
-    # the modeling reads TP/PP/DP directly. Previously a mismatch between
-    # `--num-gpus` and `tp*pp*dp` was silent, which let users believe their
-    # flag controlled something it doesn't. Warn loudly so the user knows the
-    # number they typed will be ignored.
+    # --num-gpus is a forward-compat shim that other CLIs in the lab pass.
+    # AC sizes the model from --tp / --pp / --dp directly, so --num-gpus is
+    # ignored for modeling. Previously a mismatch between `--num-gpus` and
+    # `tp*pp*dp` was silent, which let users believe their flag controlled
+    # something it doesn't. Warn loudly so the user knows the number they
+    # typed will be ignored.
     if getattr(args, "num_gpus", None) is not None:
         implied = (args.tp or 1) * (args.pp or 1) * (args.dp or 1)
         if int(args.num_gpus) != implied:
@@ -605,6 +835,17 @@ def main(argv=None):
             print(f"WARNING: {msg}", file=sys.stderr)
             precision_warnings.append(msg)
 
+    # Warn once if the user is on a hardware target with no calibration
+    # table on disk. The throughput model still runs (with default
+    # efficiency multipliers) but the user should know the absolute
+    # numbers are uncalibrated priors.
+    try:
+        from throughput_model import warn_if_uncalibrated
+        warn_if_uncalibrated(args.hardware)
+    except Exception:
+        # Never let an advisory warning crash a real run.
+        pass
+
     # Run optimizer
     log(f"[arch-compiler] Searching {args.params}B architectures on {args.hardware}...")
     t0 = time.time()
@@ -654,17 +895,96 @@ def main(argv=None):
         return 1
 
     opt = result.optimal
-    base_log = (f"[arch-compiler] Optimal: d={opt.arch.d_model} L={opt.arch.n_layers} "
-                f"h={opt.arch.n_heads} kv={opt.arch.n_kv_heads} ffn={opt.arch.ffn_dim} "
-                f"prec={opt.arch.ffn_precision} kv_bits={opt.arch.kv_cache_bits}")
-    if opt.arch.n_state_layers > 0:
-        base_log += (f" state={opt.arch.n_state_layers}/{opt.arch.n_layers} "
-                     f"d_state={opt.arch.derived_d_state} "
-                     f"placement={opt.arch.placement_strategy}")
-    log(base_log)
-    log(f"[arch-compiler] Loss={opt.predicted_loss:.4f} "
+    log(_format_optimal_line(opt))
+    # Decorate the loss numeral when no lab-calibration pack is loaded. The
+    # README's "rank, don't predict" preamble says absolute loss is biased
+    # priors as shipped; printing the bare number `Loss=2.0531` next to a
+    # measured-looking `TPS=82127` invited users to quote it as if it were
+    # measured. Star it until AC_QUALITY_DEFAULTS resolves to a pack.
+    _q_override = os.environ.get("AC_QUALITY_DEFAULTS")
+    _uncalibrated = not _q_override or not os.path.exists(_q_override)
+    _loss_label = "Loss*" if _uncalibrated else "Loss"
+    _loss_suffix = " (uncalibrated prior)" if _uncalibrated else ""
+    log(f"[arch-compiler] {_loss_label}={opt.predicted_loss:.4f}{_loss_suffix} "
         f"TPS={opt.training_tps:.0f} TBT={opt.serving_tbt_ms:.1f}ms "
         f"Mem={opt.memory_per_gpu_gb:.1f}GB")
+
+    # Confidence-envelope robustness. The optimizer computes
+    # `robust_to_loss_uncertainty` (in `metadata.predicted.confidence_envelope`)
+    # by counting candidates that overlap the picked candidate's loss CI band.
+    # When false, the bare "Optimal:" banner above is over-confident: the top
+    # several candidates are quality-equivalent within modeled uncertainty and
+    # the picker tiebroke them on throughput/memory. Surface that so users do
+    # not over-read the rank-1 row.
+    contending_family_sidecar_path = None
+    try:
+        from optimizer import (
+            compute_confidence_envelope,
+            compute_contending_family_full,
+        )
+        envelope = compute_confidence_envelope(result, opt)
+        if envelope and not envelope.get("robust_to_loss_uncertainty", True):
+            n_contenders = int(envelope.get("contending_candidates", 0))
+            if n_contenders >= 1:
+                # Write the full top-32 family to a sidecar JSON. The
+                # emitted config carries only the top-5 inline; users
+                # who want the broader picture (auto-calibration runs,
+                # dashboards) follow the path in the warning message.
+                sidecar_dir = os.path.dirname(os.path.abspath(args.output_config))
+                sidecar_stem = os.path.splitext(os.path.basename(args.output_config))[0]
+                sidecar_path = os.path.join(
+                    sidecar_dir, f"{sidecar_stem}_contending_family.json"
+                )
+                try:
+                    full_family = compute_contending_family_full(result, opt, top_n=32)
+                    ensure_parent_dir(sidecar_path)
+                    with open(sidecar_path, "w") as _f:
+                        json.dump(
+                            {
+                                "robust_to_loss_uncertainty": False,
+                                "contending_candidates": n_contenders,
+                                "loss_low": envelope.get("loss_low"),
+                                "loss_high": envelope.get("loss_high"),
+                                "uncertainty_total_pct": envelope.get(
+                                    "uncertainty_total_pct"
+                                ),
+                                "contending_family": full_family,
+                            },
+                            _f,
+                            indent=2,
+                        )
+                    contending_family_sidecar_path = sidecar_path
+                except Exception:
+                    contending_family_sidecar_path = None
+                tail = (
+                    f" Full top-32 family written to {contending_family_sidecar_path}."
+                    if contending_family_sidecar_path
+                    else ""
+                )
+                # Vary the attribution depending on whether a lab
+                # calibration pack is loaded. Pre-fix, the message
+                # always blamed "uncalibrated quality-model uncertainty"
+                # even when AC_QUALITY_DEFAULTS resolved to a pack —
+                # which is misleading, because a non-robust envelope
+                # after calibration just means the lab's modeled
+                # uncertainty is genuinely wide for this run, not that
+                # calibration is missing.
+                uncertainty_attribution = (
+                    "uncalibrated quality-model uncertainty"
+                    if _uncalibrated
+                    else "the calibrated quality-model uncertainty band"
+                )
+                print(
+                    f"WARNING: {n_contenders} contending candidate(s) sit "
+                    "inside the loss CI band of the picked architecture "
+                    f"(rank-1 is not robust to {uncertainty_attribution}). "
+                    "The picker tiebroke them on "
+                    "throughput/memory; inspect the pareto.csv before "
+                    "treating the `Optimal:` row as unique." + tail,
+                    file=sys.stderr,
+                )
+    except Exception:
+        pass
 
     # MoE-fallback warning: the user opted into MoE search but the picked
     # config is dense, which usually means either no MoE candidate beat the
@@ -899,6 +1219,16 @@ def main(argv=None):
 
     elapsed = time.time() - t0
     log(f"[arch-compiler] Total time: {elapsed:.1f}s")
+    # --print-recipe: snapshot the resolved flag set after a successful
+    # run so it can be replayed exactly with --recipe. Only fires on
+    # success; a failed/infeasible run shouldn't pollute a recipes/ dir.
+    pr_path = getattr(args, "_print_recipe_path", None)
+    if pr_path:
+        try:
+            snapshot_recipe(args, pr_path)
+            log(f"[arch-compiler] Wrote replay recipe to {pr_path}")
+        except Exception as e:
+            log(f"[arch-compiler] WARNING: could not write --print-recipe: {e}")
     return 0
 
 
@@ -943,6 +1273,12 @@ def _run_modifier_mode(args, log):
     out_dir = args.out or os.path.join("outputs", f"{baseline.name}_modifier")
     os.makedirs(out_dir, exist_ok=True)
 
+    try:
+        from throughput_model import warn_if_uncalibrated
+        warn_if_uncalibrated(args.hardware)
+    except Exception:
+        pass
+
     log(f"[arch-compiler] Modifier mode: baseline={baseline.name} hardware={args.hardware}")
     log(f"[arch-compiler] Local TP options: {','.join(str(t) for t in tp_options)}")
 
@@ -965,7 +1301,35 @@ def _run_modifier_mode(args, log):
     log(f"[arch-compiler] Modifier search complete: {result.candidates_evaluated} evaluated, "
         f"{len(result.feasible_records)} feasible, {len(result.pareto_frontier)} Pareto, "
         f"{result.search_time_sec:.1f}s")
-    log(f"[arch-compiler] Selected: {selected.change_summary}")
+    # If the local sweep found nothing feasible, surface that as a real
+    # error rather than silently falling back to the baseline as "Selected".
+    # Previously: a downstream pipeline reading the emitted config.json
+    # would get the broken baseline back with exit code 0. Now we refuse
+    # to write the bundle and exit non-zero so automation notices.
+    if len(result.feasible_records) == 0:
+        print(
+            f"ERROR: Modifier search on baseline `{baseline.name}` produced "
+            f"0 feasible candidates out of {result.candidates_evaluated} "
+            f"evaluated. The baseline itself may be infeasible (e.g. MoE "
+            f"config missing `parallelism.expert_parallel`), or the "
+            f"workload / parallelism constraints rule out every local "
+            f"modification. Re-check the baseline config and constraints, "
+            f"then re-run.",
+            file=sys.stderr,
+        )
+        return 2
+    # Distinguish "modifier picked the baseline because nothing dominated it"
+    # from "modifier picked a real modification". Downstream automation can
+    # gate on the SELECTED-IS-BASELINE banner instead of diffing config.json.
+    if getattr(selected, "is_baseline", False) or not selected.changes:
+        n_eval = result.candidates_evaluated
+        log(f"[arch-compiler] Selected: baseline (no Pareto-improving "
+            f"modification found among {n_eval} candidate(s))")
+        log(f"[arch-compiler] NOTE: emitted config.json is the baseline "
+            f"itself; re-run with --allow-quality-spending or wider sweep "
+            f"flags to explore quality-trading moves.")
+    else:
+        log(f"[arch-compiler] Selected: {selected.change_summary}")
     log(f"[arch-compiler] Config: d={c.d_model} L={c.n_layers} h={c.n_heads} "
         f"kv={c.n_kv_heads} ffn={c.ffn_dim} ffn_prec={c.ffn_precision} "
         f"kv_bits={c.kv_cache_bits} TP={selected.tp}")

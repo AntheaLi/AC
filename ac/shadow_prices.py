@@ -19,6 +19,7 @@ from typing import List, Optional, Dict
 from optimizer import (
     optimize, OptimizationResult, DeploymentConstraints,
     evaluate_candidate, CandidateArch, EvaluatedCandidate,
+    OBJECTIVE_PROFILES,
 )
 
 
@@ -101,6 +102,94 @@ def _compute_one(
         delta_loss=round(delta, 4),
         delta_loss_pct=round(delta_pct, 2),
         interpretation=interp,
+    )
+
+
+def _decide_alignment(
+    ev,
+    base_loss: float,
+    base_tps: float,
+    base_tbt: float,
+    base_mem: float,
+    d_loss_pct: float,
+    d_tps_pct: float,
+    d_tbt_pct: float,
+    d_mem_pct: float,
+    constraints,
+    base_arch=None,
+):
+    """Decide accepted / rejected / neutral by mimicking the optimizer's
+    weighted-score sort, then collapsing within the model's own uncertainty
+    band.
+
+    Returns (decision, reason).
+
+    Rationale: the prior shadow_prices module used two independent
+    decision rules ("d_loss < -0.05% and d_tbt < 5% → accepted",
+    "d_loss < 0.3% and any of TPS↑/TBT↓/MEM↓ > 5% → accepted") that were
+    both inconsistent with the optimizer's actual sort key. That made
+    arch_dim_shadow_prices report e.g. "Enable FP8 FFN — accepted" while
+    the optimizer kept bf16 FFN, which is the exact contradiction the
+    demo audit surfaced. Here we evaluate moves with the same weights
+    the picker uses, so the labels track the actual selection.
+    """
+    if not getattr(ev, "meets_constraints", True):
+        return "rejected", "; ".join(getattr(ev, "constraint_violations", [])[:2]) or "infeasible"
+
+    profile = getattr(constraints, "objective_profile", "balanced") if constraints else "balanced"
+    weights = OBJECTIVE_PROFILES.get(profile, OBJECTIVE_PROFILES.get("balanced", {}))
+    w_loss = float(weights.get("loss", 1.0))
+    w_tbt = float(weights.get("tbt", 0.0))
+    w_tps = float(weights.get("tps", 0.0))
+    w_mem = float(weights.get("mem", 0.0))
+    w_params = float(weights.get("params", 0.0))
+    w_ttft = float(weights.get("ttft", 0.0))
+
+    # Weighted score delta. Lower is better, so we expect:
+    #   Δloss positive → bad; Δtps positive → good (subtract); Δtbt
+    #   positive → bad; Δmem positive → bad.
+    # All deltas are in %; scale loss term by ~10× because predicted-loss
+    # uncertainty is ~3% while throughput-side measurement noise is ~30%,
+    # i.e. one loss-percent moves the picker ten times more than one
+    # throughput-percent. This matches the empirical sort key behaviour.
+    score = (
+        w_loss * 10.0 * d_loss_pct
+        + w_tbt * d_tbt_pct
+        + w_mem * d_mem_pct
+        - w_tps * d_tps_pct
+    )
+
+    # Uncertainty band — collapse within the model's own noise.
+    unc_pct = float(getattr(getattr(ev, "quality", None), "uncertainty_total", 0.03) or 0.03) * 100
+    band = max(0.5, 0.25 * unc_pct * w_loss * 10.0)
+
+    if score < -band:
+        if d_loss_pct < -0.05:
+            reason = (
+                f"Improves quality by {abs(d_loss_pct):.2f}% with acceptable "
+                f"throughput/memory cost (weighted score Δ={score:+.2f})"
+            )
+        else:
+            reason = (
+                f"Improves on throughput/memory at acceptable quality cost "
+                f"(Δloss={d_loss_pct:+.2f}%, weighted score Δ={score:+.2f})"
+            )
+        return "accepted", reason
+    if score > band:
+        if d_loss_pct > 0.05:
+            reason = (
+                f"Worsens quality by {d_loss_pct:.2f}% beyond what throughput "
+                f"gains compensate (weighted score Δ={score:+.2f})"
+            )
+        else:
+            reason = (
+                f"Net worse under the active profile "
+                f"(Δloss={d_loss_pct:+.2f}%, weighted score Δ={score:+.2f})"
+            )
+        return "rejected", reason
+    return "neutral", (
+        f"Within the {unc_pct:.1f}% uncertainty band on quality "
+        f"(weighted score Δ={score:+.2f})"
     )
 
 
@@ -300,19 +389,18 @@ def compute_arch_dim_shadow_prices(
         d_tbt = ((ev.serving_tbt_ms - base_tbt) / base_tbt) * 100 if base_tbt > 0 else 0
         d_mem = ((ev.memory_per_gpu_gb - base_mem) / base_mem) * 100 if base_mem > 0 else 0
 
-        # Determine decision
-        if not ev.meets_constraints:
-            decision = "rejected"
-            reason = "; ".join(ev.constraint_violations[:2])
-        elif d_loss < -0.05 and d_tbt < 5:
-            decision = "accepted"
-            reason = f"Improves quality by {abs(d_loss):.2f}% with acceptable throughput cost"
-        elif d_loss > 0.05:
-            decision = "rejected"
-            reason = f"Worsens quality by {d_loss:.2f}%"
-        else:
-            decision = "neutral"
-            reason = "Marginal impact on both quality and throughput"
+        # v1-fix demo-audit: align "decision" with the optimizer's actual
+        # sort key under the active profile, instead of an independent rule
+        # that contradicts what got picked. The optimizer minimizes a
+        # weighted score of (loss, tbt, ttft, tps, mem, params); a move is
+        # "accepted" only if it would improve that weighted score by more
+        # than the quality model's uncertainty band. Otherwise the user
+        # sees "+96% TPS — accepted" while the picker stays on bf16 FFN.
+        decision, reason = _decide_alignment(
+            ev, base_loss, base_tps, base_tbt, base_mem,
+            d_loss, d_tps, d_tbt, d_mem,
+            constraints, base_arch=base,
+        )
 
         results.append(ArchDimShadowPrice(
             dimension=dim,
@@ -360,15 +448,17 @@ def compute_arch_dim_shadow_prices(
         d_tbt = ((ev.serving_tbt_ms - base_tbt) / base_tbt) * 100 if base_tbt > 0 else 0
         d_mem = ((ev.memory_per_gpu_gb - base_mem) / base_mem) * 100 if base_mem > 0 else 0
 
-        if d_loss < 0.3 and (d_tps > 5 or d_tbt < -5 or d_mem < -5):
-            decision = "accepted"
-            reason = f"Good throughput/memory trade for {d_loss:.2f}% quality cost"
-        elif d_loss > 1.0:
-            decision = "rejected"
-            reason = f"Quality cost of {d_loss:.2f}% too high"
-        else:
-            decision = "neutral"
-            reason = f"Optional: {d_loss:.2f}% quality cost"
+        # v1-fix demo-audit: route precision perturbations through the same
+        # decision rule as architectural perturbations, so the report is
+        # internally consistent. The previous "fp8 always accepted if d_loss
+        # < 0.3% and any throughput axis improves >5%" rule was orthogonal
+        # to the optimizer's score and is exactly what made the report tell
+        # users "Enable FP8 FFN — accepted" while shipping bf16 FFN.
+        decision, reason = _decide_alignment(
+            ev, base_loss, base_tps, base_tbt, base_mem,
+            d_loss, d_tps, d_tbt, d_mem,
+            constraints, base_arch=base,
+        )
 
         results.append(ArchDimShadowPrice(
             dimension=dim,

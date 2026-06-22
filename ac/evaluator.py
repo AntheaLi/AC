@@ -51,6 +51,61 @@ from delta_engine import apply_transition  # noqa: E402
 from deltas import REGISTRY, get as get_transformation  # noqa: E402
 from justify_transition import justify  # noqa: E402
 from optimizer_bridge import candidate_to_arch, stress_relief_vs  # noqa: E402
+from penalties import INFEASIBLE  # noqa: E402
+
+
+# Any predicted_loss at or above this threshold is treated as the
+# INFEASIBLE sentinel leaking through from the quality-model penalty
+# stack (see ac/penalties.py:INFEASIBLE). The 0.5 factor gives margin
+# against small residuals that may be added on top of the marker before
+# it reaches the metrics table.
+_INFEASIBLE_LOSS_THRESHOLD = 0.5 * INFEASIBLE
+
+
+def _loss_is_infeasible_sentinel(value: Any) -> bool:
+    """Return True if `value` looks like the INFEASIBLE marker."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(v):
+        return True
+    return v >= _INFEASIBLE_LOSS_THRESHOLD
+
+
+def _infeasibility_check(
+    base_ev: EvaluatedCandidate,
+    cand_ev: EvaluatedCandidate,
+) -> Optional[str]:
+    """Detect baseline/candidate carrying the INFEASIBLE sentinel.
+
+    The quality model returns `INFEASIBLE` (1e6) when its inputs are
+    structurally invalid (e.g. an MoE config with `expert_parallel`
+    missing puts every expert on every rank). That marker used to leak
+    straight through to the report and showed up as a delta of
+    ~-1.96e6 with a misleading "improves" direction. Surface it as a
+    real infeasibility instead.
+    """
+    base_bad = _loss_is_infeasible_sentinel(getattr(base_ev, "predicted_loss", None))
+    cand_bad = _loss_is_infeasible_sentinel(getattr(cand_ev, "predicted_loss", None))
+    if not (base_bad or cand_bad):
+        return None
+    parts: List[str] = []
+    if base_bad:
+        parts.append(
+            "baseline_loss=INFEASIBLE — the baseline config itself failed "
+            "the quality-model feasibility check (common cause: MoE "
+            "config without parallelism.expert_parallel set, which puts "
+            "all experts on every rank). Re-check the baseline config "
+            "before interpreting the delta."
+        )
+    if cand_bad:
+        parts.append(
+            "candidate_loss=INFEASIBLE — the post-delta config failed "
+            "the quality-model feasibility check. Inspect the field "
+            "changes and re-run with revised --apply-args."
+        )
+    return " ".join(parts)
 
 
 # =============================================================================
@@ -864,6 +919,25 @@ def evaluate_delta(
             ev.stress_candidate = transition.candidate_stress.as_dict()
         return ev
 
+    # 3b) Gate INFEASIBLE-sentinel leak before building the metric panel.
+    # See _infeasibility_check docstring for the motivating bug.
+    infeas_reason = _infeasibility_check(base_ev, cand_ev)
+    if infeas_reason is not None:
+        ev.feasible = False
+        ev.reason_if_infeasible = infeas_reason
+        ev.justification = (
+            "Infeasible: " + infeas_reason
+            + "\n\nDelta-influence numbers are NOT reported because one or "
+              "both sides of the comparison hit the quality-model's "
+              "INFEASIBLE marker. Fix the config and re-run."
+        )
+        if transition.baseline_stress is not None:
+            ev.stress_baseline = transition.baseline_stress.as_dict()
+            ev.binding_axes_baseline = list(transition.baseline_stress.binding_axes)
+        if transition.candidate_stress is not None:
+            ev.stress_candidate = transition.candidate_stress.as_dict()
+        return ev
+
     # 4) Metric panel
     base_kv = _kv_cache_gb_for_cand(baseline_candidate, base_constraints,
                                      int(constraints.tp))
@@ -1049,6 +1123,30 @@ def evaluate_delta_sequence(
     base_kv = _kv_cache_gb_for_cand(baseline_candidate, base_constraints,
                                      int(constraints.tp))
     cand_kv = _kv_cache_gb_for_cand(composed_cand, cand_constraints, cand_tp)
+
+    # Same INFEASIBLE-sentinel gate as the single-delta path: don't let the
+    # quality-model marker leak into the metrics table as a fake ~-1e6 delta.
+    infeas_reason = _infeasibility_check(base_ev, cand_ev)
+    if infeas_reason is not None:
+        ev = DeltaEvaluation(
+            baseline_name=baseline_name,
+            hardware=hardware,
+            delta_name="+".join(name for name, _ in deltas),
+            delta_args={"sequence": [{"name": n, "args": dict(a or {})}
+                                       for n, a in deltas]},
+            feasible=False,
+            reason_if_infeasible=infeas_reason,
+            stress_baseline=base_stress.as_dict(),
+            stress_candidate=cand_stress.as_dict(),
+            binding_axes_baseline=list(base_stress.binding_axes),
+        )
+        ev.justification = (
+            "Infeasible: " + infeas_reason
+            + "\n\nDelta-influence numbers are NOT reported because one or "
+              "both sides of the comparison hit the quality-model's "
+              "INFEASIBLE marker. Fix the config and re-run."
+        )
+        return ev
 
     composed_field_changes = _arch_changes(baseline_candidate, composed_cand)
     _append_sidecar_changes(
