@@ -130,6 +130,12 @@ required
   --params  N        (billions; supports "7" or "7B")
   --tokens  N        (trillions; supports "2" or "2T")
 
+```
+
+<details>
+<summary> other ac-compile args </summary>
+
+```
 workload
   --context           int       sequence length (default 8192)
   --prompt-len        int       prefill length override
@@ -208,6 +214,8 @@ outputs (paths)
   --progress-every          print evaluation progress every N candidates
   --quiet                   suppress progress logs
 ```
+</details>
+
 
 #### pareto.csv columns
 
@@ -246,6 +254,40 @@ ac-compile \
   --output-config out/mai_arch.json --no-shadow-prices
 ```
 
+
+---
+
+alternative using YAML or TOML configurations:
+
+```bash
+ac-compile --recipe configs/recipes/h100_dense_7b.yaml \
+  --override params=70 \
+  --output-config out/arch.json
+```
+
+Key commands:
+
+* `--recipe PATH`: Load a saved configuration.
+* `--override KEY=VALUE`: Modify individual recipe values.
+* `--print-recipe PATH`: Save the resolved configuration from a run.
+* `ac-compile config show`: Preview the resolved config, output paths, and warnings without running a search.
+* `ac-compile init TEMPLATE --out PATH`: Create a recipe from a built-in template.
+* `--help-group GROUP`: Show help for one flag group, such as `serving`, `moe`, `precision`, or `recipe`.
+
+Example templates are available in `configs/recipes/`:
+
+```text
+h100_dense_7b.yaml
+b200_moe_mla_long_ctx.yaml
+delta_mistral_gqa_long_ctx.yaml
+```
+
+`ac-delta-eval` also supports inline delta arguments:
+
+```bash
+ac-delta-eval --apply 'swap_attention_to_mla{latent_dim=256,heads=8}'
+```
+
 ---
 
 ### Modifier
@@ -258,7 +300,11 @@ ac-compile --baseline-config PATH [OPTIONS]
 
 required
   --baseline-config  PATH    JSON config emitted by greenfield or any existing model stripped in the format 
+```
 
+<details>
+<summary> other modifer args </summary>
+```
 scoring
   --allow-quality-spending   allow non-zero loss-proxy delta
   --quality-risk-budget-pct  max loss-proxy %-delta (default 1.0)
@@ -275,6 +321,7 @@ output
                 pareto.csv + shadow_prices.md + justification.md +
                 assumptions.md + model_card.md
 ```
+</details>
 
 The modifier and greenfield share all other flags (precision, parallelism,
 state, MoE, MLA, MTP, CP, RoPE, NSA, YOCO).
@@ -295,6 +342,11 @@ required
   --apply            NAME    one of REGISTRY (repeatable)
     --apply-args  k=v        args for the most recent --apply (repeatable)
 
+```
+
+<details>
+<summary> other delta args </summary>
+```
 baseline / hw
   --hardware    h100 | b200 | tpu_v5p | trainium2 | trn2 | trainium3 | trn3
   --tp / --pp / --dp
@@ -311,6 +363,7 @@ other
   --stdout           print Markdown to stdout instead of writing files
   --out      DIR     destination directory
 ```
+</details>
 
 Available delta names (REGISTRY):
 
