@@ -14,9 +14,9 @@ Three composable capabilities, one shared config format:
 
 - **Greenfield**  Given compute -> architecture | `ac-compile --hardware H --params N --tokens T …` 
 
-- **Modifier**  Given compute + a base architecture -> modifier? `ac-compile --baseline-config CONF …` 
+- **Modifier**  Given compute + a base architecture -> modifier | `ac-compile --baseline-config CONF …` 
 
-- **Delta influence**  Given compute + base + delta -> influence. `ac-delta-eval --baseline-config CONF …`
+- **Delta influence**  Given compute + base + delta -> influence |  `ac-delta-eval --baseline-config CONF …`
 
 Also check out the [AC-Harness](https://github.com/AntheaLi/AC-harness), which is a loop scaffold 
 built to automate the process. It can also exist as a thin layer that sits beside existing training, eval, and benchmarking stack. 
