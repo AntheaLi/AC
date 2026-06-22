@@ -134,7 +134,6 @@ required
 ### ac-compile args 
 
 <details>
-<summary> other ac-compile args </summary> 
 
 ```
 workload
@@ -279,7 +278,6 @@ required
 ### modifer args 
 
 <details>
-<summary> modifer args </summary>
  
 ```
 scoring
@@ -323,7 +321,6 @@ required
 ### Delta args 
 
 <details>
-<summary> other delta args </summary>
  
 ```
 baseline / hw
@@ -381,7 +378,7 @@ Pareto position.
 
 ---
 
-## Base-model config format
+## Base-model and CLI arg config
 
 ### Input base model config format
 
@@ -390,10 +387,9 @@ band. A first-K-dense MoE config uses two entries (first K layers dense,
 rest MoE). See `configs/mistral_7b.json` for the dense reference and
 `configs/{gpt_oss_120b, mai_thinking_1}.json` for MoE and MoE+MLA.
 
-### Base model config in json
+#### Base model config format 
 
 <details>
-<summary> config example </summary>
 
 ```jsonc
 {
