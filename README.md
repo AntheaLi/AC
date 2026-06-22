@@ -131,6 +131,7 @@ required
 
 ```
 
+#### ac-compile args 
 
 <details>
 <summary> ac-compile args </summary>
@@ -274,6 +275,9 @@ required
   --baseline-config  PATH    JSON config emitted by greenfield or any existing model stripped in the format 
 ```
 
+
+#### modifer args 
+
 <details>
 <summary> modifer args </summary>
  
@@ -317,6 +321,8 @@ required
 
 ```
 
+#### delta args 
+
 <details>
 <summary> delta args </summary>
  
@@ -338,6 +344,7 @@ other
   --out      DIR     destination directory
 ```
 </details>
+
 
 Available delta names (REGISTRY):
 
