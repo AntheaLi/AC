@@ -254,40 +254,6 @@ ac-compile \
   --output-config out/mai_arch.json --no-shadow-prices
 ```
 
-
----
-
-alternative using YAML or TOML configurations:
-
-```bash
-ac-compile --recipe configs/recipes/h100_dense_7b.yaml \
-  --override params=70 \
-  --output-config out/arch.json
-```
-
-Key commands:
-
-* `--recipe PATH`: Load a saved configuration.
-* `--override KEY=VALUE`: Modify individual recipe values.
-* `--print-recipe PATH`: Save the resolved configuration from a run.
-* `ac-compile config show`: Preview the resolved config, output paths, and warnings without running a search.
-* `ac-compile init TEMPLATE --out PATH`: Create a recipe from a built-in template.
-* `--help-group GROUP`: Show help for one flag group, such as `serving`, `moe`, `precision`, or `recipe`.
-
-Example templates are available in `configs/recipes/`:
-
-```text
-h100_dense_7b.yaml
-b200_moe_mla_long_ctx.yaml
-delta_mistral_gqa_long_ctx.yaml
-```
-
-`ac-delta-eval` also supports inline delta arguments:
-
-```bash
-ac-delta-eval --apply 'swap_attention_to_mla{latent_dim=256,heads=8}'
-```
-
 ---
 
 ### Modifier
@@ -304,6 +270,7 @@ required
 
 <details>
 <summary> other modifer args </summary>
+ 
 ```
 scoring
   --allow-quality-spending   allow non-zero loss-proxy delta
@@ -346,6 +313,7 @@ required
 
 <details>
 <summary> other delta args </summary>
+ 
 ```
 baseline / hw
   --hardware    h100 | b200 | tpu_v5p | trainium2 | trn2 | trainium3 | trn3
@@ -401,12 +369,48 @@ Pareto position.
 
 ---
 
+#### Too many flags :( ... -- alternative using YAML or TOML configurations:
+
+```bash
+ac-compile --recipe configs/recipes/h100_dense_7b.yaml \
+  --override params=70 \
+  --output-config out/arch.json
+```
+
+Key commands:
+
+* `--recipe PATH`: Load a saved configuration.
+* `--override KEY=VALUE`: Modify individual recipe values.
+* `--print-recipe PATH`: Save the resolved configuration from a run.
+* `ac-compile config show`: Preview the resolved config, output paths, and warnings without running a search.
+* `ac-compile init TEMPLATE --out PATH`: Create a recipe from a built-in template.
+* `--help-group GROUP`: Show help for one flag group, such as `serving`, `moe`, `precision`, or `recipe`.
+
+Example templates are available in `configs/recipes/`:
+
+```text
+h100_dense_7b.yaml
+b200_moe_mla_long_ctx.yaml
+delta_mistral_gqa_long_ctx.yaml
+```
+
+`ac-delta-eval` also supports inline delta arguments:
+
+```bash
+ac-delta-eval --apply 'swap_attention_to_mla{latent_dim=256,heads=8}'
+```
+
+---
+
 ### Base-model config format
 
 Schema version 0.3. JSON. One `layer_configs` entry per uniform layer
 band. A first-K-dense MoE config uses two entries (first K layers dense,
 rest MoE). See `configs/mistral_7b.json` for the dense reference and
 `configs/{gpt_oss_120b, mai_thinking_1}.json` for MoE and MoE+MLA.
+
+<details>
+<summary> Model config example </summary>
 
 ```jsonc
 {
@@ -476,7 +480,7 @@ MoE configs to evaluate correctly. **If you hand-write an MoE config and
 forget `expert_parallel`, the throughput model will place all experts on
 every rank and the quality model will return its INFEASIBLE marker.**
 
-
+</details>
 
 ---
 
@@ -492,7 +496,8 @@ Use `ac-auto-calibrate` to fit lab-local uncertainty and hardware-efficiency
 overlays from measured runs. It accepts JSON, JSONL, or CSV rows with flexible
 field names.
 
-Minimal row:
+<details>
+<summary> Minimal row </summary> 
 
 ```json
 {
@@ -523,6 +528,7 @@ Minimal row:
   "observed_prefill_time_ms": 39.0
 }
 ```
+</details>
 
 Fit a pack:
 
@@ -551,7 +557,9 @@ out/lab_calibration/
   report.md                  human-readable calibration report
 ```
 
-Use the pack without editing source files:
+<details>
+ 
+<summary> Use the pack without editing source files </summary>
 
 ```bash
 AC_QUALITY_DEFAULTS=out/lab_calibration/quality_overrides.json \
@@ -590,6 +598,8 @@ include:
 
 Keep separate packs for materially different clusters, kernels, schedulers,
 recipes, and datamixes.
+
+</details>
 
 ---
 
