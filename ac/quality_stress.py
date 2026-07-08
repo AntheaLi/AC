@@ -9,7 +9,7 @@ Axes (per instruction §3):
     shape_law_loss        — width / depth / MLP-attention shape residuals
     attention_residual    — d_head, query_heads, kv_heads, gqa, bottleneck
     moe_residual          — terms["moe_residual"].value
-    state_residual        — terms["state_residual"].value
+    state_residual        — terms["state_residual"].value  (SIGNED, see below)
     precision_loss        — terms["precision_residual"].value
     fa_underrun           — FlashAttention SRAM-underrun penalty (v1-fix Part 3)
     context_extrapolation — placeholder (0 until trained-context tracking lands)
@@ -17,27 +17,45 @@ Axes (per instruction §3):
 Values are **fractional residuals relative to the spine** — same units as
 the underlying TermResult.value field. Multiplying by `chinchilla_baseline`
 gives absolute loss-proxy contributions; we surface both.
+
+Sign convention (post-Wave-5):
+  Most axes are *penalties* and stay non-negative. The exception is
+  `state_residual`. After Wave 5 the state-residual sub-term can return a
+  **negative** value for long-context Jamba-/Samba-like hybrids where the
+  state mechanism gives a quality benefit relative to a pure-attention
+  baseline at the same active params and tokens. Concretely:
+      state_residual > 0  → state added a quality cost (e.g. p_attn too low
+                            at short ctx, or out-of-band hybrid mix).
+      state_residual == 0 → not applicable (dense / MoE-only candidate) or
+                            exactly at the crossover.
+      state_residual < 0  → state contributed a quality benefit at long ctx
+                            (this is the Wave-5 sign change). Consumers that
+                            previously assumed a non-negative penalty must
+                            preserve the sign — clipping to ≥ 0 would erase
+                            the benefit signal.
+  `axis_value("state_residual")` returns the raw signed value so a
+  descending sort by "stress" puts the *largest cost* candidates first and
+  a sort by `absolute["state_residual"]` ranks negative-benefit candidates
+  lowest (most-benefit on top when ascending). The rendering layer
+  (`pretty()`) labels the sign so a reader sees "state benefit at long ctx"
+  instead of just a minus sign.
 """
 
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
-# --- repo path bootstrap ----------------------------------------------------
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from quality_model import (  # noqa: E402
-    ArchConfig as QArchConfig,
-    QualityResult,
-    TrainingConfig,
-    estimate_quality,
-    quality,
-)
+try:
+    from .quality_model import (
+        ArchConfig as QArchConfig, QualityResult, TrainingConfig,
+        estimate_quality, quality,
+    )
+except ImportError:
+    from quality_model import (
+        ArchConfig as QArchConfig, QualityResult, TrainingConfig,
+        estimate_quality, quality,
+    )
 
 
 # =============================================================================
@@ -94,8 +112,19 @@ class QualityStressVector:
             v = self.axis_value(axis)
             conf = self.confidence.get(axis, "?")
             abs_v = self.absolute.get(axis, 0.0)
+            # Wave 7a.1: surface the sign on state_residual so a negative
+            # value reads as "state benefit at long ctx" rather than as a
+            # bare minus sign (which post-Wave-5 looks like a regression
+            # to a reader that hasn't read the docstring). Other axes are
+            # non-negative penalties by construction; they get no tag.
+            tag = ""
+            if axis == "state_residual":
+                if v < -1e-6:
+                    tag = "  (state benefit at long ctx)"
+                elif v > 1e-6:
+                    tag = "  (state cost)"
             rows.append(
-                f"  {axis:22s} {v: 8.5f}  (Δabs={abs_v: 7.4f})  conf={conf}"
+                f"  {axis:22s} {v: 8.5f}  (Δabs={abs_v: 7.4f})  conf={conf}{tag}"
             )
         return (
             f"QualityStressVector  arch={self.arch_name}\n"
@@ -170,7 +199,7 @@ def compute_quality_stress(
     the named TermResult sub-buckets out of the result. Each axis is exactly
     a slice of an existing term — no new quality math is introduced here.
     """
-    training = training or TrainingConfig(training_tokens=2_000_000_000_000)
+    training = training or TrainingConfig(training_tokens=20_000_000_000_000)
     if _quality_result is None:
         qr = estimate_quality(arch, training, workload_spec=workload_spec)
     else:

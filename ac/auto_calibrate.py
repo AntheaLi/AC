@@ -172,11 +172,116 @@ _ALIASES = {
         "metadata.training_tokens",
         "metadata.input_constraints.training_tokens",
     ),
+    "predicted_effective_capacity_delta": (
+        "predicted_effective_capacity_delta",
+        "effective_capacity_delta",
+        "predicted.effective_capacity_delta",
+        "metadata.predicted.effective_capacity_delta",
+    ),
+    "predicted_effective_data_delta": (
+        "predicted_effective_data_delta",
+        "effective_data_delta",
+        "predicted.effective_data_delta",
+        "metadata.predicted.effective_data_delta",
+    ),
     "context_length": (
         "context_length",
         "sequence_length",
         "seq_len",
         "metadata.input_constraints.context_length",
+    ),
+    # Wave 7b.1: aliases for the new Wave 1-5 calibration measurements.
+    # Each pair (predicted_*, observed_*) feeds one of the four new fit
+    # functions added below. The aliases follow the existing convention:
+    # the canonical key matches throughput_model's output field exactly,
+    # with shorthand aliases for the most common production-row spellings.
+    "predicted_dp_grad_allreduce_ms": (
+        "predicted_dp_grad_allreduce_ms",
+        "predicted.dp_grad_allreduce_ms",
+        "metadata.predicted.dp_grad_allreduce_ms",
+        # The throughput model surfaces seconds via dp_grad_allreduce_s; the
+        # alias is offered in ms for convenience in user measurement rows.
+        "predicted_dp_grad_allreduce_s",
+    ),
+    "observed_dp_grad_allreduce_ms": (
+        "observed_dp_grad_allreduce_ms",
+        "actual_dp_grad_allreduce_ms",
+        "measured_dp_grad_allreduce_ms",
+        "observed.dp_grad_allreduce_ms",
+    ),
+    "predicted_tp_allreduce_ms_per_layer": (
+        "predicted_tp_allreduce_ms_per_layer",
+        "predicted.tp_allreduce_ms_per_layer",
+        "metadata.predicted.tp_allreduce_ms_per_layer",
+    ),
+    "observed_tp_allreduce_ms_per_layer": (
+        "observed_tp_allreduce_ms_per_layer",
+        "actual_tp_allreduce_ms_per_layer",
+        "measured_tp_allreduce_ms_per_layer",
+        "observed.tp_allreduce_ms_per_layer",
+    ),
+    # PP queue: per-(schedule, degree) activation-memory peak. The key
+    # encodes both schedule and degree in the field name so a single row
+    # can carry multiple PP measurements without nested maps.
+    "predicted_activation_peak_mem_gb": (
+        "predicted_activation_peak_mem_gb",
+        "predicted.activation_peak_mem_gb",
+        "metadata.predicted.activation_peak_mem_gb",
+    ),
+    "observed_activation_peak_mem_gb": (
+        "observed_activation_peak_mem_gb",
+        "actual_activation_peak_mem_gb",
+        "measured_activation_peak_mem_gb",
+        "observed.activation_peak_mem_gb",
+    ),
+    # State long-ctx anchor: observed long-context loss for hybrid families
+    # at known anchor contexts. Used by _fit_state_long_ctx to back out the
+    # asymptotic state benefit weight at long ctx.
+    "observed_long_ctx_loss": (
+        "observed_long_ctx_loss",
+        "actual_long_ctx_loss",
+        "measured_long_ctx_loss",
+        "observed.long_ctx_loss",
+    ),
+    "predicted_long_ctx_loss": (
+        "predicted_long_ctx_loss",
+        "predicted.long_ctx_loss",
+        "metadata.predicted.long_ctx_loss",
+    ),
+    # PP schedule + degree fields for the per-(schedule, degree) bucket key.
+    "pp_schedule": (
+        "pp_schedule",
+        "pipeline_schedule",
+        "metadata.input_constraints.pp_schedule",
+    ),
+    "pp_degree": (
+        "pp_degree",
+        "pipeline_parallel",
+        "pp",
+        "metadata.input_constraints.pp",
+        "parallelism.pipeline_parallel",
+    ),
+    "arch_mode": (
+        "arch_mode",
+        "model_type",
+        "architecture_family",
+        "metadata.architecture_family",
+    ),
+    # HBM-spill: observed TBT-with-spill vs predicted, for the spill factor.
+    "predicted_tbt_ms_with_spill": (
+        "predicted_tbt_ms_with_spill",
+        "predicted.tbt_ms_with_spill",
+        "metadata.predicted.tbt_ms_with_spill",
+    ),
+    "observed_tbt_ms_with_spill": (
+        "observed_tbt_ms_with_spill",
+        "actual_tbt_ms_with_spill",
+        "measured_tbt_ms_with_spill",
+        "observed.tbt_ms_with_spill",
+    ),
+    "hbm_spill_gb": (
+        "hbm_spill_gb",
+        "metadata.predicted.hbm_spill_gb",
     ),
 }
 
@@ -375,6 +480,31 @@ def _family(row: Dict[str, Any]) -> str:
         text = _FAMILY_ALIASES.get(text, text)
         if text in _CANONICAL_FAMILIES:
             return text
+
+    # Wave 18a: when the lab measurement row carries the fields to build a
+    # canonical ArchitectureSignature (d_model, n_layers, n_heads, ...),
+    # route through it and project the 6-axis signature into the 6-bucket
+    # calibration taxonomy the same way ``throughput_model._arch_family``
+    # does. Ingestion, in-code default lookup, and emission agree by
+    # construction. Partial rows fall through to the pre-Wave-18a heuristic
+    # so lab CSVs with only aggregate metrics still classify.
+    try:
+        from ac.architecture import architecture_signature
+        sig = architecture_signature(row)
+    except (ValueError, ImportError):
+        sig = None
+    if sig is not None:
+        if sig.has_state_mixer:
+            return "hybrid_state"
+        if sig.is_moe and sig.uses_mla:
+            return "moe_mla"
+        if sig.is_moe:
+            return "moe"
+        if sig.uses_mla:
+            return "mla_dense"
+        if sig.kv_projection in ("gqa", "mqa"):
+            return "dense_gqa"
+        return "dense"
 
     model_type = (_value(row, "model_type") or "").strip().lower()
     attn_type = (_value(row, "attention_type") or "").strip().lower()
@@ -602,7 +732,27 @@ def _fit_quality(
         abs(err) / max(unc, 1e-9)
         for err, unc in zip(errors_pct, uncertainties_pct)
     ]
-    multiplier = max(1.0, _quantile(ratios, target_coverage))
+    # Coverage is a discrete count (fraction of rows with |err| <= scaled_unc),
+    # but a linear-interpolated quantile can land *between* two ratio values,
+    # producing a multiplier that admits the same number of rows as before
+    # (coverage_after == coverage_before). To guarantee the pack actually
+    # reaches target coverage, use the smallest multiplier that admits at
+    # least ceil(target * n) rows: the sorted-ratio at index
+    # ceil(target * n) - 1.
+    #
+    # Floating-point subtlety: for the row whose ratio *equals* the chosen
+    # multiplier, `unc * (abs(err)/unc)` can round to a value strictly less
+    # than `abs(err)`, so the equality `abs(err) <= unc*multiplier` fails and
+    # coverage_after ends up one row short. `math.nextafter(m, inf)` bumps the
+    # multiplier to the next representable float so the reference row is
+    # always admitted with no visible impact (< 1 ulp) on scaled uncertainties.
+    n_rows = len(ratios)
+    sorted_ratios = sorted(ratios)
+    needed = min(n_rows, max(1, math.ceil(target_coverage * n_rows)))
+    ceil_multiplier = sorted_ratios[needed - 1]
+    if ceil_multiplier > 0:
+        ceil_multiplier = math.nextafter(ceil_multiplier, math.inf)
+    multiplier = max(1.0, ceil_multiplier)
     scaled_unc = [u * multiplier for u in uncertainties_pct]
     abs_errors = [abs(e) for e in errors_pct]
     return {
@@ -617,6 +767,76 @@ def _fit_quality(
         "abs_error_target_quantile_pct": round(_quantile(abs_errors, target_coverage), 6),
         "median_predicted_uncertainty_pct": round(_median(uncertainties_pct), 6),
         "examples": examples,
+    }
+
+
+def _fit_effective_quality_components(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    ridge: float = 1e-8,
+) -> Dict[str, Any]:
+    """Fit local multipliers for effective-capacity and effective-data deltas.
+
+    The analytical model emits both deltas separately. For each measured row:
+
+        observed - predicted
+          ~= (m_capacity - 1) * capacity_delta
+           + (m_data - 1) * data_delta
+
+    This is intentionally a small linear overlay fit, not a refit of the
+    Chinchilla exponents. When the measurement set does not excite an axis,
+    that multiplier remains 1.0.
+    """
+    examples: List[Tuple[float, float, float]] = []
+    for row in rows:
+        pred = _numeric(row, "predicted_loss")
+        obs = _numeric(row, "observed_loss")
+        if pred is None or obs is None:
+            continue
+        cap = _numeric(row, "predicted_effective_capacity_delta") or 0.0
+        data = _numeric(row, "predicted_effective_data_delta") or 0.0
+        if abs(cap) < 1e-12 and abs(data) < 1e-12:
+            continue
+        examples.append((cap, data, obs - pred))
+
+    if not examples:
+        return {
+            "n": 0,
+            "capacity_multiplier": 1.0,
+            "data_multiplier": 1.0,
+            "status": "insufficient_data",
+        }
+
+    s_cc = sum(c * c for c, _, _ in examples)
+    s_dd = sum(d * d for _, d, _ in examples)
+    s_cd = sum(c * d for c, d, _ in examples)
+    s_cy = sum(c * y for c, _, y in examples)
+    s_dy = sum(d * y for _, d, y in examples)
+    a = s_cc + ridge
+    b = s_cd
+    d = s_dd + ridge
+    det = a * d - b * b
+    if abs(det) < 1e-20:
+        cap_adjust = s_cy / a if s_cc > 1e-12 else 0.0
+        data_adjust = s_dy / d if s_dd > 1e-12 else 0.0
+    else:
+        cap_adjust = (s_cy * d - b * s_dy) / det
+        data_adjust = (a * s_dy - b * s_cy) / det
+
+    capacity_multiplier = max(0.0, min(4.0, 1.0 + cap_adjust))
+    data_multiplier = max(0.0, min(4.0, 1.0 + data_adjust))
+    residuals = [
+        y - cap_adjust * c - data_adjust * dat
+        for c, dat, y in examples
+    ]
+    return {
+        "n": len(examples),
+        "capacity_multiplier": round(capacity_multiplier, 6),
+        "data_multiplier": round(data_multiplier, 6),
+        "residual_rmse": round(
+            math.sqrt(sum(r * r for r in residuals) / len(residuals)), 8
+        ),
+        "status": "experimental" if len(examples) < 12 else "fit",
     }
 
 
@@ -717,6 +937,296 @@ def _fit_hardware(
         # uniform calibration on the well-trodden path.
         fit["family_multipliers"] = _efficiency_table_for_hw(rows, hw)
         fits[hw] = fit
+    return fits
+
+
+# =============================================================================
+# Wave 7b.2 — fitters for the new Wave 1-5 throughput / quality constants.
+#
+# Each fitter takes the same rows the existing _fit_hardware reads and a
+# default hardware id; it returns a per-hardware (or per-(hw, schedule))
+# dictionary of calibrated multipliers. The constants below default to the
+# values that the throughput/quality models currently bake in as Python
+# defaults, so when no measurement covers a (hw, axis) pair the calibration
+# pack tells downstream code "fall back to your default" rather than
+# silently writing a 0 or 1.
+# =============================================================================
+
+# Defaults — must match the Python defaults inside throughput_model.py and
+# quality_defaults.yaml. Surfaced here so the fit functions can compute the
+# delta correctly: observed/predicted_default = (1 - measured) / (1 - default).
+_WAVE5_DEFAULTS = {
+    "dp_grad_overlap_fraction": 0.7,        # throughput_model._dp_grad_allreduce_cost
+    "tp_allreduce_overlap_fraction": 0.5,   # throughput_model._allreduce_cost
+    "state_long_context_weight": 0.030,     # quality_defaults.yaml state_residual block
+    "hbm_spill_decode_factor": 1.0,         # 1.0 = analytical model is correct
+}
+
+
+def _solve_overlap_from_ratio(ratio: float, default_overlap: float) -> Optional[float]:
+    """Invert observed/predicted = (1 - measured) / (1 - default).
+
+    Returns the measured overlap fraction, clipped to [0, 1]. Returns None
+    if the ratio is non-positive or otherwise unusable (e.g. NaN)."""
+    if ratio is None or ratio <= 0:
+        return None
+    measured = 1.0 - ratio * (1.0 - float(default_overlap))
+    return max(0.0, min(1.0, measured))
+
+
+def _fit_dp_overlap(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    default_hardware: Optional[str],
+) -> Dict[str, Any]:
+    """Solve for dp_grad_overlap_fraction per hardware.
+
+    The throughput model uses observed = (1 - overlap) × raw_allreduce. The
+    predicted column in measurement rows uses the model's default overlap
+    (`_WAVE5_DEFAULTS["dp_grad_overlap_fraction"]`). The ratio
+        observed/predicted = (1 - measured_overlap) / (1 - default_overlap)
+    so measured_overlap = 1 - ratio × (1 - default_overlap). We compute the
+    median ratio per hardware and invert it; per-hw output is the calibrated
+    overlap fraction the throughput model should use at that hardware.
+
+    Returned shape mirrors _fit_hardware: per-hw dict with `n`, the fitted
+    `overlap_fraction`, and the underlying scatter for diagnostics. Hardware
+    targets with insufficient rows (n < 2) emit `overlap_fraction=None` so
+    downstream code falls back to the default.
+    """
+    hardware_ids = sorted({
+        hw for hw in (
+            _canonical_hw(_value(row, "hardware"), default_hardware)
+            for row in rows
+        )
+        if hw
+    })
+    default_overlap = _WAVE5_DEFAULTS["dp_grad_overlap_fraction"]
+    fits: Dict[str, Any] = {}
+    for hw in hardware_ids:
+        ratios = _ratio_pairs(
+            rows, "predicted_dp_grad_allreduce_ms",
+            "observed_dp_grad_allreduce_ms",
+            hardware=hw,
+        )
+        if not ratios:
+            fits[hw] = {
+                "n": 0,
+                "overlap_fraction": None,
+                "ratio_median": None,
+                "scatter_p90_pct": None,
+                "default_overlap_fraction": default_overlap,
+            }
+            continue
+        med_ratio = _median(ratios)
+        overlap = _solve_overlap_from_ratio(med_ratio, default_overlap)
+        fits[hw] = {
+            "n": len(ratios),
+            "overlap_fraction": (round(overlap, 6) if overlap is not None else None),
+            "ratio_median": round(med_ratio, 6),
+            "scatter_p90_pct": _ratio_scatter_p90_pct(ratios),
+            "default_overlap_fraction": default_overlap,
+        }
+    return fits
+
+
+def _fit_tp_overlap(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    default_hardware: Optional[str],
+) -> Dict[str, Any]:
+    """Same shape as _fit_dp_overlap, but for the TP all-reduce overlap.
+
+    The default overlap is 0.5 (TP compute/comm overlap is harder than DP
+    because the all-reduce sits in the matmul critical path)."""
+    hardware_ids = sorted({
+        hw for hw in (
+            _canonical_hw(_value(row, "hardware"), default_hardware)
+            for row in rows
+        )
+        if hw
+    })
+    default_overlap = _WAVE5_DEFAULTS["tp_allreduce_overlap_fraction"]
+    fits: Dict[str, Any] = {}
+    for hw in hardware_ids:
+        ratios = _ratio_pairs(
+            rows, "predicted_tp_allreduce_ms_per_layer",
+            "observed_tp_allreduce_ms_per_layer",
+            hardware=hw,
+        )
+        if not ratios:
+            fits[hw] = {
+                "n": 0,
+                "overlap_fraction": None,
+                "ratio_median": None,
+                "scatter_p90_pct": None,
+                "default_overlap_fraction": default_overlap,
+            }
+            continue
+        med_ratio = _median(ratios)
+        overlap = _solve_overlap_from_ratio(med_ratio, default_overlap)
+        fits[hw] = {
+            "n": len(ratios),
+            "overlap_fraction": (round(overlap, 6) if overlap is not None else None),
+            "ratio_median": round(med_ratio, 6),
+            "scatter_p90_pct": _ratio_scatter_p90_pct(ratios),
+            "default_overlap_fraction": default_overlap,
+        }
+    return fits
+
+
+def _fit_pp_queue(rows: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Per-(hardware, schedule) empirical multiplier on the analytical
+    pp_queue_factor.
+
+    Returns:
+        {hardware: {schedule: {"multiplier": float, "n": int, ...}, ...}, ...}
+
+    The analytical factor is `pp` for GPipe and `(pp+1)/2` for 1F1B; the
+    fitted multiplier scales those values to match the measured activation
+    peak. A multiplier > 1.0 means the model under-predicts memory; < 1.0
+    means it over-predicts."""
+    out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    # Bucket rows by (hardware, schedule). pp_schedule defaults to "1f1b"
+    # when not present because that's the throughput model's assumption.
+    buckets: Dict[Tuple[str, str], List[float]] = {}
+    counts: Dict[Tuple[str, str], int] = {}
+    for row in rows:
+        hw = _canonical_hw(_value(row, "hardware"), None)
+        if not hw:
+            continue
+        sched = (_value(row, "pp_schedule") or "1f1b")
+        sched = str(sched).strip().lower().replace("-", "_")
+        pp = _to_float(_value(row, "pp_degree")) or 1.0
+        if pp < 2:
+            # PP=1 has no schedule-induced multiplier; skip.
+            continue
+        pred = _to_float(_value(row, "predicted_activation_peak_mem_gb"))
+        obs = _to_float(_value(row, "observed_activation_peak_mem_gb"))
+        if pred is None or obs is None or pred <= 0 or obs <= 0:
+            continue
+        buckets.setdefault((hw, sched), []).append(obs / pred)
+        counts[(hw, sched)] = counts.get((hw, sched), 0) + 1
+    for (hw, sched), ratios in buckets.items():
+        out.setdefault(hw, {})[sched] = {
+            "n": counts[(hw, sched)],
+            "multiplier": round(_median(ratios), 6),
+            "scatter_p90_pct": _ratio_scatter_p90_pct(ratios),
+        }
+    return out
+
+
+def _fit_state_long_ctx(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fit the asymptotic state_long_context_weight from long-ctx anchors.
+
+    Wave 5 introduced a band-pass benefit that goes to zero at short ctx
+    and asymptotes to `state_long_context_weight` (default 0.030) at long
+    ctx. We back the weight out from the observed/predicted loss gap at
+    sufficiently long contexts on hybrid models — specifically, where the
+    arch_mode/family carries "hybrid" or "state".
+
+    The fit assumes the predicted loss already includes the default weight;
+    the measured weight is then
+        w_fitted = w_default × (predicted_loss / observed_loss)
+    clipped to a sensible [0, 0.10] band. Per-context scatter is summarized
+    via p90 of the per-row delta. Anchor contexts ≥ 32k are considered the
+    "long-ctx" tail; rows below that are excluded.
+
+    Returns {"n": int, "weight": float|None, "p90_pct": float|None,
+             "default_weight": float}.
+    """
+    default_weight = _WAVE5_DEFAULTS["state_long_context_weight"]
+    long_ctx_floor = 32_768  # 32k — the Wave 5 anchor floor (Jamba @ 32k+)
+    deltas: List[float] = []
+    for row in rows:
+        # Only fit on hybrid/state families.
+        fam = (_value(row, "arch_mode") or _value(row, "model_type")
+               or _value(row, "architecture_family") or "")
+        fam = str(fam).strip().lower()
+        if "hybrid" not in fam and "state" not in fam:
+            continue
+        ctx = _to_float(_value(row, "context_length"))
+        if ctx is None or ctx < long_ctx_floor:
+            continue
+        pred = _to_float(_value(row, "predicted_long_ctx_loss"))
+        obs = _to_float(_value(row, "observed_long_ctx_loss"))
+        if pred is None or obs is None or pred <= 0 or obs <= 0:
+            continue
+        deltas.append(pred / obs)
+    if not deltas:
+        return {
+            "n": 0,
+            "weight": None,
+            "scatter_p90_pct": None,
+            "default_weight": default_weight,
+        }
+    med = _median(deltas)
+    # weight ∝ predicted_loss / observed_loss when the candidate's predicted
+    # loss is BIGGER than the observed (i.e., model under-predicts the
+    # benefit). Clip to a sensible band so a single outlier doesn't shove
+    # weight beyond what the Wave 5 design allows.
+    weight = max(0.0, min(0.10, default_weight * med))
+    return {
+        "n": len(deltas),
+        "weight": round(weight, 6),
+        "scatter_p90_pct": _ratio_scatter_p90_pct(deltas),
+        "default_weight": default_weight,
+    }
+
+
+def _fit_hbm_spill(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    default_hardware: Optional[str],
+) -> Dict[str, Any]:
+    """Per-hardware fitting of the HBM-spill decode TBT multiplier.
+
+    Wave 2a Step 2a.2 introduced a continuous TBT penalty when a candidate's
+    KV+activation footprint spills past HBM. The analytical model assumes
+    factor=1.0 (the spill formula's coefficient is calibrated against TBT
+    measurements without further adjustment). When a lab can measure the
+    realized TBT-with-spill, the ratio observed/predicted gives a direct
+    per-hardware scaling.
+
+    Returns the same shape as _fit_dp_overlap, with `factor` (the
+    multiplier on the analytical spill TBT) and the scatter."""
+    hardware_ids = sorted({
+        hw for hw in (
+            _canonical_hw(_value(row, "hardware"), default_hardware)
+            for row in rows
+        )
+        if hw
+    })
+    default_factor = _WAVE5_DEFAULTS["hbm_spill_decode_factor"]
+    fits: Dict[str, Any] = {}
+    for hw in hardware_ids:
+        ratios: List[float] = []
+        for row in rows:
+            if _canonical_hw(_value(row, "hardware"), default_hardware) != hw:
+                continue
+            # Spill rows only — skip rows where the candidate fits in HBM.
+            spill_gb = _to_float(_value(row, "hbm_spill_gb")) or 0.0
+            if spill_gb <= 0:
+                continue
+            pred = _to_float(_value(row, "predicted_tbt_ms_with_spill"))
+            obs = _to_float(_value(row, "observed_tbt_ms_with_spill"))
+            if pred is None or obs is None or pred <= 0 or obs <= 0:
+                continue
+            ratios.append(obs / pred)
+        if not ratios:
+            fits[hw] = {
+                "n": 0,
+                "factor": None,
+                "scatter_p90_pct": None,
+                "default_factor": default_factor,
+            }
+            continue
+        fits[hw] = {
+            "n": len(ratios),
+            "factor": round(_median(ratios), 6),
+            "scatter_p90_pct": _ratio_scatter_p90_pct(ratios),
+            "default_factor": default_factor,
+        }
     return fits
 
 
@@ -1130,12 +1640,14 @@ def _quality_overlay(
     domains: Dict[str, Any],
     eval_models: Dict[str, Any],
     provenance: Dict[str, Any],
+    state_long_ctx: Optional[Dict[str, Any]] = None,
+    effective_components: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     source = (
         "ac-auto-calibrate "
         + datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
-    return {
+    overlay = {
         "uncertainty": {
             "calibration_multiplier": fit["calibration_multiplier"],
             "calibration_source": source,
@@ -1155,6 +1667,45 @@ def _quality_overlay(
         },
         "eval_models": eval_models,
     }
+    # Wave 7b.4: when the Wave 5 long-ctx state weight fit returned a value,
+    # merge it under state_residual in the overlay so `AC_QUALITY_DEFAULTS`
+    # users pick it up via the deep-merge in load_quality_constants. We only
+    # write the override when the fit actually ran on data (n > 0); a None
+    # weight means "no measurements covered the long-ctx anchor" and the
+    # quality model should keep its in-code default.
+    if state_long_ctx and state_long_ctx.get("weight") is not None \
+            and state_long_ctx.get("n", 0) > 0:
+        overlay["state_residual"] = {
+            "state_long_context_weight": state_long_ctx["weight"],
+            "_calibration_provenance": {
+                "n": state_long_ctx["n"],
+                "scatter_p90_pct": state_long_ctx.get("scatter_p90_pct"),
+                "default_weight": state_long_ctx.get("default_weight"),
+                "source": source,
+            },
+        }
+    if effective_components and effective_components.get("n", 0) > 0:
+        overlay["effective_capacity"] = {
+            "capacity_multiplier": effective_components[
+                "capacity_multiplier"
+            ],
+            "_calibration_provenance": {
+                "n": effective_components["n"],
+                "status": effective_components.get("status"),
+                "residual_rmse": effective_components.get("residual_rmse"),
+                "source": source,
+            },
+        }
+        overlay["effective_data"] = {
+            "data_multiplier": effective_components["data_multiplier"],
+            "_calibration_provenance": {
+                "n": effective_components["n"],
+                "status": effective_components.get("status"),
+                "residual_rmse": effective_components.get("residual_rmse"),
+                "source": source,
+            },
+        }
+    return overlay
 
 
 def _render_report(pack: Dict[str, Any]) -> str:
@@ -1174,6 +1725,20 @@ def _render_report(pack: Dict[str, Any]) -> str:
         f"- Calibration multiplier: {q['calibration_multiplier']:.3f}",
         f"- Median relative loss bias: {q['median_bias_pct']:+.3f}%",
         f"- P90 absolute relative loss error: {q.get('abs_error_p90_pct', 0.0):.3f}%",
+        "",
+        "## Effective Quality Components",
+        "",
+        (
+            f"- Rows used: {pack.get('effective_quality_components', {}).get('n', 0)}"
+        ),
+        (
+            "- Capacity multiplier: "
+            f"{pack.get('effective_quality_components', {}).get('capacity_multiplier', 1.0):.3f}"
+        ),
+        (
+            "- Data multiplier: "
+            f"{pack.get('effective_quality_components', {}).get('data_multiplier', 1.0):.3f}"
+        ),
         "",
         "Use `quality_overrides.json` via:",
         "",
@@ -1252,8 +1817,14 @@ def _render_report(pack: Dict[str, Any]) -> str:
     warnings = pack.get("spec_output", {}).get("warnings", [])
     warnings = list(warnings) + list(pack.get("warnings", []))
     warnings.extend(eval_models.get("warnings", []))
-    for fit in eval_models.get("evals", {}).values():
-        warnings.extend(fit.get("warnings", []))
+    # Wave 26 fix #1: prefix per-eval fit warnings with the eval name so
+    # they can't be misread as pack-global. The unlabeled string "Only 7
+    # rows; recommended minimum is 12." landed next to a header saying
+    # "Quality rows: 13" and made readers hunt for a phantom row count —
+    # the "7" was the humaneval fit's own sample count.
+    for name, fit in eval_models.get("evals", {}).items():
+        for w in fit.get("warnings", []):
+            warnings.append(f"eval `{name}`: {w}")
     if warnings:
         lines.extend(["", "## Warnings", ""])
         for w in dict.fromkeys(warnings):
@@ -1262,7 +1833,7 @@ def _render_report(pack: Dict[str, Any]) -> str:
         "",
         "## Notes",
         "",
-        "- Quality calibration scales uncertainty intervals; it does not bias-correct the predicted loss point estimate.",
+        "- Quality calibration scales uncertainty intervals and may fit effective-capacity/data component multipliers when those deltas are present; it does not refit Chinchilla exponents.",
         "- Hardware calibration adjusts system-efficiency constants from median observed/predicted ratios.",
         "- Eval models are ridge fits with held-out-family checks when multiple architecture families are present.",
         "- Keep separate packs per cluster topology, kernel stack, scheduler policy, and model family when those differ materially.",
@@ -1277,6 +1848,25 @@ def _fmt_optional(value: Any) -> str:
 
 
 def fit_command(args: argparse.Namespace) -> int:
+    # Wave 19 — hierarchical backend stub. The full posterior-fitting
+    # implementation (PyMC/ArviZ, matched-ablation partial pooling,
+    # domain classification, ≥512 posterior draws per candidate) is a
+    # separate large project; exposing the CLI surface here without
+    # shipping half a fitter avoids silent misuse. The ridge backend
+    # remains the current default and produces the calibration pack.
+    backend = getattr(args, "backend", "ridge")
+    if backend == "hierarchical":
+        print(
+            "ERROR: --backend hierarchical is not yet implemented.\n"
+            "Wave 19's hierarchical backend requires the optional extra:\n"
+            "    pip install 'ac-architecture-compiler[calibration]'\n"
+            "and a Bayesian fitter that has not shipped yet. Use --backend "
+            "ridge (default) for the current fitter, which produces packs "
+            "marked 'production_ready' when the fit-warning gates and the "
+            "public-anchor gate both pass.",
+            file=sys.stderr,
+        )
+        return 2
     measurements_path = Path(args.measurements)
     # Round-2 fix: wrap measurement loading so users get a one-line error
     # instead of a raw Python stack trace when the file is malformed or
@@ -1318,7 +1908,18 @@ def fit_command(args: argparse.Namespace) -> int:
         default_uncertainty_pct=float(args.default_quality_uncertainty_pct),
         min_uncertainty_pct=float(args.min_quality_uncertainty_pct),
     )
+    effective_components = _fit_effective_quality_components(rows)
     hardware = _fit_hardware(rows, default_hardware=args.hardware)
+    # Wave 7b.3: fit the new Wave 1-5 constants. Each fitter is independent
+    # of the existing _fit_hardware path and writes to a new top-level key
+    # in the calibration pack so old consumers don't break. When no
+    # measurement covers a (hw, axis) pair the fitter writes None and the
+    # downstream model code falls back to its existing Python default.
+    dp_overlap = _fit_dp_overlap(rows, default_hardware=args.hardware)
+    tp_overlap = _fit_tp_overlap(rows, default_hardware=args.hardware)
+    pp_queue = _fit_pp_queue(rows)
+    state_long_ctx = _fit_state_long_ctx(rows)
+    hbm_spill = _fit_hbm_spill(rows, default_hardware=args.hardware)
     eval_models = _fit_eval_models(
         rows,
         ridge_alpha=float(args.eval_ridge_alpha),
@@ -1348,6 +1949,45 @@ def fit_command(args: argparse.Namespace) -> int:
         min_hardware_rows=int(args.min_hardware_rows),
         max_hardware_scatter_p90_pct=float(args.max_hardware_scatter_p90_pct),
     )
+    # Wave 18e/19 — public-anchor release gate. A calibration pack cannot
+    # ship as `production_ready=true` while any documented public-model
+    # predictive anchor fails the tightened tolerances (loss 5%, tbt 15%,
+    # ttft 20%, mem 10%). The registry lives in tests/fixtures/, is fixed,
+    # is NEVER an input to fitting — pure held-out validation. The Wave
+    # 19 plan (`19-hierarchical-auto-calibration.md`) makes this a
+    # mandatory release gate.
+    public_anchor_report: Optional[Dict[str, Any]] = None
+    public_anchor_gate = getattr(args, "public_anchor_gate", "on")
+    if public_anchor_gate == "on":
+        try:
+            from ac.trust_audit import run_public_anchor_suite
+            public_anchor_report = run_public_anchor_suite(tightened=True)
+            if public_anchor_report.get("block_publication"):
+                n_fail = public_anchor_report.get("counts", {}).get("fail", 0)
+                fit_warnings.append(
+                    f"Wave 18e public-anchor gate: {n_fail} public-model "
+                    f"anchor(s) failed the post-calibration tightened "
+                    f"tolerances (loss 5%, tbt 15%, ttft 20%, mem 10%); "
+                    f"pack demoted from 'production_ready' to 'experimental'. "
+                    f"See public_anchor_report.md in the output directory "
+                    f"for per-model breakdowns."
+                )
+                fit_status = "experimental"
+        except FileNotFoundError as exc:
+            fit_warnings.append(
+                f"Wave 18e public-anchor gate skipped: registry not found "
+                f"({exc}). Pack readiness reflects fit-only warnings; "
+                f"install the anchor registry to enable the full release "
+                f"gate."
+            )
+        except Exception as exc:
+            # A crash in the audit shouldn't silently pass the gate; treat
+            # as an experimental result and surface the reason.
+            fit_warnings.append(
+                f"Wave 18e public-anchor gate errored ({type(exc).__name__}: "
+                f"{exc}); pack demoted to 'experimental' as a fail-safe."
+            )
+            fit_status = "experimental"
     base_spec_dir = Path(args.base_hardware_spec_dir or os.environ.get(
         "AC_HARDWARE_SPEC_DIR", _DEFAULT_SPEC_DIR))
     spec_output = _copy_and_calibrate_specs(
@@ -1365,6 +2005,10 @@ def fit_command(args: argparse.Namespace) -> int:
         domains=domains,
         eval_models=eval_models,
         provenance=provenance,
+        # Wave 7b.4: pipe the long-ctx state weight fit into the quality
+        # overlay so `AC_QUALITY_DEFAULTS` users pick it up automatically.
+        state_long_ctx=state_long_ctx,
+        effective_components=effective_components,
     )
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     pack = {
@@ -1377,11 +2021,27 @@ def fit_command(args: argparse.Namespace) -> int:
         "rows_loaded": len(rows),
         "target_coverage": target_coverage,
         "quality": quality,
+        "effective_quality_components": effective_components,
         "quality_overlay": overlay,
         "hardware": hardware,
+        # Wave 7b.3: new Wave 1-5 calibration outputs. Each is keyed by
+        # hardware (except pp_queue, which is keyed by (hw, schedule)).
+        # The throughput model + quality model read these tables in
+        # Wave 7b.4 below to override their Python defaults when present.
+        "dp_grad_overlap": dp_overlap,
+        "tp_overlap": tp_overlap,
+        "pp_queue": pp_queue,
+        "state_long_context_weight": state_long_ctx,
+        "hbm_spill": hbm_spill,
         "eval_models": eval_models,
         "calibration_domains": domains,
         "spec_output": spec_output,
+        # Wave 18e/19 — record the public-anchor gate outcome in the pack so
+        # downstream consumers can decide whether to trust the pack for
+        # sign-off. `None` means the gate was disabled (--public-anchor-gate
+        # off) or the registry was missing.
+        "public_anchor_gate": public_anchor_report,
+        "backend": backend,
         "usage": {
             "quality_env": f"AC_QUALITY_DEFAULTS={out_dir / 'quality_overrides.json'}",
             "hardware_env": f"AC_HARDWARE_SPEC_DIR={out_dir / 'hardware_specs'}",
@@ -1393,6 +2053,15 @@ def fit_command(args: argparse.Namespace) -> int:
     (out_dir / "calibration_pack.json").write_text(
         json.dumps(pack, indent=2) + "\n")
     (out_dir / "report.md").write_text(_render_report(pack))
+    # Wave 18e/19 — write the public-anchor markdown breakdown alongside
+    # the pack so a reviewer can act on the failing entries.
+    if public_anchor_report is not None:
+        try:
+            from ac.trust_audit import render_public_anchor_markdown
+            (out_dir / "public_anchor_report.md").write_text(
+                render_public_anchor_markdown(public_anchor_report))
+        except Exception:
+            pass
 
     print(f"Wrote calibration pack to: {out_dir}")
     print(f"Quality rows: {quality['n']}  multiplier={quality['calibration_multiplier']:.3f}")
@@ -1418,6 +2087,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
     fit = sub.add_parser("fit", help="Fit quality uncertainty and hardware efficiency factors")
+    # Wave 19 — backend switch. `ridge` is the current (Wave 5-derived)
+    # fitter; `hierarchical` is the planned posterior-fitting backend that
+    # produces production-ready packs with P(best) / expected_regret and
+    # empirical interval coverage. The hierarchical backend is not yet
+    # implemented; selecting it exits with a clear error so the CLI surface
+    # matches Wave 19's design without shipping half a fitter.
+    fit.add_argument("--backend", default="ridge",
+                     choices=["ridge", "hierarchical"],
+                     help="Fitting backend. 'ridge' (default) is the current "
+                          "compat fitter. 'hierarchical' is the Wave 19 "
+                          "posterior backend (requires the optional "
+                          "'ac-architecture-compiler[calibration]' extra) "
+                          "— not yet implemented; will exit with an error.")
+    # Wave 18e/19 — release-gate integration. Setting this to a non-empty
+    # value causes the fitter to run the public-model predictive-accuracy
+    # audit at the post-calibration tightened tolerances and demote
+    # `production_ready` to `experimental` if any documented anchor fails.
+    fit.add_argument("--public-anchor-gate", default="on",
+                     choices=["on", "off"],
+                     help="Wave 18e release gate. When 'on' (default), the "
+                          "fitter runs the public-model predictive audit at "
+                          "tightened tolerances and demotes readiness to "
+                          "'experimental' if any documented anchor fails. "
+                          "Set to 'off' only for internal experimentation.")
     fit.add_argument("--measurements", required=True,
                      help="JSON, JSONL, or CSV measurement rows")
     fit.add_argument("--out", required=True,
@@ -1449,6 +2142,86 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--max-efficiency", type=float, default=0.95,
                      help="Upper clamp for fitted system-efficiency constants")
     fit.set_defaults(func=fit_command)
+
+    # Wave 18h — zero-compute calibration: paired-ablation residual fit.
+    pairs = sub.add_parser(
+        "fit-pairs",
+        help="Fit per-residual-term scales + coverage audit from a corpus "
+             "of PUBLISHED paired ablations (no training runs needed). "
+             "Ships with tests/fixtures/public_ablation_pairs_v1.json; "
+             "lab pairs in the same format sharpen the fit.")
+    pairs.add_argument("--pairs", default=None,
+                       help="Path to the ablation-pair corpus JSON "
+                            "(default: the shipped public corpus).")
+    pairs.add_argument("--out", required=True,
+                       help="Output directory for pair_fit.json and "
+                            "pair_fit_report.md")
+    def _fit_pairs_command(args):
+        try:
+            from ac.ablation_fit import run_fit_pairs
+        except ImportError:
+            from ablation_fit import run_fit_pairs
+        pairs_path = args.pairs
+        if not pairs_path:
+            here = os.path.dirname(os.path.abspath(__file__))
+            pairs_path = os.path.join(
+                here, "..", "tests", "fixtures",
+                "public_ablation_pairs_v1.json")
+        payload = run_fit_pairs(pairs_path, args.out)
+        n = len(payload["results"])
+        ok = sum(1 for r in payload["results"] if r["within_tolerance"])
+        print(f"Pairs evaluated: {n}  within tolerance: {ok}")
+        for tf in payload["term_fits"]:
+            if tf["n_pairs"]:
+                print(f"  {tf['term']}: n={tf['n_pairs']} "
+                      f"scale={tf['scale']} bias={tf['bias_pct']:+.2f}% "
+                      f"rms={tf['rms_pct']:.2f}%")
+        n_uncov = sum(1 for tf in payload["term_fits"] if not tf["n_pairs"])
+        print(f"Uncovered terms: {n_uncov} (see pair_fit_report.md)")
+        print(f"Wrote {os.path.join(args.out, 'pair_fit_report.md')}")
+        return 0
+    pairs.set_defaults(func=_fit_pairs_command)
+
+    # Wave 18h — ladder planning: the experiment plan as a first-class
+    # output. Generates (does not run) the cheapest paired-run ladder that
+    # resolves a named architecture decision, priced by AC's throughput
+    # model, with measurement templates that flow back into `fit`.
+    ladder = sub.add_parser(
+        "plan-ladder",
+        help="Plan (not run) the cheapest paired-run ladder that resolves "
+             "an architecture decision at target scale.")
+    ladder.add_argument("--arm-a", required=True,
+                        help="First arm family: dense | moe | hybrid | "
+                             "moe_hybrid | local_global | mla")
+    ladder.add_argument("--arm-b", required=True, help="Second arm family.")
+    ladder.add_argument("--params", required=True,
+                        help="Target active params (billions).")
+    ladder.add_argument("--tokens", required=True,
+                        help="Target training tokens (trillions).")
+    ladder.add_argument("--context", default=8192, help="Target context.")
+    ladder.add_argument("--hardware", default="h100")
+    ladder.add_argument("--ladder", default=None,
+                        help="Comma-list of ladder sizes in B "
+                             "(default 0.5,1,3).")
+    ladder.add_argument("--seeds", default=2,
+                        help="Paired runs per ladder size (default 2).")
+    ladder.add_argument("--max-gpu-days", default=None,
+                        help="Optional GPU-day budget cap for the plan.")
+    ladder.add_argument("--ladder-tokens-per-param", type=float, default=100.0,
+                        help="Cap on rung over-training ratio (tokens per "
+                             "param). Rungs are priced at min(target ratio, "
+                             "cap); capped rungs carry extra transfer risk. "
+                             "Default 100.")
+    ladder.add_argument("--z", default=2.0,
+                        help="Resolution bar in paired sigmas (default 2).")
+    ladder.add_argument("--out", required=True, help="Output directory.")
+    def _plan_ladder_command(args):
+        try:
+            from ac.ladder_plan import run_plan_ladder
+        except ImportError:
+            from ladder_plan import run_plan_ladder
+        return run_plan_ladder(args)
+    ladder.set_defaults(func=_plan_ladder_command)
     return parser
 
 

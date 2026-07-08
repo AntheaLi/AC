@@ -59,7 +59,14 @@ SHAPE_GAMMA_D = 0.341  # depth exponent
 # Re-calibrated to 0.05, consistent with Tay et al. 2021 ("Scale
 # Efficiently") and Levine et al. 2020 figures of ~5-8% PPL at 0.5×
 # depth — i.e. wide-shallow degeneracy hurts more than the v0 fit said.
-SHAPE_C = 0.05
+# Wave 12 follow-up (Jun 2026): bumped from 0.05 → 0.08 after calibration
+# validation showed reference architectures stay under 1.3% penalty while
+# pathological shapes (e.g. 11776×4) move from 27% → 43%. The bump
+# strengthens shape_penalty's role as the canonical "pathological shapes
+# lose on the Pareto frontier" mechanism; the picker prior in
+# optimizer._aspect_ratio_prior_penalty is now scoped to tiebreaks among
+# Pareto-equivalent survivors only (cap reduced from 25% to 10%).
+SHAPE_C = 0.08
 
 # Lower bounds (sanity floors)
 SHAPE_D_MIN = 256
@@ -195,6 +202,112 @@ def kv_quant_penalty(
         return 0.050  # INT2/INT3: experimental, large cost
     else:
         return 0.0
+
+
+# =============================================================================
+# Wave 10B (Jun 2026): hw-blind quality functions + hw-conditional feasibility
+# =============================================================================
+# Per plan/redesign/10-optimizer-self-consistency.md Change B: quality should
+# not depend on hardware once precision is feasible. Split the historical
+# kv_quant_penalty / weight_precision_penalty into:
+#   - `_precision_supported(prec, hw)` — feasibility check (hw-conditional).
+#   - `kv_quant_quality(...)` — quality penalty, hw-blind.
+#   - `weight_precision_quality(...)` — quality penalty, hw-blind.
+#
+# Bug D fix: same arch + same precision should produce identical predicted_loss
+# across H100 / B200 / TPU, because quality is an arch+data function, not a hw
+# function. The hw-conditional KV / FP8-on-TPU uplifts that used to live in
+# the quality penalty now live in feasibility; if a hw doesn't support a
+# precision, `_precision_supported` returns False and the candidate is culled.
+
+
+def precision_supported(precision: str, hardware: str = "h100") -> bool:
+    """Wave 10B: True iff `precision` is natively supported on `hardware`.
+
+    Pure hw-conditional check; no quality term. Quality residuals call the
+    hw-blind `*_quality` variants below; feasibility code culls candidates
+    where this returns False.
+
+    Wave 21: this is the NATIVE-COMPUTE check (tensor-core / MXU datapath).
+    Weight STORAGE formats have looser requirements — see
+    `weight_storage_supported`.
+    """
+    if precision in ("bf16", "fp16"):
+        return True
+    return hardware in PRECISION_HARDWARE_SUPPORT.get(precision, set())
+
+
+# Wave 21: weight-only quantized STORAGE formats are deployable on any
+# supported hardware — the weights are dequantized to a native compute type
+# at the register/shared-memory boundary (GPT-OSS mxfp4 experts served on
+# H100 via bf16-compute dequant kernels; GPTQ/AWQ int4 on Ampere+; fp8
+# weight-only on pre-Hopper parts). The old single support table conflated
+# storage with compute and marked e.g. mxfp4-weights-on-H100 INFEASIBLE,
+# which sentineled the quality model on real, shipping deployments (the
+# gpt-oss-120b trust anchor). The throughput model already prices
+# non-native formats correctly by construction: `peak_flops_s` falls back
+# to the bf16 compute rate while `bytes_per_elem` charges the reduced
+# storage bytes — exactly weight-only-quant serving physics.
+WEIGHT_STORAGE_UNIVERSAL = {"fp8", "fp4", "mxfp4", "mxfp6", "int8", "int4"}
+
+
+def weight_storage_supported(precision: str, hardware: str = "h100") -> bool:
+    """True iff `precision` is a legal WEIGHT-STORAGE format on `hardware`.
+
+    Weight-only quantization needs no native tensor-core datapath, so all
+    narrow float/int storage formats are feasible everywhere; anything
+    else falls back to the native-compute table.
+    """
+    if precision in ("bf16", "fp16"):
+        return True
+    if precision in WEIGHT_STORAGE_UNIVERSAL:
+        return True
+    return hardware in PRECISION_HARDWARE_SUPPORT.get(precision, set())
+
+
+def kv_quant_quality(kv_bits: int, has_per_channel_scaling: bool = True) -> float:
+    """Wave 10B: hw-blind KV quantization quality penalty.
+
+    Uses the H100/B200 KIVI numbers as canonical (these are the most
+    rigorously measured; the historic TPU 2× uplift was a precaution under
+    "per-channel scaling less mature on TPU", which is a feasibility
+    concern, not a quality concern). Same arch + same precision now gives
+    the same loss across hardware.
+    """
+    if kv_bits >= 8:
+        return 0.0
+    if kv_bits == 4:
+        return 0.010 if has_per_channel_scaling else 0.030
+    if kv_bits <= 3:
+        return 0.050
+    return 0.0
+
+
+def weight_precision_quality(component: str, precision: str) -> float:
+    """Wave 10B: hw-blind weight-precision quality penalty.
+
+    Uses the canonical per-component table; drops the historic 1.5× TPU
+    FP8 uplift (which was a feasibility / "less mature" hedge, not a real
+    PPL delta on the same training run).
+    """
+    if precision in ("bf16", "fp16"):
+        return 0.0
+    key = (component, precision)
+    p = WEIGHT_PRECISION_PENALTIES.get(key)
+    if p is not None:
+        return p
+    if precision == "fp8":
+        return 0.005
+    if precision == "fp4":
+        return 0.015
+    return 0.005
+
+
+def activation_precision_quality(component: str, precision: str) -> float:
+    """Wave 10B: hw-blind activation-precision quality penalty."""
+    if precision in ("bf16", "fp16"):
+        return 0.0
+    return ACTIVATION_PRECISION_PENALTIES.get((component, precision), 0.003)
 
 
 # =============================================================================

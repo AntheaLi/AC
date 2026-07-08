@@ -86,7 +86,12 @@ class AddStateLayers(Transformation):
                              n_state))
         # Interleave state layers throughout the stack rather than block them
         # at the front — matches Jamba / Zamba layout.
-        layer_types = ["attention"] * arch.n_layers
+        # Preserve any pre-existing local:global attention interleave. State
+        # layers replace mixer positions; they must not turn every surviving
+        # local-attention layer back into global attention.
+        layer_types = list(arch.layer_type_list or [])
+        if len(layer_types) != arch.n_layers:
+            layer_types = ["attention"] * arch.n_layers
         # Place state layers at every other position up to n_state.
         if state_frac >= 1.0:
             layer_types = ["state"] * arch.n_layers
@@ -108,6 +113,14 @@ class AddStateLayers(Transformation):
         # echoes "X state layers / Y total → Z% state" — kills the
         # ratio-direction confusion at the source.
         actual_state = sum(1 for lt in layer_types if lt == "state")
+        # Keep the count axis coherent with the combined per-layer layout.
+        # This matters when the input is a GPT-OSS/Gemma-style local:global
+        # stack: some of the selected state positions may replace local
+        # layers, so carrying the old count would describe a different model.
+        if hasattr(out, "n_local_attn_layers"):
+            out.n_local_attn_layers = sum(
+                1 for lt in layer_types if lt == "local_attention"
+            )
         out._state_layer_summary = {  # type: ignore[attr-defined]
             "state_layers": actual_state,
             "attention_layers": arch.n_layers - actual_state,

@@ -220,6 +220,14 @@ class ACAttention(nn.Module):
         dtype = _precision_to_dtype(precision)
         overrides = component_overrides or {}
         self.external_attention = overrides.get(f"attention:{self.type}")
+        native_types = {"full", "mha", "gqa", "mqa", "mla"}
+        if self.type not in native_types and self.external_attention is None:
+            raise NotImplementedError(
+                f"Generated reference model has no native implementation for "
+                f"attention type {self.type!r}. Pass component_overrides="
+                f"{{'attention:{self.type}': callable}}; refusing to silently "
+                "run full attention instead."
+            )
 
         if self.type == "mla":
             c_q = int(cfg.get("q_latent_dim") or cfg.get("kv_latent_dim") or d_model)
@@ -404,6 +412,17 @@ class __CLASS_NAME__(nn.Module):
         self.vocab_size = int(arch["vocab_size"])
         pos = arch.get("positional_encoding") or {}
         self.rope_base = float(pos.get("base", 500000))
+        scaling = pos.get("scaling")
+        if scaling:
+            raise NotImplementedError(
+                "Generated reference model does not implement RoPE scaling; "
+                "refusing to run with different positional semantics."
+            )
+        if arch.get("yoco"):
+            raise NotImplementedError(
+                "Generated reference model does not implement YOCO KV sharing; "
+                "use a lab implementation adapter instead."
+            )
         # Pick a model-level dtype from the residual dtype of the first layer
         # config. Embeddings and lm_head must match this so the first matmul in
         # the first ACBlock does not see a dtype mismatch.

@@ -1,4 +1,4 @@
-"""change_parallelism — modify (TP, PP, EP, DP).
+"""change_parallelism — modify (TP, PP, EP, CP, DP).
 
 Parallelism is not stored on ArchConfig; it's a runtime argument to
 throughput(). The delta engine carries this transformation as a sidecar
@@ -20,7 +20,7 @@ class ChangeParallelism(Transformation):
         return True, ""
 
     def apply(self, arch, tp: int = None, pp: int = None, ep: int = None,
-              dp: int = None):
+              cp: int = None, dp: int = None):
         out = _copy_arch(arch)
         # Store as sidecar attrs the delta engine reads. Doesn't affect
         # the arch shape, just the parallelism degrees used during stress
@@ -37,6 +37,13 @@ class ChangeParallelism(Transformation):
             if int(ep) <= 0:
                 raise ValueError("ep must be >= 1")
             out._ep_override = int(ep)  # type: ignore[attr-defined]
+        if cp is not None:
+            if int(cp) <= 0:
+                raise ValueError("cp must be >= 1")
+            out._cp_override = int(cp)  # type: ignore[attr-defined]
+            # CP is read directly by stress/throughput before the evaluator
+            # reverse bridge runs.
+            out.cp_degree = int(cp)
         if dp is not None:
             if int(dp) <= 0:
                 raise ValueError("dp must be >= 1")

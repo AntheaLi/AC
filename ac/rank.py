@@ -74,7 +74,7 @@ def annotate_candidate(
         # for the optimizer's direct candidates we coerce via field copy.
         from deltas.base import Transformation
         q_arch = Transformation().to_quality_arch(arch)
-        training = training or TrainingConfig(training_tokens=2_000_000_000_000)
+        training = training or TrainingConfig(training_tokens=20_000_000_000_000)
         qsv = compute_quality_stress(
             q_arch, training,
             workload_spec={"context_length": workload.decode_kv_len},

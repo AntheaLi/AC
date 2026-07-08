@@ -4,52 +4,54 @@
   "accelerator_name": "TPU v5p",
   "compute_units": 2,
   "compute_unit_type": "MXU",
-
   "hbm_capacity_gb": 95,
   "hbm_bandwidth_tb_s": 2.77,
-
   "peak_flops_tf": {
     "bf16": 459,
     "int8": 918
   },
-
+  "_datasheet_peak_flops_tf_note": "Wave 20 (feedback #2): vendor datasheet dense Tensor-Core peaks, for implied-MFU reporting ONLY. The roofline model must keep using peak_flops_tf. On NVIDIA parts peak_flops_tf is ~half of these (see _peak_flops_tf_convention); on TPU/Trainium the two coincide.",
+  "datasheet_peak_flops_tf": {
+    "bf16": 459,
+    "int8": 918
+  },
   "bytes_per_element": {
     "bf16": 2,
     "int8": 1
   },
-
-  "supported_precisions": ["bf16", "int8"],
-
+  "supported_precisions": [
+    "bf16",
+    "int8"
+  ],
   "fused_attention_efficiency": {
     "bf16": 0.75
   },
   "fused_attention_kernel": "Splash Attention / Pallas",
-
   "interconnect": {
     "type": "ici",
     "intra_node_bw_gb_s": 800,
     "inter_node_bw_gb_s": 800,
     "topology": "3D torus pod (up to 8960 chips)"
   },
-
   "vmem_per_core_mb": 32,
   "h_concurrent_heads": 64,
   "fast_memory_tier": "vmem",
-
   "chips_per_host": 4,
   "nvlink_domain_size": 16,
-
   "calibration": {
     "kernel_launch_overhead_us": 7.0,
     "kernels_per_layer": 10,
     "optimizer_bytes_per_param": 12,
     "training_system_efficiency": 0.55,
-    "decode_system_efficiency": 0.40,
+    "decode_system_efficiency": 0.4,
     "prefill_system_efficiency": 0.57,
-    "efficiency_multipliers": {"training": 1.30, "prefill": 1.20, "decode": 1.30},
-    "calibration_source": "v1-validation Phase 0 — Llama-3-8B v5p MaxText anchor (was 0.35; MaxText reports ~50% MFU). v1 demo audit (June 2026) added efficiency_multipliers so reported MFU lands in the published Pallas/MaxText 45-55% band instead of the raw-roofline 30-35%."
+    "efficiency_multipliers": {
+      "training": 1.3,
+      "prefill": 1.2,
+      "decode": 1.3
+    },
+    "calibration_source": "v1-validation Phase 0 \u2014 Llama-3-8B v5p MaxText anchor (was 0.35; MaxText reports ~50% MFU). v1 demo audit (June 2026) added efficiency_multipliers so reported MFU lands in the published Pallas/MaxText 45-55% band instead of the raw-roofline 30-35%."
   },
-
   "notes": {
     "fused_efficiency_source": "Splash Attention on v5p, systolic 128x128 achieves high matmul utilization but softmax reduction costs ~5-10%",
     "hbm_bw_source": "Google TPU v5p specs, 2.77 TB/s HBM3, 95 GB per chip",

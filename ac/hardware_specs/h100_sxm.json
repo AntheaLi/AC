@@ -4,67 +4,69 @@
   "accelerator_name": "H100 SXM",
   "compute_units": 132,
   "compute_unit_type": "SM",
-
   "hbm_capacity_gb": 80,
   "hbm_bandwidth_tb_s": 3.35,
-
   "_peak_flops_tf_convention": "The values below are the EFFECTIVE per-precision compute baseline used by AC's roofline model, NOT the datasheet peak. They are deliberately set to ~50% of NVIDIA's marketed dense-Tensor-Core peak so that, after the `efficiency_multipliers` block and the per-family efficiency table in throughput_model._DEFAULT_EFFICIENCY_TABLE compose, end-to-end TPS / TBT predictions match published NeMo, Megatron-LM, and vLLM traces on H100. See `notes.peak_flops_source` for datasheet numbers. Override via ac-auto-calibrate when lab traces are available.",
   "peak_flops_tf": {
     "bf16": 495,
     "tf32": 495,
-    "fp8":  990,
+    "fp8": 990,
     "int8": 990
   },
-
+  "_datasheet_peak_flops_tf_note": "Wave 20 (feedback #2): vendor datasheet dense Tensor-Core peaks, for implied-MFU reporting ONLY. The roofline model must keep using peak_flops_tf. On NVIDIA parts peak_flops_tf is ~half of these (see _peak_flops_tf_convention); on TPU/Trainium the two coincide.",
+  "datasheet_peak_flops_tf": {
+    "bf16": 989,
+    "tf32": 494.7,
+    "fp8": 1979,
+    "int8": 1979
+  },
   "bytes_per_element": {
     "bf16": 2,
     "tf32": 4,
-    "fp8":  1,
-    "fp4":  0.5,
+    "fp8": 1,
+    "fp4": 0.5,
     "int8": 1
   },
-
-  "supported_precisions": ["bf16", "tf32", "fp8", "int8"],
-
+  "supported_precisions": [
+    "bf16",
+    "tf32",
+    "fp8",
+    "int8"
+  ],
   "fused_attention_efficiency": {
-    "bf16": 0.80,
-    "fp8":  0.78
+    "bf16": 0.8,
+    "fp8": 0.78
   },
   "fused_attention_kernel": "FlashAttention-2/3",
-
   "interconnect": {
     "type": "nvlink",
     "intra_node_bw_gb_s": 900,
     "inter_node_bw_gb_s": 50,
     "topology": "DGX-8GPU"
   },
-
   "sram_per_sm_kb": 228,
   "h_concurrent_heads": 8,
   "fast_memory_tier": "sram",
-
   "gpus_per_node": 8,
   "nvlink_domain_size": 8,
-
   "calibration": {
     "kernel_launch_overhead_us": 5.0,
     "kernels_per_layer": 12,
     "optimizer_bytes_per_param": 12,
     "training_system_efficiency": 0.37,
     "decode_system_efficiency": 0.42,
-    "prefill_system_efficiency": 0.60,
+    "prefill_system_efficiency": 0.6,
     "efficiency_multipliers": {
       "training": 1.8,
       "prefill": 2.5,
       "decode": 1.5
     },
-    "_prefill_multiplier_note": "v1-fix demo-audit-2 (Jun 2026): prefill bumped 1.4 -> 2.5 to match published FA-3 throughput on H100. The previous 1.4 gave net 0.84 of half-peak ≈ 21% of true FP8 peak, which was 3-4x too pessimistic vs FlashAttention-3 traces (Llama-2-7B @ 8k batch=1 ~50-80ms; the previous calibration reported ~290ms). At 2.5 the net achievable is 0.6 * 2.5 = 1.5x half-peak ≈ 75% of true BF16 peak ≈ 38% of true FP8 peak when FFN is FP8 — matches Dao 2024 FA-3 prefill benchmark."
+    "_prefill_multiplier_note": "v1-fix demo-audit-2 (Jun 2026): prefill bumped 1.4 -> 2.5 to match published FA-3 throughput on H100. The previous 1.4 gave net 0.84 of half-peak \u2248 21% of true FP8 peak, which was 3-4x too pessimistic vs FlashAttention-3 traces (Llama-2-7B @ 8k batch=1 ~50-80ms; the previous calibration reported ~290ms). At 2.5 the net achievable is 0.6 * 2.5 = 1.5x half-peak \u2248 75% of true BF16 peak \u2248 38% of true FP8 peak when FFN is FP8 \u2014 matches Dao 2024 FA-3 prefill benchmark."
   },
-
   "notes": {
     "peak_flops_source": "NVIDIA H100 SXM5 datasheet (dense, no 2:4 sparsity). BF16 Tensor Core = 989 TFLOPS; TF32 Tensor Core = 494.7 TFLOPS; FP8 Tensor Core = 1979 TFLOPS. The `peak_flops_tf` field above is intentionally ~half of these (see `_peak_flops_tf_convention`). https://nvidia.com/en-us/data-center/h100/",
     "fused_efficiency_source": "FlashAttention-2/3 benchmarks on H100, typical 0.75-0.85 range, using 0.80 midpoint",
     "hbm_bw_source": "NVIDIA H100 SXM datasheet, 3.35 TB/s HBM3",
-    "efficiency_multipliers_source": "Calibrated to NeMo / Megatron-LM Llama-3-70B BF16 published throughput (~1500-1800 tok/s/GPU at TP=8, batch>=64) and to published vLLM decode TBT for 7B/70B chat. Multipliers compensate for the per-layer compute model being ~1.5-2x more conservative than peak FLOPs roofline — labs with measured numbers should override via ac-auto-calibrate."
+    "efficiency_multipliers_source": "Calibrated to NeMo / Megatron-LM Llama-3-70B BF16 published throughput (~1500-1800 tok/s/GPU at TP=8, batch>=64) and to published vLLM decode TBT for 7B/70B chat. Multipliers compensate for the per-layer compute model being ~1.5-2x more conservative than peak FLOPs roofline \u2014 labs with measured numbers should override via ac-auto-calibrate."
   }
 }

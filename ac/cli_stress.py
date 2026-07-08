@@ -66,6 +66,30 @@ def _coerce(s: str) -> Any:
     return s
 
 
+def _parse_apply_spec(spec: str) -> tuple[str, Dict[str, Any]]:
+    """Parse NAME, NAME:k=v,k=v, or NAME{k=v,k=v} for stress ranking."""
+    raw = (spec or "").strip()
+    body = ""
+    if raw.endswith("}") and "{" in raw:
+        name, _, body = raw[:-1].partition("{")
+    elif ":" in raw:
+        name, _, body = raw.partition(":")
+    else:
+        name = raw
+    params: Dict[str, Any] = {}
+    for chunk in body.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise ValueError(
+                f"--apply {raw!r}: expected key=value, got {chunk!r}"
+            )
+        key, value = chunk.split("=", 1)
+        params[key.strip()] = _coerce(value.strip())
+    return name.strip(), params
+
+
 def _positive_int(v: str) -> int:
     out = int(v)
     if out <= 0:
@@ -112,9 +136,12 @@ def _known_arch(name: str, batch: int, seq: int) -> ArchConfig:
 def _archconfig_from_schema_v03(d: dict, batch: int, seq: int) -> ArchConfig:
     """Build an ArchConfig from a v0.3 schema JSON.
 
-    Reads the first uniform layer band (or coalesces a first-K-dense MoE
-    config) and the parallelism block; rest of the schema is ignored for
-    stress purposes.
+    Preserve every architecture field that changes the stress arithmetic:
+    MoE, MLA/NSA, local:global bands, state layers, MTP, vocabulary, KV
+    precision, and CP. A stress diagnostic attached to a different model is
+    worse than no diagnostic, so this adapter deliberately mirrors the
+    canonical baseline/evaluator bridges instead of treating schema JSON as a
+    loose shape hint.
     """
     if not isinstance(d, dict):
         raise SystemExit("v0.3 schema must be a JSON object")
@@ -124,11 +151,29 @@ def _archconfig_from_schema_v03(d: dict, batch: int, seq: int) -> ArchConfig:
     layers = arch.get("layer_configs") or []
     if not layers:
         raise SystemExit("v0.3 schema has no layer_configs")
-    # Prefer the largest band (covers the MoE body, not just the dense prefix).
     def _band_size(lc):
         idx = lc.get("layer_idx", [])
         return len(idx) if isinstance(idx, list) else 1
-    main_layer = max(layers, key=_band_size)
+
+    def _is_state(lc):
+        return lc.get("state") is not None or lc.get("type") == "state_block"
+
+    def _is_local(lc):
+        a = lc.get("attention") or {}
+        return (
+            str(a.get("type", "full")).lower() == "swa"
+            or int(a.get("window_size", 0) or 0) > 0
+        )
+
+    # Shape/projection comes from the dominant non-state global band. Local
+    # bands in shipped configs share the same geometry, but preferring global
+    # avoids interpreting `type=swa` as the projection family.
+    global_bands = [
+        lc for lc in layers if not _is_state(lc) and not _is_local(lc)
+    ]
+    attention_bands = [lc for lc in layers if not _is_state(lc)]
+    selectable = global_bands or attention_bands or layers
+    main_layer = max(selectable, key=_band_size)
     attn = main_layer.get("attention") or {}
     ffn = main_layer.get("ffn") or {}
     par = d.get("parallelism") or {}
@@ -139,6 +184,7 @@ def _archconfig_from_schema_v03(d: dict, batch: int, seq: int) -> ArchConfig:
     d_head = int(attn.get("d_head", 0)) or (
         d_model // n_heads if n_heads else 0)
     n_kv_heads = int(attn.get("n_kv_heads", n_heads or 1))
+    vocab_size = int(arch.get("vocab_size", 32000) or 32000)
     ffn_dim = int(ffn.get("ffn_dim", 0))
     if ffn.get("type") == "moe":
         ffn_dim = int(ffn.get("expert_dim", ffn_dim))
@@ -156,12 +202,132 @@ def _archconfig_from_schema_v03(d: dict, batch: int, seq: int) -> ArchConfig:
         shared = ffn.get("shared_expert")
         if isinstance(shared, dict):
             moe_config["shared_expert"] = dict(shared)
-    return ArchConfig(
+
+    layer_type_list = ["attention"] * n_layers
+    local_window = 0
+    for lc in layers:
+        indices = lc.get("layer_idx") or []
+        if not isinstance(indices, list):
+            indices = [indices]
+        if _is_state(lc):
+            layer_kind = "state"
+        elif _is_local(lc):
+            layer_kind = "local_attention"
+            a = lc.get("attention") or {}
+            local_window = max(
+                local_window, int(a.get("window_size", 0) or 0)
+            )
+        else:
+            layer_kind = "attention"
+        for idx in indices:
+            idx = int(idx)
+            if 0 <= idx < n_layers:
+                layer_type_list[idx] = layer_kind
+    n_local = layer_type_list.count("local_attention")
+
+    state_config = None
+    state_bands = [lc for lc in layers if _is_state(lc)]
+    if state_bands:
+        raw_state = dict((max(state_bands, key=_band_size).get("state") or {}))
+        state_config = {
+            "state_type": str(
+                raw_state.get("state_type", raw_state.get("type", "mamba2"))
+            ),
+            "d_state": int(raw_state.get("d_state", 128) or 128),
+            "state_expansion": int(
+                raw_state.get("state_expansion", 2) or 2
+            ),
+            "n_heads": int(raw_state.get("n_heads", n_heads) or n_heads),
+            "d_head": int(raw_state.get("d_head", 64) or 64),
+            "state_precision": str(
+                raw_state.get("state_precision", "bf16")
+            ),
+        }
+
+    raw_attention_type = str(attn.get("type", "full")).lower()
+    attention_type = (
+        "full" if raw_attention_type == "swa" else raw_attention_type
+    )
+    kv_bits = int(attn.get("kv_cache_bits", 16) or 16)
+    kv_precision = {16: "bf16", 8: "int8", 4: "fp4"}.get(
+        kv_bits, "bf16"
+    )
+    mtp = arch.get("mtp") or {}
+    yoco = arch.get("yoco") or {}
+    n_dense_ffn_layers = 0
+    if moe_config is not None:
+        n_dense_ffn_layers = sum(
+            _band_size(lc)
+            for lc in layers
+            if (lc.get("ffn") or {}).get("type") != "moe"
+        )
+
+    out = ArchConfig(
         d_model=d_model, n_layers=n_layers, n_heads=n_heads, d_head=d_head,
         n_kv_heads=n_kv_heads, ffn_dim=ffn_dim, ffn_type=ffn_type,
+        vocab_size=vocab_size,
         batch_size=batch, seq_len=seq, precision=precision,
+        kv_precision=kv_precision,
         moe_config=moe_config,
+        n_dense_ffn_layers=n_dense_ffn_layers,
+        state_config=state_config,
+        layer_type_list=(
+            layer_type_list
+            if state_config is not None or n_local > 0
+            else None
+        ),
+        attention_type=attention_type,
+        mla_kv_latent_dim=(
+            int(attn.get("kv_latent_dim", 0) or 0) or None
+        ),
+        mla_q_latent_dim=(
+            int(attn.get("q_latent_dim", 0) or 0) or None
+        ),
+        mla_rope_head_dim=(
+            int(attn.get("rope_head_dim", 0) or 0) or None
+        ),
+        mla_nope_head_dim=(
+            int(attn.get("nope_head_dim", 0) or 0) or None
+        ),
+        nsa_compress_block_size=(
+            int(attn.get("nsa_compress_block_size", 0) or 0) or None
+        ),
+        nsa_compress_block_stride=(
+            int(attn.get("nsa_compress_block_stride", 0) or 0) or None
+        ),
+        nsa_select_block_size=(
+            int(attn.get("nsa_select_block_size", 0) or 0) or None
+        ),
+        nsa_select_top_k=(
+            int(attn.get("nsa_select_top_k", 0) or 0) or None
+        ),
+        nsa_window_size=(
+            int(attn.get("nsa_window_size", 0) or 0) or None
+        ),
+        local_window=(local_window or None),
+        n_local_attn_layers=n_local,
+        yoco_n_self_attn_layers=int(
+            yoco.get("n_self_attn_layers", 0) or 0
+        ),
+        mtp_n_predict_depths=int(
+            mtp.get("n_predict_depths", 0) or 0
+        ),
+        mtp_depth_n_layers=int(mtp.get("depth_n_layers", 1) or 1),
+        cp_degree=int(par.get("context_parallel", 1) or 1),
+        cp_method=str(par.get("cp_method", "ring") or "ring"),
     )
+    # Wave 19 (P0-3): carry the config's declared parallelism so cmd_stress /
+    # cmd_transition can default tp/pp/ep/dp from the baseline. (Wave 21:
+    # EP=1 MoE is now a legal TP-sharded-experts plan, so this default is a
+    # fidelity nicety rather than a crash guard.)
+    out._parallelism = {
+        "tp": int(par.get("tensor_parallel", 0) or 0),
+        "pp": int(par.get("pipeline_parallel", 0) or 0),
+        "ep": int(par.get("expert_parallel", 0) or 0),
+        "dp": int(par.get("data_parallel", 0) or 0),
+        "cp": int(par.get("context_parallel", 0) or 0),
+    }
+    return out
 
 
 def _load_arch_file(path: str, batch: int, seq: int) -> ArchConfig:
@@ -211,8 +377,35 @@ def _resolve_arch(args) -> tuple:
     raise SystemExit("Provide --known <name> or --arch <yaml|json>.")
 
 
+def _resolve_parallelism(args, arch) -> dict:
+    """Wave 19 (P0-3): explicit CLI flags win; otherwise fall back to the
+    baseline config's declared parallelism block; otherwise 1.
+
+    Wave 21: an MoE arch with EP resolved to 1 is legal — experts are
+    TP-sharded across the TP group (vLLM-style TP-only serving). We print
+    the interpretation instead of refusing (the old "EP=1 would replicate
+    every expert" claim was wrong for tp>1).
+    """
+    declared = getattr(arch, "_parallelism", {}) or {}
+    out = {}
+    for key in ("tp", "pp", "ep", "dp"):
+        flag = getattr(args, key, None)
+        out[key] = int(flag if flag is not None else (declared.get(key) or 0) or 1)
+    if getattr(arch, "moe_config", None) and out["ep"] < 2:
+        print(
+            f"[ac-stress] NOTE: MoE arch with EP={out['ep']}: experts are "
+            f"modeled as TP-sharded across the TP={out['tp']} group "
+            "(vLLM-style TP-only serving). Pass --ep N or set "
+            "parallelism.expert_parallel to model expert-parallel "
+            "placement instead.",
+            file=sys.stderr,
+        )
+    return out
+
+
 def cmd_stress(args) -> int:
     arch, name = _resolve_arch(args)
+    par = _resolve_parallelism(args, arch)
     try:
         from throughput_model import warn_if_uncalibrated
         warn_if_uncalibrated(args.hw)
@@ -222,7 +415,8 @@ def cmd_stress(args) -> int:
                   decode_kv_len=args.decode_kv, phase=args.phase)
     sv = compute_throughput_stress(
         arch, args.hw, wl,
-        tp_degree=args.tp, pp_degree=args.pp, ep_degree=args.ep,
+        tp_degree=par["tp"], pp_degree=par["pp"], ep_degree=par["ep"],
+        dp_degree=par["dp"],
         arch_name=name,
     )
     if args.json:
@@ -247,8 +441,10 @@ def cmd_quality(args) -> int:
         raise SystemExit("Provide --known <name>. (YAML loader for quality "
                          "ArchConfig pending.)")
     training = TrainingConfig(training_tokens=args.tokens,
+                              unique_tokens=args.unique_tokens,
                               hardware=args.hw,
-                              sequence_length=args.prefill_seq)
+                              sequence_length=args.prefill_seq,
+                              quality_model_version=args.quality_model)
     workload_spec = {"context_length": args.decode_kv}
     qsv = compute_quality_stress(arch, training, workload_spec, arch_name=name)
     if args.json:
@@ -260,6 +456,7 @@ def cmd_quality(args) -> int:
 
 def cmd_transition(args) -> int:
     arch, name = _resolve_arch(args)
+    par = _resolve_parallelism(args, arch)
     try:
         from throughput_model import warn_if_uncalibrated
         warn_if_uncalibrated(args.hw)
@@ -274,10 +471,18 @@ def cmd_transition(args) -> int:
     # When both are present, `--apply-args` wins for keys it sets.
     apply_args_groups = list(getattr(args, "apply_args", None) or [])
 
+    requested: list[tuple[str, Dict[str, Any]]] = []
     if args.apply:
-        requested_names = [n.strip() for n in args.apply.split(",") if n.strip()]
+        try:
+            for raw_group in args.apply:
+                for spec in raw_group.split(","):
+                    if spec.strip():
+                        requested.append(_parse_apply_spec(spec))
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
     else:
-        requested_names = list(REGISTRY.keys())
+        requested = [(name, {}) for name in REGISTRY.keys()]
 
     # If we have --apply-args groups, attach them in order to the named
     # transformations. Otherwise, fall back to the legacy per-knob flags.
@@ -297,8 +502,16 @@ def cmd_transition(args) -> int:
 
     pairs = []
     used_groups = 0
-    for tname in requested_names:
+    for tname, inline_params in requested:
+        if tname not in REGISTRY:
+            print(
+                f"ERROR: unknown transformation {tname!r}. Available: "
+                + ", ".join(sorted(REGISTRY)),
+                file=sys.stderr,
+            )
+            return 2
         params = _legacy_params(tname)
+        params.update(inline_params)
         # Walk --apply-args groups in declaration order, layering kv pairs onto
         # the corresponding --apply name. This matches ac-delta-eval semantics.
         if used_groups < len(apply_args_groups):
@@ -314,7 +527,8 @@ def cmd_transition(args) -> int:
     transitions = apply_transitions(
         arch, pairs,
         hardware=args.hw, workload=wl,
-        tp_degree=args.tp, pp_degree=args.pp, ep_degree=args.ep,
+        tp_degree=par["tp"], pp_degree=par["pp"], ep_degree=par["ep"],
+        dp_degree=par["dp"],
         baseline_name=name,
     )
     ranked = rank_transitions(transitions)
@@ -339,11 +553,14 @@ def cmd_transition(args) -> int:
           "(<0.9 stress)")
     print(f"  softened = baseline-binding axis fell ≥{SOFTEN_THRESHOLD:.2f} "
           "but stayed binding/pressured")
+    print(f"  worsened = baseline-binding axis rose ≥{SOFTEN_THRESHOLD:.2f} "
+          "(deeper into binding/violated; drives a negative score)")
     for t in ranked:
         score = t.relief_score()
         relieved = ", ".join(t.relieved_binding_axes) or "(none)"
         newly = ", ".join(t.new_binding_axes) or "(none)"
         softened = []
+        worsened = []
         if t.baseline_stress and t.candidate_stress:
             for axis in t.baseline_stress.binding_axes:
                 if axis in t.relieved_binding_axes:
@@ -352,10 +569,14 @@ def cmd_transition(args) -> int:
                         - getattr(t.candidate_stress, axis))
                 if drop >= SOFTEN_THRESHOLD:
                     softened.append(f"{axis}(-{drop:.2f})")
+                elif drop <= -SOFTEN_THRESHOLD:
+                    worsened.append(f"{axis}(+{-drop:.2f})")
         softened_str = ", ".join(softened) or "(none)"
+        worsened_str = ", ".join(worsened) or "(none)"
         print(f"  - {t.transformation_name:32s}  "
               f"score={score: 6.3f}  relieved=[{relieved}]  "
-              f"softened=[{softened_str}]  new=[{newly}]")
+              f"softened=[{softened_str}]  worsened=[{worsened_str}]  "
+              f"new=[{newly}]")
     infeasible = [t for t in transitions if not t.feasible]
     if infeasible:
         print()
@@ -411,27 +632,45 @@ def main(argv=None) -> int:
     def _arch_args(sp):
         g = sp.add_mutually_exclusive_group(required=True)
         g.add_argument("--known", help="known architecture name")
-        g.add_argument("--arch", help="YAML architecture file")
+        # Wave 18h: `--baseline-config` is the canonical cross-tool name
+        # (matches ac-compile / ac-delta-eval); `--arch` stays as an alias.
+        g.add_argument("--arch", "--baseline-config", dest="arch",
+                       help="architecture config file (JSON/YAML); "
+                            "alias: --baseline-config")
+
+    def _hw_arg(sp, **kw):
+        # Wave 18h: `--hardware` is the canonical cross-tool name (matches
+        # ac-compile / ac-delta-eval / ac-trust-audit); `--hw` stays as an
+        # alias so existing scripts keep working.
+        sp.add_argument("--hw", "--hardware", dest="hw", **kw)
 
     p_stress = sub.add_parser("stress", help="Print throughput StressVector")
     _arch_args(p_stress)
-    p_stress.add_argument("--hw", default="h100",
-                          choices=VALID_HARDWARE)
+    _hw_arg(p_stress, default="h100", choices=VALID_HARDWARE)
     p_stress.add_argument("--batch", type=_positive_int, default=1)
     p_stress.add_argument("--prefill-seq", type=_positive_int, default=2048)
     p_stress.add_argument("--decode-kv", type=_positive_int, default=2048)
     p_stress.add_argument("--phase", default="decode",
                           choices=["prefill", "decode", "training", "serving_mixed"])
-    p_stress.add_argument("--tp", type=_positive_int, default=1)
-    p_stress.add_argument("--pp", type=_positive_int, default=1)
-    p_stress.add_argument("--ep", type=_positive_int, default=1)
+    # Wave 19 (P0-3): default None so the baseline config's parallelism
+    # block wins when the flag is not explicitly set (see _resolve_parallelism).
+    p_stress.add_argument("--tp", type=_positive_int, default=None)
+    p_stress.add_argument("--pp", type=_positive_int, default=None)
+    p_stress.add_argument("--ep", type=_positive_int, default=None)
+    p_stress.add_argument("--dp", type=_positive_int, default=None)
     p_stress.add_argument("--json", action="store_true")
     p_stress.set_defaults(func=cmd_stress)
 
     p_q = sub.add_parser("quality", help="Print QualityStressVector")
     p_q.add_argument("--known", required=True)
-    p_q.add_argument("--hw", default="h100")
-    p_q.add_argument("--tokens", type=_positive_int, default=2_000_000_000_000)
+    _hw_arg(p_q, default="h100")
+    p_q.add_argument("--tokens", type=_positive_int, default=20_000_000_000_000)
+    p_q.add_argument("--unique-tokens", type=_positive_int, default=None)
+    p_q.add_argument(
+        "--quality-model",
+        choices=["effective_capacity_v2", "legacy_residual_v1"],
+        default="effective_capacity_v2",
+    )
     p_q.add_argument("--prefill-seq", type=_positive_int, default=4096)
     p_q.add_argument("--decode-kv", type=_positive_int, default=4096)
     p_q.add_argument("--json", action="store_true")
@@ -439,18 +678,23 @@ def main(argv=None) -> int:
 
     p_t = sub.add_parser("transition", help="apply transformations + rank")
     _arch_args(p_t)
-    p_t.add_argument("--hw", default="h100",
-                     choices=VALID_HARDWARE)
+    _hw_arg(p_t, default="h100", choices=VALID_HARDWARE)
     p_t.add_argument("--batch", type=_positive_int, default=1)
     p_t.add_argument("--prefill-seq", type=_positive_int, default=2048)
     p_t.add_argument("--decode-kv", type=_positive_int, default=2048)
     p_t.add_argument("--phase", default="decode",
                      choices=["prefill", "decode", "training", "serving_mixed"])
-    p_t.add_argument("--tp", type=_positive_int, default=1)
-    p_t.add_argument("--pp", type=_positive_int, default=1)
-    p_t.add_argument("--ep", type=_positive_int, default=1)
-    p_t.add_argument("--apply", default="",
-                     help="comma-separated transformation names (default: all)")
+    p_t.add_argument("--tp", type=_positive_int, default=None)
+    p_t.add_argument("--pp", type=_positive_int, default=None)
+    p_t.add_argument("--ep", type=_positive_int, default=None)
+    p_t.add_argument(
+        "--apply", action="append", default=None,
+        help=(
+            "Transformation to rank (repeatable; comma-separated names also "
+            "accepted). Inline kwargs use NAME:k=v,k=v or NAME{k=v,k=v}. "
+            "Default: all."
+        ),
+    )
     # Fix #9: accept the same `--apply-args k=v` repeatable form as
     # `ac-delta-eval`. Groups are zipped with names in declaration order.
     p_t.add_argument("--apply-args", action="append", nargs="+", default=None,
@@ -466,6 +710,21 @@ def main(argv=None) -> int:
     p_t.set_defaults(func=cmd_transition)
 
     args = p.parse_args(argv)
+
+    # Wave 28: fail fast on a broken AC_QUALITY_DEFAULTS /
+    # AC_HARDWARE_SPEC_DIR instead of letting the per-candidate
+    # exception handler misreport it as an architecture problem.
+    try:
+        from quality_model import validate_calibration_environment
+    except ImportError:
+        from .quality_model import validate_calibration_environment
+    try:
+        validate_calibration_environment(
+            getattr(args, "hw", None) or getattr(args, "hardware", None))
+    except Exception as e:
+        print(f"ERROR: invalid calibration environment: {e}", file=sys.stderr)
+        return 2
+
     return args.func(args)
 
 

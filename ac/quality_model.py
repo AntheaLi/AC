@@ -20,32 +20,43 @@ while exposing v1 term-level results for reports and future adapters.
 import json
 import math
 import os
-import sys
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional, Tuple
 
-# Import lattice for param estimation (sibling module)
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from lattice_engine import estimate_params
-
-from penalties import (
-    shape_penalty,
-    gqa_penalty,
-    kv_quant_penalty,
-    weight_precision_penalty,
-    activation_precision_penalty,
-    feasibility_penalty,
-    PENALTY_REGISTRY,
-    INFEASIBLE,
-)
+try:
+    from .architecture import parameter_ledger
+    from .penalties import (
+        shape_penalty, gqa_penalty, kv_quant_penalty,
+        weight_precision_penalty, activation_precision_penalty,
+        feasibility_penalty, PENALTY_REGISTRY, INFEASIBLE,
+        precision_supported, weight_storage_supported, kv_quant_quality,
+        weight_precision_quality, activation_precision_quality,
+    )
+except ImportError:
+    # Retain direct-file execution without installing a second set of modules
+    # under flat names during normal package imports.
+    from architecture import parameter_ledger
+    from penalties import (
+        shape_penalty, gqa_penalty, kv_quant_penalty,
+        weight_precision_penalty, activation_precision_penalty,
+        feasibility_penalty, PENALTY_REGISTRY, INFEASIBLE,
+        precision_supported, weight_storage_supported, kv_quant_quality,
+        weight_precision_quality, activation_precision_quality,
+    )
 
 
 # =============================================================================
 # Data classes
 # =============================================================================
+
+DEFAULT_TRAINING_TOKENS = 20_000_000_000_000
+QUALITY_MODEL_EFFECTIVE_V2 = "effective_capacity_v2"
+QUALITY_MODEL_LEGACY_V1 = "legacy_residual_v1"
+SUPPORTED_QUALITY_MODEL_VERSIONS = {
+    QUALITY_MODEL_EFFECTIVE_V2,
+    QUALITY_MODEL_LEGACY_V1,
+}
+
 
 @dataclass
 class ArchConfig:
@@ -66,6 +77,10 @@ class ArchConfig:
     attention_type: str = "gqa"             # mha | gqa | mqa | mla
     local_window: Optional[int] = None
     global_frequency: Optional[int] = None
+    # Wave 18g: fraction of attention layers that are sliding-window local
+    # (the rest are global). None = legacy semantics (local_window set ->
+    # every attention layer is windowed).
+    local_attention_fraction: Optional[float] = None
     mla_latent_dim: Optional[int] = None
     kv_compression_ratio: Optional[float] = None
     # v1-fix MLA: full DeepSeek-V2/V3 MLA shape. Only meaningful when
@@ -83,6 +98,17 @@ class ArchConfig:
     nsa_select_block_size: Optional[int] = None
     nsa_select_top_k: Optional[int] = None
     nsa_window_size: Optional[int] = None
+    # Wave 9 (Jun 2026): compressed-attention variants. See
+    # plan/redesign/09-compressed-attention-coverage.md.
+    csa_block_size: Optional[int] = None
+    csa_top_k_blocks: Optional[int] = None
+    csa_compression_dim: Optional[int] = None
+    indexshare_num_buckets: Optional[int] = None
+    indexshare_top_k_buckets: Optional[int] = None
+    indexshare_index_dim: Optional[int] = None
+    msa_window_size: Optional[int] = None
+    msa_dilated_top_k: Optional[int] = None
+    msa_global_top_k: Optional[int] = None
     # v1-fix YOCO: cross-layer KV sharing (Microsoft 2024). When set, only the
     # first `yoco_n_self_attn_layers` layers keep their own KV; the rest read
     # from the K-th layer's KV cache via cross-attention. Different from MLA
@@ -147,21 +173,14 @@ class ArchConfig:
         """Active parameter count (params touched per token).
         Dense: active = total. MoE: active experts + shared components.
         """
-        if self._moe_enabled:
-            return self._estimate_moe_params(active=True)
-        return estimate_params(
-            self.d_model, self.n_heads, self.d_head, self.ffn_dim,
-            self.n_layers, self.n_kv_heads, self.vocab_size
-        )
+        return int(parameter_ledger(self).active_params)
 
     @property
     def n_total_params(self) -> int:
         """Total parameter count (includes inactive experts for MoE).
         Dense: total = active.
         """
-        if self._moe_enabled:
-            return self._estimate_moe_params(active=False)
-        return self.n_active_params
+        return int(parameter_ledger(self).total_params)
 
     @property
     def embedding_params(self) -> int:
@@ -236,6 +255,9 @@ class TrainingConfig:
     training_precision: str = "bf16"
     overtraining_ratio: Optional[float] = None
     data_quality: Optional[dict] = None
+    # None selects constants.model.version (effective_capacity_v2 by default).
+    # legacy_residual_v1 preserves the pre-effective-capacity implementation.
+    quality_model_version: Optional[str] = None
 
 
 @dataclass
@@ -251,7 +273,17 @@ class PenaltyEntry:
 
 @dataclass
 class TermResult:
-    """A v1 quality term with value, uncertainty, and provenance."""
+    """A v1 quality term with value, uncertainty, and provenance.
+
+    Wave 18d (Jun 2026): the optional ``provenance`` field carries an
+    ``ac.decision.EvidenceProvenance`` when set. It records evidence_kind
+    (scaling_law | analytical_hardware | measured_hardware | literature_prior
+    | heuristic | calibrated_measurement), source citation, calibration pack
+    id, per-term domain status (in_domain | near_domain_boundary |
+    out_of_domain), and uncertainty. When absent, downstream code treats the
+    term as heuristic-widens-only for decision purposes. Kept optional so
+    existing residual builders don't have to migrate all at once.
+    """
     name: str
     value: float = 0.0          # fractional residual relative to spine
     delta: float = 0.0          # absolute loss-proxy contribution
@@ -260,6 +292,7 @@ class TermResult:
     source: str = "compiler_default"
     notes: List[str] = field(default_factory=list)
     features: Dict[str, Any] = field(default_factory=dict)
+    provenance: Optional[Any] = None  # ac.decision.EvidenceProvenance (avoid import cycle)
 
 
 @dataclass
@@ -267,7 +300,10 @@ class QualityResult:
     """Output of the quality model."""
     # Core predictions
     predicted_loss: float = 0.0             # relative, not absolute
+    pretraining_loss_proxy: float = 0.0      # excludes serving-context utility
+    task_adjusted_loss_proxy: float = 0.0    # includes serving-context utility
     chinchilla_baseline: float = 0.0        # Chinchilla spine L(N, D)
+    raw_chinchilla_baseline: float = 0.0     # L(N_active, raw token exposures)
     total_penalty_fraction: float = 0.0     # sum of all penalty fractions
     total_penalty_absolute: float = 0.0     # total_penalty_fraction × baseline
 
@@ -287,7 +323,11 @@ class QualityResult:
     n_active_params: int = 0
     n_total_params: int = 0
     spine_active_params: int = 0
+    spine_effective_params: int = 0
     training_tokens: int = 0
+    raw_training_tokens: int = 0
+    unique_training_tokens: int = 0
+    data_repetitions: float = 0.0
 
     # Chinchilla regime check
     in_chinchilla_regime: bool = True
@@ -298,7 +338,7 @@ class QualityResult:
     warnings: List[str] = field(default_factory=list)
     uncertainty_total: float = 0.0
     uncertainty_breakdown: Dict[str, float] = field(default_factory=dict)
-    quality_model_version: str = "quality_v1_modular_backbone"
+    quality_model_version: str = QUALITY_MODEL_EFFECTIVE_V2
     benchmark_score_proxy: Optional[float] = None
     benchmark_uncertainty: Optional[float] = None
     benchmark_notes: List[str] = field(default_factory=list)
@@ -347,6 +387,11 @@ QUALITY_DEFAULTS_PATH = os.path.join(
 _QUALITY_CONSTANTS_CACHE: Dict[str, Dict[str, Any]] = {}
 
 DEFAULT_QUALITY_CONSTANTS = {
+    "model": {
+        "version": QUALITY_MODEL_EFFECTIVE_V2,
+        "legacy_version": QUALITY_MODEL_LEGACY_V1,
+        "source": "effective_capacity_and_effective_data_v2",
+    },
     "spine": {
         "enabled": True,
         "form": "power_law_M_D",
@@ -358,6 +403,100 @@ DEFAULT_QUALITY_CONSTANTS = {
         "uncertainty_in_regime": 0.03,
         "uncertainty_out_of_regime": 0.08,
         "source": "Hoffmann_et_al_2022_placeholder_defaults",
+    },
+    "effective_capacity": {
+        "enabled": True,
+        # N_eff = N_active * (N_total/N_active) ** (
+        #     capacity_elasticity * (data_utilization - data_utilization_parity)
+        # )
+        # data_utilization = t / (t + half_saturation), t = tokens per TOTAL
+        # parameter. The exponent is SIGNED: when each total parameter sees
+        # fewer than ~half_saturation tokens (utilization < parity), the
+        # sparse capacity is under-trained and N_eff drops BELOW N_active —
+        # expert under-training plus routing overhead make the MoE a net
+        # quality loss vs an equal-active dense model. Above parity the
+        # familiar sparse-capacity gain applies. This is what produces the
+        # 2T -> 20T dense->MoE flip: at 2T a 34B-active/174B-total MoE sits
+        # at ~11.5 tokens/total-param (utilization 0.37 < 0.5) and loses to
+        # dense; at 20T it sits at ~115 (utilization 0.85) and wins.
+        # Anchor sanity: DeepSeek-V3 (14.8T / 671B ≈ 22 tokens/total) sits
+        # just above parity — consistent with its published "modest but real"
+        # sparse-capacity win.
+        # These are deliberately uncalibrated structural priors. AC's
+        # auto-calibration overlay may fit capacity_multiplier from measured
+        # loss rows without changing this analytical form.
+        "capacity_elasticity": 0.25,
+        "tokens_per_total_param_half_saturation": 20.0,
+        "data_utilization_parity": 0.5,
+        "capacity_multiplier": 1.0,
+        "uncertainty": 0.50,
+        "source": "uncalibrated_effective_sparse_capacity_prior",
+    },
+    "effective_data": {
+        "enabled": True,
+        # D_eff = U + U*r_D*(1-exp(-R/r_D)), R=D/U-1.
+        # When unique_tokens is omitted, U=D and this exactly recovers D.
+        "repeat_half_life_epochs": 4.0,
+        "data_multiplier": 1.0,
+        # Optional Lovelace-style overfit interaction. It is disabled until
+        # auto-calibration has suitable repeated-data measurements.
+        "overfit_penalty_weight": 0.0,
+        "overfit_repetition_exponent": 1.0,
+        "overfit_capacity_exponent": 1.0,
+        "uncertainty": 0.40,
+        "source": "muennighoff_effective_data_uncalibrated_prior",
+    },
+    "context_utility": {
+        "enabled": True,
+        "source": "task_context_delta_relative_to_pretrain_context",
+        "uncertainty": 0.50,
+    },
+    "vocab_residual": {
+        # Wave 18h: one-sided undersized-vocabulary penalty. The scaling
+        # spine already prices OVERSIZED vocabs (embedding params displace
+        # transformer params at fixed total N), but nothing modeled the
+        # data-efficiency cost of an UNDERSIZED tokenizer — which made any
+        # vocab sweep trivially pick the smallest vocab. Anchored to
+        # Tao et al. 2024 ("Scaling Laws with Vocabulary": V_opt grows as a
+        # power of non-embedding params) and 2024-2026 frontier practice
+        # (Llama-3 128k @ 8-70B, Qwen 152k, Gemma 256k, DeepSeek-V3 129k):
+        #   V_opt = v_opt_ref * (N_non_embedding / n_ref) ** v_opt_exponent
+        # with v_opt_ref = 128256 at n_ref = 7e9. Penalty (V < V_opt only):
+        #   min(cap, weight * log(V_opt / V) ** 2)
+        # LOW CONFIDENCE: per-token loss across different tokenizers is not
+        # strictly commensurable; treat this as a structural prior that
+        # gives the vocab axis an interior optimum, not a measurement.
+        #
+        # Wave 21 recalibration (weight 0.004 -> 0.022, cap 0.015 -> 0.05):
+        # Tao et al.'s V_opt is the REALIZED optimum — it already nets out
+        # the embedding-displacement cost that AC's spine charges
+        # separately. With a one-sided quadratic-in-log penalty, the
+        # model's realized optimum sits where the penalty slope matches
+        # the spine's displacement slope s (~0.5%/ln V measured on the 7B
+        # H100 sweep):  V* = V_opt * exp(-s / (2*weight)).  At the old
+        # weight=0.004 that equilibrium is V_opt*e^-0.63 ~ 0.53*V_opt —
+        # the sweep picked 65536 at 7B, contradicting the model's own
+        # cited source, frontier practice, and the documented behavior
+        # ("default 7B picks vocab=128256"); the tokens/sec tiebreak
+        # (tokens are not tokenizer-invariant units — a small-vocab model
+        # moves less TEXT per token) then locked the under-pick in.
+        # weight=0.022 puts the equilibrium at ~0.87*V_opt (~110k at 7B,
+        # so the discrete sweep picks 128256 by >0.5% loss margin, outside
+        # the tiebreak band) and prices a 32k tokenizer at a 7B target at
+        # ~3.7% loss-equivalent, consistent with the compression +
+        # effective-data gains reported for 32k->128k tokenizer upgrades
+        # (Llama-2 -> Llama-3 class). Pinned end-to-end in
+        # tests/test_wave21_fixes.py.
+        "enabled": True,
+        "weight": 0.022,
+        "cap": 0.05,
+        "v_opt_ref": 128256,
+        "n_ref": 7.0e9,
+        "v_opt_exponent": 0.30,
+        "v_opt_min": 32000,
+        "v_opt_max": 512000,
+        "uncertainty": 0.60,
+        "source": "tao_2024_vocab_scaling_plus_frontier_practice_prior",
     },
     "architecture_residual": {
         "enabled": True,
@@ -378,7 +517,7 @@ DEFAULT_QUALITY_CONSTANTS = {
             "gamma_W": 0.341,
             "K_D": 0.014,       # l_opt = K_D × N^gamma_D
             "gamma_D": 0.341,
-            "C": 0.03,          # penalty strength (2× deviation ≈ 2% PPL)
+            "C": 0.08,          # canonical Wave-12 shape penalty strength
             "d_min": 256,       # floor on d_opt
             "l_min": 2,         # floor on l_opt
             "fit_source": "v1_fix_2026_06_refit_llama_mistral_qwen_gpt3",
@@ -415,6 +554,23 @@ DEFAULT_QUALITY_CONSTANTS = {
             "mla_compression": 0.004,
             # v1-fix NSA: under-coverage penalty weight.
             "nsa_undercoverage": 0.005,
+            # Wave 9 (Jun 2026): compressed-attention quality weights.
+            # All three are LOW-CONFIDENCE — no public training-time ablation
+            # data for CSA/IndexShare/MSA at frontier scale as of Jun 2026.
+            # See plan/redesign/09-compressed-attention-coverage.md.
+            #
+            # CSA (DeepSeek-V4 family). DeepSeek's reported ~0.5% quality
+            # delta at 90% KV reduction. Weight 0.005 yields:
+            #   compression=10× → 0.005 × log(10) = 1.15%
+            #   compression=20× → 0.005 × log(20) = 1.50%
+            "csa_compression": 0.005,
+            # IndexShare (GLM-5.2 / MiniMax M3). Routing-error penalty grows
+            # as top_k / num_buckets shrinks (lower coverage). Weight 0.006
+            # gives ~1.2% at 8/64 coverage, ~0.6% at 16/64.
+            "indexshare_coverage": 0.006,
+            # MSA (Mixture of Sparse Attention). Pattern coverage penalty:
+            # if effective_share < 0.05 of ctx, recall is hit. Weight 0.005.
+            "msa_pattern_coverage": 0.005,
             # v1-fix 2:4 sparsity: per-share penalty weight. 0.015 yields
             # ~1.5% loss-proxy at 100% sparse params, scaling linearly.
             "sparsity_2_4": 0.015,
@@ -578,19 +734,66 @@ DEFAULT_QUALITY_CONSTANTS = {
             },
         },
         # --- Weights for the 5 sub-terms ---
-        "w_under": 0.08,       # penalty weight for p_attn below band
-        "w_over": 0.04,        # penalty weight for p_attn above band
-        "w_recall": 0.06,      # recall-risk weight
-        "w_capacity": 0.02,    # state-capacity (compression) weight
-        "w_kv_cost": 0.01,     # effective-kv-cost weight
+        # v1-fix Wave 5 (Jun 2026): tightened w_under/w_over so the band-pass
+        # is small inside the Jamba sweet spot (parity with pure attention),
+        # matching the AI21 ablation tables and the NVIDIA empirical study.
+        # v1-fix Wave 18f (Jul 2026): raised w_under / w_recall. With the
+        # quadratic form, the maximum possible under-band penalty at
+        # p_attn=0 was w_under × p_low² = 0.05 × 0.0144 ≈ 7e-4 and the
+        # maximum recall penalty 0.06 × 0.0196 ≈ 1.2e-3 — an order of
+        # magnitude below the long-context benefit term they are supposed
+        # to counterbalance, which let pure-SSM stacks win the 20T matrix
+        # at ≥7B. At the new weights a pure-SSM mamba-family candidate pays
+        # ~0.5% (band) + ~0.6% (recall) relative loss, in line with the
+        # Waleffe et al. 8B pure-Mamba vs hybrid gap (~2.65 pts avg incl.
+        # large MMLU deficit ≈ 1-2% loss-equivalent). The quadratic shape
+        # keeps mild under-band candidates (p_attn 0.07-0.12, i.e. the
+        # NVIDIA anchor region) essentially unpenalized: 0.35 × 0.0025 ≈
+        # 9e-4 at p_attn=0.07.
+        "w_under": 0.35,       # was 0.05; see Wave 18f note above
+        "w_over": 0.03,        # was 0.04; symmetric tighten
+        "w_recall": 0.30,      # was 0.06; see Wave 18f note above
+        "w_capacity": 0.02,    # unchanged
+        "w_kv_cost": 0.01,     # unchanged
+        # Wave 18f: attention-presence floor for the long-context benefit
+        # (lowest published hybrid anchor ratio — NVIDIA Mamba-2-Hybrid).
+        "state_benefit_min_p_attn": 0.07,
         # --- State capacity parameters ---
         "compression_scale": 0.02,
         "composition_scale": 0.01,
         "d_state_reference": 192,
         "refresh_factor_weight": 0.5,
+        # v1-fix Wave 5 (Jun 2026): long-context state benefit.
+        # Replaces the missing benefit term that made state_residual
+        # uniformly positive — even at 1M+ context where the published
+        # data (NVIDIA Empirical Study 2024, Samba 2024, Jamba 2024)
+        # shows hybrids beat pure attention. Calibrated against:
+        #   ctx=8k:   benefit ≈ 0       (parity per Jamba)
+        #   ctx=128k: benefit ≈ −0.015 × p_state  (NVIDIA +2.65pts ≈ 1.5% loss)
+        #   ctx=1M:   benefit ≈ −0.025 × p_state  (Samba clean extrapolation)
+        #   ctx→∞:    asymptote at −0.030 × p_state
+        # The sigmoid uses tanh(log2(ctx/ref) / 5.0) so it crosses ~0.5
+        # at ctx≈256k (matching the Jamba production checkpoint length).
+        "state_long_context_weight": 0.030,
+        "state_long_context_ref_ctx": 8192,
+        "state_long_context_sigmoid_scale": 5.0,
+        # Wave 20 (feedback #4): quantitative bias floor for cross-mixer
+        # (attention↔state) LOSS deltas. Source: the fit-pairs coverage
+        # audit — the one published pair at the hybrid-ratio-parity
+        # operating point (jamba2024_ratio_parity_256k, published Δ=0.00)
+        # misses by 2.76% (model over-predicts hybrid benefit). Until more
+        # in-region pairs constrain the term, cross-mixer loss deltas
+        # below this floor are model bias, not signal — the same treatment
+        # cross-family dense-vs-MoE loss deltas already get.
+        "cross_mixer_bias_floor_pct": 2.8,
         # --- Bounds ---
-        "min_delta": -0.05,
-        "max_delta": 0.30,
+        # v1-fix Wave 5 (Jun 2026): loosen min_delta to let the long-context
+        # state benefit show through. NVIDIA's measured 1.5-3% loss
+        # reduction on hybrid vs Transformer needs at least -0.05 of
+        # headroom; -0.10 leaves margin for stronger benefits at longer
+        # context without inviting unbounded negativity.
+        "min_delta": -0.10,    # was -0.05
+        "max_delta": 0.30,     # unchanged
         "uncertainty": 0.40,
         "uncertainty_outside_band": 0.55,
     },
@@ -611,6 +814,40 @@ DEFAULT_QUALITY_CONSTANTS = {
     "uncertainty": {
         "max_uncertainty": 0.95,
         "additive_interaction_bonus": 0.005,
+    },
+    # Wave 18h (Jul 2026): correlated-error paired decisions.
+    # Two candidates scored by the same quality model share most of their
+    # error: the scaling-law spine constants, data-quality assumptions, and
+    # any residual term evaluated at the same operating point are the SAME
+    # miscalibration in both predictions, so they cancel in the difference.
+    # Treating each candidate's total uncertainty as independent (the old
+    # interval-overlap rule) systematically overstates pairwise uncertainty
+    # by the shared component — with an uncalibrated ~3-8% total band this
+    # made every matrix cell [unresolved] even for comparisons whose
+    # decision-relevant uncertainty is <1%.
+    # Per-term correlation model:
+    #   rho_identical  — same term, same value & uncertainty in both arms
+    #                    (identical operating point): the modeled error is
+    #                    literally the same number; cancels to |sa - sb|.
+    #   rho_same_term  — same term active in both arms at different
+    #                    operating points (e.g. spine at different N_eff):
+    #                    the functional form and fitted constants are
+    #                    shared, only the operating-point sensitivity
+    #                    differs. High but not full correlation.
+    #   rho_distinct   — term active in only one arm (e.g. moe_residual in
+    #                    the MoE arm of a dense-vs-MoE pair): independent.
+    # run_noise_floor_pct is the irreducible seed/data-order variance of an
+    # actual training run (published seed-variance studies put small-scale
+    # loss reproducibility at ~0.1-0.4%); no model comparison can resolve
+    # below what two real runs of the SAME config would differ by.
+    "paired_decision": {
+        "enabled": True,
+        "rho_identical": 1.0,
+        "rho_same_term": 0.9,
+        "rho_distinct": 0.0,
+        "run_noise_floor_pct": 0.25,
+        # Relative tolerance for treating two term values as "identical".
+        "value_match_rtol": 1e-3,
     },
     "risk_residual": {
         "enabled": True,
@@ -679,33 +916,106 @@ def is_in_chinchilla_regime(n_active: int, training_tokens: int) -> Tuple[bool, 
 
 
 def load_quality_constants(path: Optional[str] = None) -> Dict[str, Any]:
-    """Load quality v1 defaults, falling back to built-in defaults if needed."""
-    path = path or os.environ.get("AC_QUALITY_DEFAULTS") or QUALITY_DEFAULTS_PATH
-    if path in _QUALITY_CONSTANTS_CACHE:
-        return _deepcopy_dict(_QUALITY_CONSTANTS_CACHE[path])
+    """Load the canonical in-code defaults plus an explicit lab override.
+
+    The shipped model has exactly one default source: ``DEFAULT_QUALITY_CONSTANTS``.
+    A file is read only when the caller passes ``path`` or sets
+    ``AC_QUALITY_DEFAULTS``. Missing dependencies, missing files, malformed
+    YAML/JSON, and non-mapping roots are fatal; AC never silently changes its
+    coefficients based on whether PyYAML happens to be installed.
+    """
+    override_path = path or os.environ.get("AC_QUALITY_DEFAULTS")
+    cache_key = override_path or "<builtin-canonical>"
+    if cache_key in _QUALITY_CONSTANTS_CACHE:
+        return _deepcopy_dict(_QUALITY_CONSTANTS_CACHE[cache_key])
 
     constants = _deepcopy_dict(DEFAULT_QUALITY_CONSTANTS)
-    if not os.path.exists(path):
-        _QUALITY_CONSTANTS_CACHE[path] = _deepcopy_dict(constants)
+    if override_path is None:
+        _QUALITY_CONSTANTS_CACHE[cache_key] = _deepcopy_dict(constants)
         return constants
-    try:
-        with open(path) as f:
-            if str(path).lower().endswith(".json"):
-                loaded = json.load(f) or {}
-            else:
+    if not os.path.exists(override_path):
+        raise FileNotFoundError(
+            f"AC_QUALITY_DEFAULTS does not exist: {override_path}"
+        )
+    with open(override_path) as f:
+        if str(override_path).lower().endswith(".json"):
+            loaded = json.load(f) or {}
+        else:
+            try:
                 import yaml  # type: ignore
-                loaded = yaml.safe_load(f) or {}
-        if isinstance(loaded, dict):
-            constants = _deep_merge(constants, loaded)
-            _QUALITY_CONSTANTS_CACHE[path] = _deepcopy_dict(constants)
-            return constants
-    except Exception:
-        # PyYAML is optional in this repo. The in-code defaults mirror the YAML
-        # file so validation remains dependency-free.
-        _QUALITY_CONSTANTS_CACHE[path] = _deepcopy_dict(constants)
-        return constants
-    _QUALITY_CONSTANTS_CACHE[path] = _deepcopy_dict(constants)
+            except ImportError as exc:
+                raise RuntimeError(
+                    "PyYAML is required to load a YAML quality override; "
+                    "install project dependencies or use JSON"
+                ) from exc
+            loaded = yaml.safe_load(f) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(
+            f"Quality override root must be a mapping: {override_path}"
+        )
+    constants = _deep_merge(constants, loaded)
+    _QUALITY_CONSTANTS_CACHE[cache_key] = _deepcopy_dict(constants)
     return constants
+
+
+def validate_calibration_environment(hardware: Optional[str] = None) -> None:
+    """Fail fast on a broken calibration environment (Wave 28).
+
+    A bad ``AC_QUALITY_DEFAULTS`` path/contents, or a bad
+    ``AC_HARDWARE_SPEC_DIR``, used to surface only *per candidate*: the
+    evaluator's blanket exception handler marked every candidate
+    infeasible, so ``ac-compile`` reported "No feasible architecture
+    found ... Try: relax serving constraints, widen param tolerance ..."
+    and ``ac-delta-eval`` exited 0 with "delta was infeasible against
+    baseline" — both misdiagnoses of an environment typo, and both in
+    direct contradiction of the documented contract ("Invalid pack path
+    or contents: compilation fails. AC does not silently fall back to
+    different constants.").
+
+    Every CLI entry point calls this once, before any search, so the
+    real error surfaces immediately with the offending path in the
+    message. Raises the underlying exception unchanged
+    (FileNotFoundError / ValueError / RuntimeError / parser errors).
+    """
+    # (a) Quality-constants override pack: load once; propagates
+    # FileNotFoundError, YAML/JSON parse errors, and non-mapping roots.
+    load_quality_constants()
+    # (b) Hardware spec dir override: the throughput model reads specs
+    # lazily per candidate, so validate the directory (and, when the
+    # caller names the target, the actual spec file) up front.
+    spec_dir = os.environ.get("AC_HARDWARE_SPEC_DIR")
+    if spec_dir is not None:
+        if not os.path.isdir(spec_dir):
+            raise FileNotFoundError(
+                f"AC_HARDWARE_SPEC_DIR does not exist or is not a "
+                f"directory: {spec_dir}"
+            )
+        if hardware:
+            try:
+                from .throughput_model import load_hardware  # type: ignore
+            except ImportError:  # flat-layout bootstrap
+                from throughput_model import load_hardware
+            try:
+                load_hardware(str(hardware))
+            except ValueError:
+                # Unknown hardware short-name: not an environment
+                # problem — leave it to the CLI's own arg validation.
+                pass
+
+
+def run_noise_floor_pct(path: Optional[str] = None) -> float:
+    """Single source of truth for the paired run-noise floor (Wave 20,
+    feedback #5).
+
+    The ladder planner (`ladder_plan`) and the greenfield picker
+    (`cli_compile` pick rationale) must agree on the smallest quality
+    delta a real paired run can resolve; previously each codified ~0.5%
+    independently and could drift apart. 2 × this value is the standard
+    "unresolvable" bound (z=2).
+    """
+    consts = load_quality_constants(path)
+    return float(consts.get("paired_decision", {})
+                 .get("run_noise_floor_pct", 0.25))
 
 
 def _deepcopy_dict(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -962,6 +1272,230 @@ def _data_quality_filter(training: TrainingConfig, constants: Dict[str, Any]) ->
     else:
         warnings.append(f"Unknown data-quality mode {mode!r}; ignored.")
     return d_eff, term, warnings
+
+
+def _resolve_quality_model_version(
+    training: TrainingConfig,
+    constants: Dict[str, Any],
+) -> str:
+    requested = (
+        training.quality_model_version
+        or os.environ.get("AC_QUALITY_MODEL_VERSION")
+        or constants.get("model", {}).get("version")
+        or QUALITY_MODEL_EFFECTIVE_V2
+    )
+    aliases = {
+        "effective": QUALITY_MODEL_EFFECTIVE_V2,
+        "effective_v2": QUALITY_MODEL_EFFECTIVE_V2,
+        "v2": QUALITY_MODEL_EFFECTIVE_V2,
+        "legacy": QUALITY_MODEL_LEGACY_V1,
+        "legacy_v1": QUALITY_MODEL_LEGACY_V1,
+        "v1": QUALITY_MODEL_LEGACY_V1,
+    }
+    version = aliases.get(str(requested).strip().lower(), str(requested).strip())
+    if version not in SUPPORTED_QUALITY_MODEL_VERSIONS:
+        raise ValueError(
+            f"Unknown quality model version {requested!r}; expected one of "
+            f"{sorted(SUPPORTED_QUALITY_MODEL_VERSIONS)}"
+        )
+    return version
+
+
+def _effective_data_transform(
+    training: TrainingConfig,
+    raw_tokens: int,
+    constants: Dict[str, Any],
+) -> Tuple[int, TermResult]:
+    """Return discounted token exposures and an auditable transform term.
+
+    ``unique_tokens`` is optional. Omitting it is an explicit assertion that
+    all token exposures are unique for this analytical scenario, so D_eff=D.
+    """
+    cfg = constants.get("effective_data", {})
+    if not cfg.get("enabled", True):
+        return raw_tokens, TermResult(
+            name="effective_data",
+            confidence="not_applicable",
+            source="disabled",
+        )
+
+    d_raw = max(1, int(raw_tokens))
+    supplied_unique = training.unique_tokens is not None
+    unique = max(1, min(d_raw, int(training.unique_tokens or d_raw)))
+    repeats = max(0.0, d_raw / unique - 1.0)
+    half_life = max(1e-6, float(cfg.get("repeat_half_life_epochs", 4.0)))
+    if repeats <= 0:
+        d_effective = float(unique)
+    else:
+        d_effective = unique * (
+            1.0 + half_life * (1.0 - math.exp(-repeats / half_life))
+        )
+    d_effective_i = max(1, min(d_raw, int(round(d_effective))))
+    uncertainty = 0.0 if repeats <= 0 else (
+        float(cfg.get("uncertainty", 0.40))
+        * abs(1.0 - d_effective_i / d_raw)
+    )
+    notes = [
+        "Repeated token exposures are discounted with a saturating effective-data transform."
+    ]
+    if not supplied_unique:
+        notes.append(
+            "unique_tokens was not supplied; AC assumes all token exposures are unique."
+        )
+    return d_effective_i, TermResult(
+        name="effective_data",
+        value=0.0,
+        delta=0.0,
+        uncertainty=uncertainty,
+        confidence="low" if repeats > 0 else "medium",
+        source=cfg.get("source", "effective_data"),
+        notes=notes,
+        features={
+            "raw_tokens": d_raw,
+            "unique_tokens": unique,
+            "repeat_count": repeats,
+            "repeat_half_life_epochs": half_life,
+            "effective_tokens_unscaled": d_effective_i,
+            "data_multiplier": float(cfg.get("data_multiplier", 1.0)),
+            "unique_tokens_supplied": supplied_unique,
+        },
+    )
+
+
+def _effective_capacity_transform(
+    arch: ArchConfig,
+    n_active_non_embedding: int,
+    effective_tokens: int,
+    constants: Dict[str, Any],
+) -> Tuple[int, TermResult]:
+    """Map active/total sparse capacity onto a bounded effective N.
+
+    Dense models recover N_eff=N_active exactly. For MoE, inactive capacity
+    contributes with an elasticity that is attenuated when token exposure per
+    total parameter is low. The coefficient is a calibration hook, not a
+    claimed universal constant.
+    """
+    cfg = constants.get("effective_capacity", {})
+    n_active = max(1, int(n_active_non_embedding))
+    n_total = max(n_active, int(arch.n_total_non_embedding_params))
+    if not cfg.get("enabled", True) or not arch._moe_enabled or n_total <= n_active:
+        return n_active, TermResult(
+            name="effective_capacity",
+            confidence="not_applicable" if not arch._moe_enabled else "medium",
+            source="dense_identity" if not arch._moe_enabled else "disabled",
+            features={
+                "N_active_non_embedding": n_active,
+                "N_total_non_embedding": n_total,
+                "N_effective_non_embedding": n_active,
+                "capacity_ratio": n_total / n_active,
+            },
+        )
+
+    ratio = max(1.0, n_total / n_active)
+    tokens_per_total_param = effective_tokens / max(1.0, n_total)
+    half_saturation = max(
+        1e-9,
+        float(cfg.get("tokens_per_total_param_half_saturation", 20.0)),
+    )
+    data_utilization = tokens_per_total_param / (
+        tokens_per_total_param + half_saturation
+    )
+    elasticity = max(0.0, float(cfg.get("capacity_elasticity", 0.25)))
+    # Signed exponent, centered at the parity utilization (Wave 18h).
+    # utilization > parity  -> N_eff > N_active (sparse capacity pays off)
+    # utilization < parity  -> N_eff < N_active (experts under-trained;
+    #                          MoE is a net loss vs equal-active dense)
+    # The previous form (exponent = elasticity * utilization) could only
+    # attenuate the bonus toward zero, never below — which made MoE a free
+    # win at ANY token budget and silently broke the documented 2T -> 20T
+    # dense->MoE flip.
+    parity = min(0.99, max(0.0, float(cfg.get("data_utilization_parity", 0.5))))
+    exponent = elasticity * (data_utilization - parity)
+    n_effective = int(round(n_active * (ratio ** exponent)))
+    # Bound: never below half the active path (routing tax saturates), never
+    # above the total physical capacity.
+    n_effective = max(int(0.5 * n_active), min(n_total, n_effective))
+    fractional_gain = n_effective / n_active - 1.0
+    return n_effective, TermResult(
+        name="effective_capacity",
+        value=0.0,
+        delta=0.0,
+        uncertainty=float(cfg.get("uncertainty", 0.50)) * abs(fractional_gain),
+        confidence="low",
+        source=cfg.get("source", "effective_capacity"),
+        notes=[
+            "MoE inactive capacity enters through N_effective; the legacy "
+            "fractional MoE capacity bonus is disabled in this model version.",
+            "Signed around data_utilization_parity: below ~"
+            f"{half_saturation:g} tokens per total parameter the sparse "
+            "capacity is under-trained and N_eff < N_active (net penalty).",
+            "Capacity elasticity, parity, and data saturation are "
+            "uncalibrated defaults intended for AC auto-calibration overlays.",
+        ],
+        features={
+            "N_active_non_embedding": n_active,
+            "N_total_non_embedding": n_total,
+            "N_effective_non_embedding": n_effective,
+            "capacity_ratio": ratio,
+            "tokens_per_total_param": tokens_per_total_param,
+            "tokens_per_total_param_half_saturation": half_saturation,
+            "data_utilization": data_utilization,
+            "data_utilization_parity": parity,
+            "capacity_elasticity": elasticity,
+            "capacity_multiplier": float(cfg.get("capacity_multiplier", 1.0)),
+        },
+    )
+
+
+def _vocab_residual(
+    arch: ArchConfig,
+    baseline_loss: float,
+    constants: Dict[str, Any],
+) -> TermResult:
+    """One-sided undersized-vocabulary penalty (Wave 18h).
+
+    See the `vocab_residual` block in DEFAULT_QUALITY_CONSTANTS for the
+    rationale and sources. Oversized vocabs are NOT penalized here — the
+    spine already charges them through displaced non-embedding params.
+    """
+    cfg = constants.get("vocab_residual", {})
+    if not cfg.get("enabled", True):
+        return TermResult(name="vocab_residual", confidence="not_applicable",
+                          source="disabled")
+    vocab = max(1, int(arch.vocab_size))
+    n_nv = max(1, int(arch.n_active_non_embedding_params))
+    v_ref = float(cfg.get("v_opt_ref", 128256))
+    n_ref = max(1.0, float(cfg.get("n_ref", 7.0e9)))
+    expo = float(cfg.get("v_opt_exponent", 0.30))
+    v_opt = v_ref * ((n_nv / n_ref) ** expo)
+    v_opt = min(float(cfg.get("v_opt_max", 512000)),
+                max(float(cfg.get("v_opt_min", 32000)), v_opt))
+    if vocab >= v_opt:
+        return TermResult(
+            name="vocab_residual", value=0.0, delta=0.0, uncertainty=0.0,
+            confidence="low",
+            source=cfg.get("source", "vocab_residual"),
+            features={"vocab_size": vocab, "v_opt": int(v_opt)},
+        )
+    weight = float(cfg.get("weight", 0.004))
+    cap = float(cfg.get("cap", 0.015))
+    value = min(cap, weight * (math.log(v_opt / vocab) ** 2))
+    return TermResult(
+        name="vocab_residual",
+        value=value,
+        delta=value * baseline_loss,
+        uncertainty=float(cfg.get("uncertainty", 0.60)) * value,
+        confidence="low",
+        source=cfg.get("source", "vocab_residual"),
+        notes=[
+            f"Vocabulary {vocab} is below the structural prior optimum "
+            f"~{int(v_opt)} for {n_nv/1e9:.1f}B non-embedding params; "
+            "undersized tokenizers waste data efficiency (Tao et al. 2024). "
+            "LOW CONFIDENCE prior — cross-tokenizer per-token loss is not "
+            "strictly commensurable.",
+        ],
+        features={"vocab_size": vocab, "v_opt": int(v_opt)},
+    )
 
 
 def _large_shape_stability_prior(
@@ -1257,18 +1791,59 @@ def _architecture_residual(
     # a ~0.5%–2% perplexity hit when workload_context grows past the
     # window, calibrated against window=4k at contexts 8k–32k.
     local_window = float(getattr(arch, "local_window", 0) or 0)
+    # Wave 18g: local:global interleave. `local_attention_fraction` is the
+    # fraction of attention layers that are sliding-window; the rest are
+    # global and see the full context. Semantics:
+    #   fraction = 1 (or unset with local_window > 0): legacy whole-model
+    #     SWA — attention capacity is capped at the window and the full
+    #     locality penalty applies (Mistral-v0.1-style).
+    #   0 < fraction < 1: global layers preserve full-context capacity, so
+    #     effective_attn_ctx stays at the workload context. The locality
+    #     penalty is scaled by the local fraction AND gated by global
+    #     presence: published interleaves (GPT-OSS and Gemma-2 at 1:1,
+    #     Llama-4 at 3:1, character.ai-style at 7:1 with cross-layer KV)
+    #     show long-context parity as long as global layers appear at
+    #     >= ~1:8, i.e. global_frac >= 0.125 — the same floor the hybrid
+    #     state family uses for recall. Below that floor the penalty ramps
+    #     back in linearly.
+    local_attn_fraction = getattr(arch, "local_attention_fraction", None)
+    if local_attn_fraction is None:
+        local_attn_fraction = 1.0 if local_window > 0 else 0.0
+    local_attn_fraction = max(0.0, min(1.0, float(local_attn_fraction)))
+    global_attn_fraction = 1.0 - local_attn_fraction
     effective_attn_ctx = workload_context
-    if local_window > 0:
+    if local_window > 0 and local_attn_fraction >= 1.0:
         effective_attn_ctx = min(workload_context, local_window)
     f_attention_swa_locality = 0.0
-    if local_window > 0 and workload_context > local_window and attention_fraction > 0:
+    if (local_window > 0 and workload_context > local_window
+            and attention_fraction > 0 and local_attn_fraction > 0):
         # weight × attention_fraction × log(ctx / window)
         # weight 0.008 reproduces Mistral's published ~0.55% PPL hit at
         # 8k context with window=4k (log2 ≈ 0.69 × 0.008 = 0.55%).
         swa_locality_weight = float(weights.get("attn_swa_locality", 0.008))
+        global_floor = float(cfg.get("local_global_recall_floor", 0.125))
+        # Wave 18h: shallow slope instead of a hard-zero plateau. The old
+        # gate was exactly 0 anywhere in the parity region (global_frac >=
+        # floor), which made locality FREE up to the cliff edge — so the
+        # optimizer always rode the boundary (max locality, min window) with
+        # zero modeled cost. Published interleaves show near-parity, not
+        # exact parity, and a cost-free axis is systematically exploited by
+        # any argmin. Keep a small residual fraction of the penalty at the
+        # floor (default 10%) that keeps decaying as global presence grows:
+        #   global_frac <  floor: ramp 1.0 -> parity_residual (linear)
+        #   global_frac >= floor: parity_residual * sqrt(floor/global_frac)
+        # Continuous at the floor; monotone in both ratio and window.
+        parity_residual = float(cfg.get("local_global_parity_residual", 0.10))
+        gf = max(1e-6, global_attn_fraction)
+        if gf < global_floor:
+            global_gate = 1.0 - (1.0 - parity_residual) * (gf / max(1e-6, global_floor))
+        else:
+            global_gate = parity_residual * math.sqrt(global_floor / gf)
         f_attention_swa_locality = (
             swa_locality_weight
             * attention_fraction
+            * local_attn_fraction
+            * (global_gate if local_attn_fraction < 1.0 else 1.0)
             * math.log(workload_context / max(local_window, 1.0))
         )
     if effective_attn_ctx > attn_lc_ref_ctx and attention_fraction > 0:
@@ -1325,11 +1900,35 @@ def _architecture_residual(
         # path / older deltas). New emitter always populates them.
         per_head_mla = (d_nope_mla + d_rope_mla) if (d_nope_mla + d_rope_mla) > 0 else float(d_head)
         c_ref = 4.0 * per_head_mla
+        f_attention_mla_compression = 0.0
         if c_kv < c_ref:
-            f_attention_mla = (
+            f_attention_mla_compression = (
                 float(weights.get("mla_compression", 0.004))
                 * math.log(c_ref / max(1.0, c_kv))
             )
+
+        # v1-fix MLA short-ctx audit (Jun 2026): the compression penalty
+        # alone is small (~0.16% at c_kv=512), but MLA's *benefit* — KV
+        # cache reduction — only materializes when the KV cache is large
+        # enough to bind on memory or bandwidth. At short context (8k-32k)
+        # KV is tiny (~32 MB at 1B/8k), the compression buys nothing, and
+        # the model still pays the latent projection's compute + the
+        # compression-quality cost. In production nobody runs MLA at 8k
+        # because GQA is strictly better there. Bake that into the
+        # quality model: scale the MLA penalty by a "context-payoff"
+        # multiplier that's large at short ctx and decays to 1.0 at
+        # frontier-context (≥128k where DeepSeek-V2/V3 actually deploy MLA).
+        # Reference context = 128k. At 8k the multiplier is ~4.5×; at
+        # 128k it's 1×.
+        mla_ctx_ref = float(cfg.get("mla_payoff_ref_ctx", 131072.0))
+        if workload_context > 0 and workload_context < mla_ctx_ref:
+            ctx_ratio = workload_context / mla_ctx_ref
+            # log-scale multiplier — same shape as the long-ctx term but
+            # in the opposite direction.
+            short_ctx_mult = 1.0 + 2.5 * math.log(mla_ctx_ref / workload_context)
+        else:
+            short_ctx_mult = 1.0
+        f_attention_mla = f_attention_mla_compression * short_ctx_mult
 
     # v1-fix NSA: small quality penalty for Native Sparse Attention.
     # DeepSeek 2025 reports near-parity vs full attention at L=64k with
@@ -1353,6 +1952,58 @@ def _architecture_residual(
                 * math.log(ref_coverage / coverage)
             )
 
+    # Wave 9 (Jun 2026): compressed-attention variants. All three are
+    # LOW-CONFIDENCE — no public training-time ablation data at frontier
+    # scale. Calibration constants per `architecture_residual.weights`
+    # documented above. See plan/redesign/09-compressed-attention-coverage.md.
+    workload_ctx_w9 = float((workload_spec or {}).get("context_length", 65536))
+
+    f_attention_csa = 0.0
+    if arch.attention_type == "csa":
+        # CSA: KV stored per compressed block; query attends top_k_blocks.
+        # Compression ratio ≈ block_size / top_k_blocks. Penalty grows with
+        # log(ratio): the more aggressive the compression, the bigger the
+        # quality cost. Anchored at DeepSeek-V4's reported ~0.5% delta at
+        # ~10× compression.
+        csa_block = float(getattr(arch, "csa_block_size", 0) or 0)
+        csa_top_k = float(getattr(arch, "csa_top_k_blocks", 0) or 0)
+        if csa_block > 0 and csa_top_k > 0:
+            comp_ratio = max(1.0, csa_block / max(1.0, csa_top_k))
+            f_attention_csa = (
+                float(weights.get("csa_compression", 0.005))
+                * math.log(comp_ratio)
+            )
+
+    f_attention_indexshare = 0.0
+    if arch.attention_type == "indexshare":
+        # IndexShare: coverage = top_k_buckets / num_buckets. Penalty grows
+        # log(1 / coverage) as coverage shrinks (more buckets missed per query).
+        num_b = float(getattr(arch, "indexshare_num_buckets", 0) or 0)
+        top_k_b = float(getattr(arch, "indexshare_top_k_buckets", 0) or 0)
+        if num_b > 0 and top_k_b > 0 and top_k_b < num_b:
+            coverage = top_k_b / num_b
+            f_attention_indexshare = (
+                float(weights.get("indexshare_coverage", 0.006))
+                * math.log(1.0 / coverage)
+            )
+
+    f_attention_msa = 0.0
+    if arch.attention_type == "msa":
+        # MSA: effective coverage = (window + dilated_top_k + global_top_k) / ctx.
+        # Penalty if coverage falls below 0.02 (2% of ctx): below that the
+        # mixture can't preserve recall on long-range dependencies.
+        win = float(getattr(arch, "msa_window_size", 0) or 0)
+        dil = float(getattr(arch, "msa_dilated_top_k", 0) or 0)
+        glob = float(getattr(arch, "msa_global_top_k", 0) or 0)
+        if workload_ctx_w9 > 0:
+            coverage_msa = (win + dil + glob) / workload_ctx_w9
+            ref_msa = 0.02
+            if coverage_msa < ref_msa and coverage_msa > 0:
+                f_attention_msa = (
+                    float(weights.get("msa_pattern_coverage", 0.005))
+                    * math.log(ref_msa / coverage_msa)
+                )
+
     # v1-fix demo-audit (June 2026 follow-up): MLA / NSA candidates were
     # paying MHA-style GQA penalties because the enumerator emits them with
     # n_kv_heads = n_heads as a carrier value (later zeroed in the JSON
@@ -1368,7 +2019,11 @@ def _architecture_residual(
     # Short-circuit those subterms when attention_type is not "full" and
     # let f_attention_mla / f_attention_nsa carry the architecture residual,
     # calibrated against DeepSeek-V2/V3 and DeepSeek-NSA-2025 ablations.
-    is_non_mha = (arch.attention_type in ("mla", "nsa"))
+    #
+    # Wave 9 (Jun 2026): same short-circuit applies to csa/indexshare/msa.
+    # They each use compressed/sparse KV reads; the per-head softmax
+    # penalty subterms don't apply.
+    is_non_mha = (arch.attention_type in ("mla", "nsa", "csa", "indexshare", "msa"))
     if is_non_mha:
         f_d_head = 0.0
         f_query_heads = 0.0
@@ -1379,8 +2034,8 @@ def _architecture_residual(
         # MHA long-context penalty still applies for MLA (it's still softmax
         # attention over the full token set, just with compressed K/V), but
         # NSA is explicitly a long-context construction and is charged via
-        # f_attention_nsa coverage instead.
-        if arch.attention_type == "nsa":
+        # f_attention_nsa coverage instead. Same for csa/indexshare/msa.
+        if arch.attention_type in ("nsa", "csa", "indexshare", "msa"):
             f_attention_long_context = 0.0
             f_attention_swa_locality = 0.0
 
@@ -1389,6 +2044,7 @@ def _architecture_residual(
         + f_gqa_sharing + f_attention_bottleneck + f_attn_kernel_underrun
         + f_attention_long_context + f_attention_mla + f_attention_nsa
         + f_attention_swa_locality
+        + f_attention_csa + f_attention_indexshare + f_attention_msa
     )
 
     # v1-fix YOCO: cross-layer KV sharing penalty. Microsoft 2024 paper
@@ -1460,6 +2116,9 @@ def _architecture_residual(
             "attention_long_context": round(f_attention_long_context, 6),
             # v1-fix MLA: small compression-quality penalty when c_kv < 4·d_head.
             "attention_mla": round(f_attention_mla, 6),
+            "attention_csa": round(f_attention_csa, 6),
+            "attention_indexshare": round(f_attention_indexshare, 6),
+            "attention_msa": round(f_attention_msa, 6),
             # v1-fix NSA: under-coverage penalty when (top_k × bs + window) / L < 0.05.
             "attention_nsa": round(f_attention_nsa, 6),
             # SWA locality: positive residual when workload context exceeds
@@ -1567,8 +2226,11 @@ def _precision_residual(
     infeasible = False
     notes = []
 
-    # KV cache precision: use the configurable v1 table for modeled quality
-    # cost, but keep the legacy table as a hardware-feasibility oracle.
+    # KV cache precision: Wave 10B — hw-conditional FEASIBILITY check via
+    # `kv_quant_penalty` (returns None if unsupported); hw-blind QUALITY
+    # via the v1 component table (component=kv_cache, policy=kv_policy).
+    # The historic 0.020 on TPU is folded into a feasibility-confidence
+    # caveat instead of a hw-dependent quality delta.
     kv_feasible = kv_quant_penalty(
         training.kv_quantization_bits,
         training.kv_per_channel_scaling,
@@ -1585,21 +2247,23 @@ def _precision_residual(
         "quality_v1 precision_sensitivity.kv_cache; Hooper et al. (2024) KIVI for feasibility",
         caveat=f"risk={kv_risk}; v1 table is placeholder-calibrated",
         confidence="medium" if kv_value > 0 else "high",
-        hardware_dependent=True,
+        hardware_dependent=False,  # Wave 10B: kv_value is hw-blind now
     )
     total += kv_value
     uncertainty_sq += kv_unc ** 2
 
-    # Weight precision: model high-level components once instead of summing
-    # every projection independently.
+    # Weight precision: Wave 10B — feasibility-only check on the hw axis;
+    # the per-component table lookup below is hw-blind by construction.
     components = ["ffn_up", "ffn_down", "qkv_proj", "output_proj", "output_head", "embedding"]
     if arch.ffn_type == "swiglu":
         components.append("ffn_gate")
 
     for comp in components:
         prec = arch.get_precision(comp)
-        wp = weight_precision_penalty(comp, prec, hw)
-        if wp is None:
+        # Wave 21: weights need STORAGE feasibility only (weight-only quant
+        # dequantizes to a native compute type; e.g. mxfp4 GPT-OSS experts
+        # on H100). Native-compute support is required for activations.
+        if not weight_storage_supported(prec, hw):
             infeasible = True
             warnings.append(f"Weight precision {prec} for {comp} is not available on {hw}.")
 
@@ -1624,12 +2288,13 @@ def _precision_residual(
         if v > 0:
             notes.append(f"{component}={prec} risk={risk}")
 
-    # Embedding sensitivity is still borrowed from the legacy table until the
-    # v1 table has an explicit embedding row.
-    emb_legacy = weight_precision_penalty("embedding", embed_prec, hw)
-    if emb_legacy is None:
+    # Embedding sensitivity: Wave 10B — hw-blind quality lookup; hw-
+    # conditional feasibility via precision_supported().
+    if not weight_storage_supported(embed_prec, hw):  # Wave 21: storage check
         infeasible = True
         emb_legacy = INFEASIBLE
+    else:
+        emb_legacy = weight_precision_quality("embedding", embed_prec)
     weight_total += emb_legacy
     if embed_prec in ("fp4", "int4"):
         fp4_seen = True
@@ -1648,14 +2313,14 @@ def _precision_residual(
 
     act_prec = arch.activation_precision
     if act_prec not in ("bf16", "fp16"):
-        act_attn = activation_precision_penalty("attention", act_prec, hw)
-        act_ffn = activation_precision_penalty("ffn", act_prec, hw)
-        if act_attn is None or act_ffn is None:
+        # Wave 10B: feasibility check on hw; quality lookup is hw-blind.
+        if not precision_supported(act_prec, hw):
             act_total = INFEASIBLE
             infeasible = True
             warnings.append(f"Activation precision {act_prec} is not available on {hw}.")
         else:
-            act_total = act_attn + act_ffn
+            act_total = (activation_precision_quality("attention", act_prec)
+                         + activation_precision_quality("ffn", act_prec))
     else:
         act_total = 0.0
 
@@ -1664,7 +2329,7 @@ def _precision_residual(
         "Peng et al. (2023) FP8-LM",
         caveat="Activations recomputed each pass; smaller than weight penalties",
         confidence="medium" if act_total > 0 else "high",
-        hardware_dependent=True,
+        hardware_dependent=False,  # Wave 10B: act_total is hw-blind now
     )
     total += act_total
 
@@ -1693,6 +2358,8 @@ def _moe_residual(
     training: TrainingConfig,
     baseline_loss: float,
     constants: Dict[str, Any],
+    *,
+    include_capacity_bonus: bool = True,
 ) -> TermResult:
     """MoE-residual sub-terms (all relative to baseline L(N_active, D)):
 
@@ -1770,11 +2437,13 @@ def _moe_residual(
         effective_log = math.log(raw_ratio)
     else:
         effective_log = math.log(cap_ratio) + 0.5 * math.log(raw_ratio / cap_ratio)
-    capacity_bonus = (
-        -float(weights.get("capacity", 0.0))
-        * effective_log
-        * moe_layer_fraction
-    )
+    capacity_bonus = 0.0
+    if include_capacity_bonus:
+        capacity_bonus = (
+            -float(weights.get("capacity", 0.0))
+            * effective_log
+            * moe_layer_fraction
+        )
     # Granularity: negative weight × positive log-ratio = bonus above ref_g;
     # capped at 0 when granularity <= ref_g (no benefit for coarse).
     granularity_bonus = float(weights.get("granularity", 0.0)) * max(
@@ -1811,6 +2480,11 @@ def _moe_residual(
         "MoE residual: Krajewski sparse-capacity bonus + small top_k/router/shared sub-terms; "
         "still high-uncertainty without measured ablation profiles."
     ]
+    if not include_capacity_bonus:
+        notes[0] = (
+            "MoE routing/stability residual only; sparse capacity is represented "
+            "by the effective-capacity scaling spine."
+        )
     if n_experts >= 128 and "load_balance_prior" not in moe:
         notes.append("Very high expert count without measured load-balance prior.")
     if expert_activation_ratio < 0.02:
@@ -1855,6 +2529,7 @@ def _moe_residual(
             "load_balance_prior": load_balance,
             "granularity": granularity,
             "subterms": sub_features,
+            "capacity_bonus_included": include_capacity_bonus,
         },
     )
 
@@ -1988,6 +2663,8 @@ def _state_residual(
     workload_spec: Optional[Dict[str, Any]],
     baseline_loss: float,
     constants: Dict[str, Any],
+    *,
+    legacy_reference_floor: bool = False,
 ) -> TermResult:
     """State/hybrid quality residual — family-specific 5-term decomposition.
 
@@ -2027,8 +2704,11 @@ def _state_residual(
 
     p_low = float(family_cfg.get("p_low", 0.12))
     p_high = float(family_cfg.get("p_high", 0.28))
-    w_under = float(cfg.get("w_under", 0.08))
-    w_over = float(cfg.get("w_over", 0.04))
+    # v1-fix Wave 5: defaults updated per published hybrid ablation data
+    # (Jamba, NVIDIA Empirical Study, Samba). See state_residual block in
+    # the constants dict near load_quality_constants().
+    w_under = float(cfg.get("w_under", 0.05))
+    w_over = float(cfg.get("w_over", 0.03))
     w_recall = float(cfg.get("w_recall", 0.06))
     w_capacity = float(cfg.get("w_capacity", 0.02))
     w_kv_cost = float(cfg.get("w_kv_cost", 0.01))
@@ -2036,6 +2716,10 @@ def _state_residual(
     composition_scale = float(cfg.get("composition_scale", 0.01))
     d_state_ref = float(cfg.get("d_state_reference", 192))
     refresh_weight = float(cfg.get("refresh_factor_weight", 0.5))
+    # Wave 5: long-context state benefit constants.
+    state_lc_weight = float(cfg.get("state_long_context_weight", 0.030))
+    state_lc_ref_ctx = float(cfg.get("state_long_context_ref_ctx", 8192))
+    state_lc_sigmoid_scale = float(cfg.get("state_long_context_sigmoid_scale", 5.0))
 
     # =========================================================================
     # Term 1: f_hybrid_ratio — band-pass penalty
@@ -2047,25 +2731,38 @@ def _state_residual(
     # =========================================================================
     # Term 2: f_state_capacity — compression + composition
     # =========================================================================
+    # v1-fix Wave 5 (Jun 2026): replace the linear-in-context composition term
+    # (`composition *= context / 4096`) with a sub-linear scaling. The old
+    # formula crushed large-scale hybrids at long context (500B @ 2M paid
+    # +0.108 from state alone), contradicting NVIDIA's empirical hybrid+2.65
+    # result. We now use log2(ctx/4096) for the composition tax and keep the
+    # compression term unchanged.
     n_total = max(1, attention_layers + state_layers)
     state_fraction = state_layers / n_total
 
-    # Compression: effective_memory_horizon = d_state * n_state / context
+    # Compression: effective_memory_horizon = d_state * n_state / context.
+    # v1-fix Wave 5b (Jun 2026): the old form `1/horizon - 1` was hyperbolic
+    # — at ctx=1M with d_state=192 the compression term hit +3.4, which
+    # alone produced a state_residual.value ≈ +0.07 even before the band-pass
+    # term. That contradicted Samba (3.8B trained at 4K, clean 1M
+    # extrapolation) and the NVIDIA 8B hybrid result. Replace with a
+    # log-saturating form `log2(1/horizon + 1)` so the penalty grows
+    # logarithmically with the compression ratio instead of linearly.
     effective_memory_horizon = (d_state * state_layers) / max(1, context)
     if effective_memory_horizon >= 1.0:
         compression = 0.0
     else:
-        compression = compression_scale * (1.0 / effective_memory_horizon - 1.0)
+        compression = compression_scale * math.log2(1.0 / effective_memory_horizon + 1.0)
 
     # Attention-refresh modulation
     log2_ctx = math.log2(max(2.0, context))
     refresh_factor = min(1.0, attention_layers / log2_ctx)
     compression *= (1.0 - refresh_weight * refresh_factor)
 
-    # Composition: small mixing tax
+    # Composition: small mixing tax. Wave 5: log-of-ctx instead of linear.
     composition = composition_scale * state_fraction
     composition *= (d_state_ref / max(d_state, 64))
-    composition *= (context / 4096.0)
+    composition *= math.log2(max(2.0, context / 4096.0))
 
     f_state_capacity = w_capacity * (compression + composition)
 
@@ -2100,9 +2797,52 @@ def _state_residual(
     in_band = p_low <= p_attn <= p_high
     family_confidence = str(family_cfg.get("confidence", "medium"))
 
+    # =========================================================================
+    # Term 6: f_state_long_context_benefit — NEW in Wave 5 (Jun 2026)
+    # =========================================================================
+    # Empirical anchors:
+    #   Jamba (Lieber et al. 2024): hybrid at p_attn=0.125 is parity with
+    #     pure attention up to 256K ctx.
+    #   NVIDIA Empirical Study (Waleffe et al. 2024): 8B Mamba-2-Hybrid
+    #     (p_attn=0.07) beats 8B Transformer by 2.65pts on 12 tasks
+    #     including 128K-context evaluations (~1.5% loss reduction).
+    #   Samba (Ren et al. 2024): 3.8B Mamba+SWA trained at 4K extrapolates
+    #     to 1M with perfect retrieval.
+    # The benefit accrues to the state fraction (p_state = 1 - p_attn) and
+    # saturates with context (tanh of log2(ctx/ref) / scale). This term is
+    # ≤ 0 by construction — it only ever reduces loss. Set to 0 for pure
+    # attention (p_state = 0).
+    p_state = 1.0 - p_attn
+    # Legacy v1 used max(2, ratio), accidentally granting a state benefit at
+    # the reference context. Effective v2 uses max(1, ratio), so the benefit
+    # is exactly zero at and below the reference.
+    context_ratio_floor = 2.0 if legacy_reference_floor else 1.0
+    sigmoid_ctx = math.tanh(math.log2(max(context_ratio_floor, context / state_lc_ref_ctx))
+                            / max(1e-6, state_lc_sigmoid_scale))
+    # v1-fix Wave 18f (Jul 2026): gate the benefit on attention presence.
+    # Every anchor behind this term is a HYBRID — Jamba (p_attn=0.125),
+    # NVIDIA Mamba-2-Hybrid (p_attn≈0.07), Samba (Mamba + sliding-window
+    # attention, so effective p_attn > 0). None of them supports granting
+    # the benefit to a pure-state stack, yet the old linear-in-p_state form
+    # handed its MAXIMUM to p_attn=0 — while the countervailing band-pass
+    # and recall penalties are quadratic in gaps ≤ 0.14 and therefore
+    # capped at ~10^-3. Net effect: pure SSM (attention_layers=0) won 10/48
+    # cells of the 20T H100 matrix at ≥7B active, including 500B@32k —
+    # flatly contradicted by the same literature this term cites (Waleffe
+    # et al.: pure Mamba loses to both the hybrid AND the pure Transformer
+    # on MMLU/recall at 8B). The gate scales the benefit linearly below the
+    # lowest published anchor ratio (NVIDIA, p_attn≈0.07) and zeroes it at
+    # p_attn=0, so the published anchors keep their full measured benefit
+    # and only the unsupported extrapolation region is affected.
+    benefit_min_p_attn = float(cfg.get("state_benefit_min_p_attn", 0.07))
+    attention_presence = min(1.0, p_attn / max(1e-6, benefit_min_p_attn))
+    f_state_long_context_benefit = (
+        -state_lc_weight * p_state * sigmoid_ctx * attention_presence)
+
     # --- Total ---
-    raw = f_hybrid_ratio + f_state_capacity + f_kv_cost + f_recall_risk
-    min_delta = float(cfg.get("min_delta", -0.05))
+    raw = (f_hybrid_ratio + f_state_capacity + f_kv_cost + f_recall_risk
+           + f_state_long_context_benefit)
+    min_delta = float(cfg.get("min_delta", -0.10))   # Wave 5: loosened from -0.05
     max_delta = float(cfg.get("max_delta", 0.30))
     value = max(min_delta, min(max_delta, raw))
 
@@ -2125,8 +2865,9 @@ def _state_residual(
     notes = [
         f"Hybrid ratio modeled as {hybrid_family} family band-pass prior "
         f"(p_attn={p_attn:.3f}, band=[{p_low:.2f}, {p_high:.2f}]).",
-        f"5-term decomposition: ratio={f_hybrid_ratio:.4f} capacity={f_state_capacity:.4f} "
-        f"kv_cost={f_kv_cost:.4f} recall={f_recall_risk:.4f}.",
+        f"6-term decomposition: ratio={f_hybrid_ratio:.4f} capacity={f_state_capacity:.4f} "
+        f"kv_cost={f_kv_cost:.4f} recall={f_recall_risk:.4f} "
+        f"lc_benefit={f_state_long_context_benefit:.4f}.",
     ]
     if not in_band:
         notes.append(f"p_attn={p_attn:.3f} is outside preferred band — increased uncertainty.")
@@ -2156,6 +2897,7 @@ def _state_residual(
             "f_state_capacity": round(f_state_capacity, 6),
             "f_kv_cost": round(f_kv_cost, 6),
             "f_recall_risk": round(f_recall_risk, 6),
+            "f_state_long_context_benefit": round(f_state_long_context_benefit, 6),
             "kv_ratio": round(kv_ratio, 4),
             "task_type": task_type,
             "family_confidence": family_confidence,
@@ -2241,6 +2983,116 @@ def _apply_downstream_head(result: QualityResult, constants: Dict[str, Any], wor
     result.benchmark_notes.append("Downstream prediction is infrastructure only; do not treat it as benchmark accuracy.")
 
 
+def paired_loss_uncertainty(
+    qa: "QualityResult",
+    qb: "QualityResult",
+    constants: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Wave 18h — decision-relevant uncertainty of Δloss between two
+    candidates scored by the SAME quality model.
+
+    Shared errors cancel in the difference. Per term t with relative
+    uncertainties (sa, sb) and correlation rho(t):
+
+        sigma_pair(t)^2 = sa^2 + sb^2 - 2 * rho(t) * sa * sb
+
+    rho(t) comes from the ``paired_decision`` constants block:
+    identical operating point -> rho_identical (cancels to |sa-sb|),
+    same term at different operating points -> rho_same_term, term active
+    in one arm only -> rho_distinct. A run-noise floor (seed / data-order
+    variance of a real training run) is added in quadrature — no model can
+    resolve below what two runs of the same config would differ by.
+
+    Returns dict with:
+      sigma_rel        — relative paired sigma (fraction of loss)
+      sigma_abs        — absolute, scaled by the mean predicted loss
+      naive_rel        — the old independent-quadrature sigma, for contrast
+      cancelled_fraction — 1 - sigma_rel/naive_rel (how much pairing bought)
+      per_term         — {term: {sa, sb, rho, sigma_pair}}
+    """
+    consts = _deep_merge(load_quality_constants(), constants or {})
+    cfg = consts.get("paired_decision", {}) or {}
+    rho_identical = float(cfg.get("rho_identical", 1.0))
+    rho_same_term = float(cfg.get("rho_same_term", 0.9))
+    rho_distinct = float(cfg.get("rho_distinct", 0.0))
+    floor = float(cfg.get("run_noise_floor_pct", 0.25)) / 100.0
+    rtol = float(cfg.get("value_match_rtol", 1e-3))
+
+    ta = getattr(qa, "terms", {}) or {}
+    tb = getattr(qb, "terms", {}) or {}
+    names = set(ta) | set(tb)
+    var = 0.0
+    naive_var = 0.0
+    per_term: Dict[str, Any] = {}
+    for name in sorted(names):
+        a = ta.get(name)
+        b = tb.get(name)
+        sa = float(getattr(a, "uncertainty", 0.0) or 0.0) if a is not None else 0.0
+        sb = float(getattr(b, "uncertainty", 0.0) or 0.0) if b is not None else 0.0
+        if sa <= 0.0 and sb <= 0.0:
+            continue
+        if a is None or b is None:
+            rho = rho_distinct
+        elif name == "spine":
+            # The spine TermResult records value=0 (its contribution lives
+            # in the chinchilla baseline), so value distance is blind here.
+            # Ground the spine correlation in effective-parameter distance:
+            # the fitted (E, A, alpha) error is fully shared at equal N_eff
+            # and decorrelates with |ln(Na/Nb)| — exponent miscalibration
+            # is exactly a log-scale tilt. A 2x N_eff gap decays to
+            # rho_same_term; same N_eff cancels outright.
+            na = float(getattr(qa, "spine_effective_params", 0.0) or 0.0)
+            nb = float(getattr(qb, "spine_effective_params", 0.0) or 0.0)
+            if na > 0 and nb > 0:
+                d = abs(math.log(na / nb)) / math.log(2.0)
+                frac = min(1.0, d)
+                rho = rho_identical - (rho_identical - rho_same_term) * frac
+            else:
+                rho = rho_same_term
+        else:
+            va = float(getattr(a, "value", 0.0) or 0.0)
+            vb = float(getattr(b, "value", 0.0) or 0.0)
+            scale = max(abs(va), abs(vb), 1e-12)
+            same_value = abs(va - vb) <= rtol * scale
+            same_sigma = abs(sa - sb) <= rtol * max(sa, sb, 1e-12)
+            if same_value and same_sigma:
+                rho = rho_identical
+            else:
+                # Graded decorrelation: the shared fitted constants imply
+                # near-full correlation when the two arms sit at nearby
+                # operating points, decaying toward rho_same_term as the
+                # operating points separate (d_ref = 5% value difference
+                # reaches the floor).
+                d = abs(va - vb) / scale
+                d_ref = float(cfg.get("operating_point_d_ref", 0.05))
+                frac = min(1.0, d / max(1e-9, d_ref))
+                rho = rho_identical - (rho_identical - rho_same_term) * frac
+        pair_var = max(0.0, sa * sa + sb * sb - 2.0 * rho * sa * sb)
+        var += pair_var
+        naive_var += sa * sa + sb * sb
+        per_term[name] = {
+            "sa": round(sa, 6), "sb": round(sb, 6), "rho": rho,
+            "sigma_pair": round(pair_var ** 0.5, 6),
+        }
+
+    sigma_rel = (var + floor * floor) ** 0.5
+    naive_rel = (naive_var + floor * floor) ** 0.5
+    mean_loss = 0.5 * (
+        float(getattr(qa, "predicted_loss", 0.0) or 0.0)
+        + float(getattr(qb, "predicted_loss", 0.0) or 0.0)
+    )
+    return {
+        "enabled": bool(cfg.get("enabled", True)),
+        "sigma_rel": sigma_rel,
+        "sigma_abs": sigma_rel * mean_loss,
+        "naive_rel": naive_rel,
+        "cancelled_fraction": (
+            0.0 if naive_rel <= 0 else max(0.0, 1.0 - sigma_rel / naive_rel)),
+        "run_noise_floor_rel": floor,
+        "per_term": per_term,
+    }
+
+
 def estimate_quality(
     config: Any,
     training_spec: Any,
@@ -2254,12 +3106,107 @@ def estimate_quality(
     training = _coerce_training_config(training_spec)
     constants = _deep_merge(load_quality_constants(), constants or {})
 
-    d_eff, data_term, dq_warnings = _data_quality_filter(training, constants)
+    version = _resolve_quality_model_version(training, constants)
+    raw_tokens, data_term, dq_warnings = _data_quality_filter(training, constants)
     n_active = arch.n_active_params
     n_total = arch.n_total_params
     n_spine = arch.n_active_non_embedding_params
-    L_base = _chinchilla_loss_with_constants(n_spine, d_eff, constants)
-    in_regime, regime_notes = is_in_chinchilla_regime(n_spine, d_eff)
+
+    raw_L_base = _chinchilla_loss_with_constants(n_spine, raw_tokens, constants)
+    if version == QUALITY_MODEL_EFFECTIVE_V2:
+        d_eff, effective_data_term = _effective_data_transform(
+            training, raw_tokens, constants
+        )
+        n_effective_spine, effective_capacity_term = _effective_capacity_transform(
+            arch, n_spine, d_eff, constants
+        )
+        data_only_loss = _chinchilla_loss_with_constants(
+            n_spine, d_eff, constants
+        )
+        fully_effective_loss = _chinchilla_loss_with_constants(
+            n_effective_spine, d_eff, constants
+        )
+        data_delta = data_only_loss - raw_L_base
+        capacity_delta = fully_effective_loss - data_only_loss
+        data_multiplier = float(
+            constants.get("effective_data", {}).get("data_multiplier", 1.0)
+        )
+        capacity_multiplier = float(
+            constants.get("effective_capacity", {}).get(
+                "capacity_multiplier", 1.0
+            )
+        )
+        overfit_cfg = constants.get("effective_data", {})
+        repeats = float(effective_data_term.features.get("repeat_count", 0.0))
+        unique = max(
+            1.0, float(effective_data_term.features.get("unique_tokens", d_eff))
+        )
+        overfit_penalty = (
+            float(overfit_cfg.get("overfit_penalty_weight", 0.0))
+            * (repeats ** float(
+                overfit_cfg.get("overfit_repetition_exponent", 1.0)
+            ))
+            * ((n_effective_spine / unique) ** float(
+                overfit_cfg.get("overfit_capacity_exponent", 1.0)
+            ))
+        )
+        L_base = (
+            raw_L_base
+            + data_multiplier * data_delta
+            + capacity_multiplier * capacity_delta
+            + overfit_penalty
+        )
+        effective_data_term.delta = data_multiplier * data_delta + overfit_penalty
+        effective_data_term.value = effective_data_term.delta / max(
+            raw_L_base, 1e-12
+        )
+        effective_data_term.uncertainty = (
+            float(constants.get("effective_data", {}).get("uncertainty", 0.40))
+            * abs(effective_data_term.value)
+        )
+        effective_data_term.features.update({
+            "raw_spine_loss": raw_L_base,
+            "data_only_spine_loss": data_only_loss,
+            "unscaled_loss_delta": data_delta,
+            "scaled_loss_delta": data_multiplier * data_delta,
+            "overfit_penalty": overfit_penalty,
+        })
+        effective_capacity_term.delta = capacity_multiplier * capacity_delta
+        effective_capacity_term.value = effective_capacity_term.delta / max(
+            raw_L_base, 1e-12
+        )
+        effective_capacity_term.uncertainty = (
+            float(
+                constants.get("effective_capacity", {}).get(
+                    "uncertainty", 0.50
+                )
+            )
+            * abs(effective_capacity_term.value)
+        )
+        effective_capacity_term.features.update({
+            "data_only_spine_loss": data_only_loss,
+            "effective_spine_loss": fully_effective_loss,
+            "unscaled_loss_delta": capacity_delta,
+            "scaled_loss_delta": capacity_multiplier * capacity_delta,
+        })
+    else:
+        d_eff = raw_tokens
+        n_effective_spine = n_spine
+        L_base = raw_L_base
+        effective_data_term = TermResult(
+            name="effective_data",
+            confidence="not_applicable",
+            source="legacy_model_disabled",
+        )
+        effective_capacity_term = TermResult(
+            name="effective_capacity",
+            confidence="not_applicable",
+            source="legacy_model_disabled",
+        )
+
+    in_regime, regime_notes = is_in_chinchilla_regime(
+        n_effective_spine, d_eff
+    )
     spine_unc = float(constants.get("spine", {}).get(
         "uncertainty_in_regime" if in_regime else "uncertainty_out_of_regime",
         0.03 if in_regime else 0.08,
@@ -2269,9 +3216,19 @@ def estimate_quality(
         n_active_params=n_active,
         n_total_params=n_total,
         spine_active_params=n_spine,
+        spine_effective_params=n_effective_spine,
         training_tokens=d_eff,
+        raw_training_tokens=training.training_tokens,
+        unique_training_tokens=int(
+            effective_data_term.features.get("unique_tokens", raw_tokens)
+        ),
+        data_repetitions=float(
+            effective_data_term.features.get("repeat_count", 0.0)
+        ),
         chinchilla_baseline=L_base,
+        raw_chinchilla_baseline=raw_L_base,
         in_chinchilla_regime=in_regime,
+        quality_model_version=version,
     )
     result.confidence_notes.extend(regime_notes)
     result.warnings.extend(dq_warnings)
@@ -2283,17 +3240,30 @@ def estimate_quality(
         uncertainty=spine_unc,
         confidence="medium" if not in_regime else "high",
         source=constants.get("spine", {}).get("source", "spine"),
-        notes=["Scaling-law spine over active non-embedding compute proxy and effective training tokens."],
+        notes=[
+            "Scaling-law spine over effective non-embedding capacity and "
+            "effective training tokens."
+            if version == QUALITY_MODEL_EFFECTIVE_V2
+            else "Legacy scaling-law spine over active non-embedding parameters "
+                 "and raw/effective-token-multiplier training tokens."
+        ],
         features={
             "N_active": n_active,
             "M_active_non_embedding_proxy": n_spine,
+            "M_effective_non_embedding_proxy": n_effective_spine,
             "N_total": n_total,
+            "D_raw": raw_tokens,
             "D_effective": d_eff,
             "tokens_per_active_param": d_eff / max(1, n_spine),
+            "tokens_per_effective_param": d_eff / max(1, n_effective_spine),
             "L_inf": constants.get("spine", {}).get("E", CHINCHILLA_E),
+            "raw_spine_loss": raw_L_base,
+            "quality_model_version": version,
         },
     )
     result.terms["data_quality"] = data_term
+    result.terms["effective_data"] = effective_data_term
+    result.terms["effective_capacity"] = effective_capacity_term
 
     if training.overtraining_ratio is not None:
         result.terms["spine"].features["overtraining_ratio"] = training.overtraining_ratio
@@ -2306,9 +3276,18 @@ def estimate_quality(
     terms_for_residual = []
     penalties: Dict[str, PenaltyEntry] = {}
 
+    pretrain_workload = {
+        "context_length": max(1, int(training.sequence_length)),
+        "task_type": "general",
+    }
+    residual_workload = (
+        pretrain_workload
+        if version == QUALITY_MODEL_EFFECTIVE_V2
+        else workload_spec
+    )
     arch_term, arch_penalties = _architecture_residual(
         arch, n_spine, L_base, constants,
-        workload_spec=workload_spec,
+        workload_spec=residual_workload,
     )
     result.terms[arch_term.name] = arch_term
     terms_for_residual.append(arch_term)
@@ -2321,7 +3300,13 @@ def estimate_quality(
     result.warnings.extend(precision_warnings)
     result.confidence_notes.extend(precision_warnings)
 
-    moe_term = _moe_residual(arch, training, L_base, constants)
+    moe_term = _moe_residual(
+        arch,
+        training,
+        L_base,
+        constants,
+        include_capacity_bonus=(version == QUALITY_MODEL_LEGACY_V1),
+    )
     result.terms[moe_term.name] = moe_term
     if moe_term.confidence != "not_applicable":
         terms_for_residual.append(moe_term)
@@ -2331,7 +3316,13 @@ def estimate_quality(
             confidence=moe_term.confidence,
         )
 
-    state_term = _state_residual(arch, workload_spec, L_base, constants)
+    state_term = _state_residual(
+        arch,
+        residual_workload,
+        L_base,
+        constants,
+        legacy_reference_floor=(version == QUALITY_MODEL_LEGACY_V1),
+    )
     result.terms[state_term.name] = state_term
     if state_term.confidence != "not_applicable":
         terms_for_residual.append(state_term)
@@ -2339,6 +3330,122 @@ def estimate_quality(
             "state", state_term.value, state_term.source,
             caveat="High-uncertainty state/hybrid residual",
             confidence=state_term.confidence,
+        )
+
+    context_term = TermResult(
+        name="context_utility",
+        confidence="not_applicable",
+        source="disabled_or_legacy",
+    )
+    if version == QUALITY_MODEL_EFFECTIVE_V2 \
+            and constants.get("context_utility", {}).get("enabled", True):
+        actual_workload = dict(workload_spec or pretrain_workload)
+        actual_workload.setdefault("context_length", training.sequence_length)
+        traffic_mix = actual_workload.get("traffic_mix") or {}
+        task_map = {
+            "short_chat": "general",
+            "long_context": "long_context_retrieval",
+            "rag_prefill_heavy": "long_context_retrieval",
+            "coding_agent": "coding_agent",
+        }
+        weighted_workloads: List[Tuple[float, Dict[str, Any]]] = []
+        if isinstance(traffic_mix, dict):
+            positive = {
+                str(k): float(v) for k, v in traffic_mix.items()
+                if float(v) > 0
+            }
+            weight_total = sum(positive.values())
+            for label, weight in positive.items():
+                task_workload = dict(actual_workload)
+                task_workload["task_type"] = task_map.get(label, label)
+                if label == "short_chat":
+                    task_workload["context_length"] = min(
+                        int(task_workload.get(
+                            "context_length", training.sequence_length
+                        )),
+                        max(8192, int(training.sequence_length)),
+                    )
+                weighted_workloads.append(
+                    (weight / max(weight_total, 1e-12), task_workload)
+                )
+        if not weighted_workloads:
+            weighted_workloads = [(1.0, actual_workload)]
+
+        eval_arch_value = 0.0
+        eval_state_value = 0.0
+        eval_arch_uncertainty = 0.0
+        eval_state_uncertainty = 0.0
+        for weight, task_workload in weighted_workloads:
+            task_arch_term, _ = _architecture_residual(
+                arch,
+                n_spine,
+                L_base,
+                constants,
+                workload_spec=task_workload,
+            )
+            task_state_term = _state_residual(
+                arch,
+                task_workload,
+                L_base,
+                constants,
+                legacy_reference_floor=False,
+            )
+            eval_arch_value += weight * task_arch_term.value
+            eval_state_value += weight * task_state_term.value
+            eval_arch_uncertainty += (
+                weight * _term_uncertainty(task_arch_term)
+            ) ** 2
+            eval_state_uncertainty += (
+                weight * _term_uncertainty(task_state_term)
+            ) ** 2
+        eval_arch_uncertainty = math.sqrt(eval_arch_uncertainty)
+        eval_state_uncertainty = math.sqrt(eval_state_uncertainty)
+        arch_context_delta = eval_arch_value - arch_term.value
+        state_context_delta = eval_state_value - state_term.value
+        context_value = arch_context_delta + state_context_delta
+        context_cfg = constants.get("context_utility", {})
+        context_term = TermResult(
+            name="context_utility",
+            value=context_value,
+            delta=context_value * L_base,
+            uncertainty=max(
+                eval_arch_uncertainty,
+                eval_state_uncertainty,
+            ) * float(context_cfg.get("uncertainty", 0.50)),
+            confidence=(
+                "medium" if abs(context_value) > 0 else "high"
+            ),
+            source=context_cfg.get(
+                "source", "task_context_delta_relative_to_pretrain_context"
+            ),
+            notes=[
+                "Serving/task context is modeled as a delta relative to the "
+                "pretraining context; it no longer changes the pretraining spine."
+            ],
+            features={
+                "pretraining_context_length": int(training.sequence_length),
+                "evaluation_context_length": int(
+                    actual_workload.get("context_length", training.sequence_length)
+                ),
+                "task_type": str(actual_workload.get("task_type", "general")),
+                "traffic_mix": traffic_mix,
+                "architecture_context_delta": arch_context_delta,
+                "state_context_delta": state_context_delta,
+            },
+        )
+        result.terms["context_utility"] = context_term
+        terms_for_residual.append(context_term)
+
+    # Wave 18h: undersized-vocabulary structural prior (one-sided).
+    vocab_term = _vocab_residual(arch, L_base, constants)
+    result.terms[vocab_term.name] = vocab_term
+    if vocab_term.confidence != "not_applicable" and vocab_term.value > 0:
+        terms_for_residual.append(vocab_term)
+        penalties["vocab"] = _make_penalty_entry(
+            "vocab", vocab_term.value, vocab_term.source,
+            caveat="Low-confidence tokenizer-efficiency prior; cross-vocab "
+                   "per-token loss is not strictly commensurable",
+            confidence=vocab_term.confidence,
         )
 
     large_shape_term = _large_shape_stability_prior(arch, n_total, L_base)
@@ -2414,9 +3521,15 @@ def estimate_quality(
     penalties["feasibility"] = _make_penalty_entry("feasibility", fp, "Hard constraint")
 
     total_frac = sum(t.value for t in terms_for_residual)
+    pretraining_frac = sum(
+        t.value for t in terms_for_residual
+        if t.name != "context_utility"
+    )
     result.total_penalty_fraction = total_frac
     result.total_penalty_absolute = total_frac * L_base
+    result.pretraining_loss_proxy = L_base * (1 + pretraining_frac)
     result.predicted_loss = L_base * (1 + total_frac)
+    result.task_adjusted_loss_proxy = result.predicted_loss
     result.loss_proxy = result.predicted_loss
     result.penalty_breakdown = penalties
 
@@ -2454,6 +3567,9 @@ def estimate_quality(
         "precision": _term_uncertainty(precision_term),
         "moe": _term_uncertainty(moe_term),
         "state": _term_uncertainty(state_term),
+        "context_utility": _term_uncertainty(context_term),
+        "effective_capacity": _term_uncertainty(effective_capacity_term),
+        "effective_data": _term_uncertainty(effective_data_term),
         "large_shape": _term_uncertainty(large_shape_term),
         "risk": _term_uncertainty(risk_term),
         "data_quality": _term_uncertainty(data_term),
@@ -2494,12 +3610,16 @@ def quality(
     training: TrainingConfig,
     memory_fits: bool = True,
     lattice_aligned: bool = True,
+    workload_spec: Optional[Dict[str, Any]] = None,
 ) -> QualityResult:
     """Backward-compatible architecture-solver entry point."""
     return estimate_quality(
         arch,
         training,
-        workload_spec={"context_length": training.sequence_length},
+        workload_spec=(
+            workload_spec
+            or {"context_length": training.sequence_length}
+        ),
         memory_fits=memory_fits,
         lattice_aligned=lattice_aligned,
     )
@@ -2543,18 +3663,40 @@ def compare_quality(
 
 def explain_quality(result: QualityResult) -> str:
     """Return markdown-ready explanation of all quality terms."""
+    if result.quality_model_version == QUALITY_MODEL_EFFECTIVE_V2:
+        formula = (
+            "`L_pre = E + A/N_eff^alpha + B/D_eff^beta + residuals`; "
+            "`L_task = L_pre + context_utility`"
+        )
+        intro = (
+            "The default quality proxy uses effective sparse capacity and "
+            "discounted effective data. Serving context is reported as a "
+            "separate task-utility delta."
+        )
+    else:
+        formula = (
+            "`L_quality = L_spine(M_active_non_embedding,D) × "
+            "(1 + sum(residuals))`"
+        )
+        intro = (
+            "The selected legacy quality proxy uses the original active-parameter "
+            "spine and additive fractional residuals."
+        )
     lines = [
         "## Quality Proxy",
         "",
-        "The quality proxy uses a scaling-law spine over active non-embedding compute and training tokens, plus modular residuals for coupled architecture variables, precision, MoE, state/memory mechanisms, risk, and data quality.",
+        intro,
         "",
-        "`L_quality(A,D,H,P) = L_spine(M_active_non_embedding(A),D) + f_width_depth + f_mlp_attention_ratio + f_attention_heads + f_precision + f_moe + f_state_or_memory + f_risk`",
+        formula,
         "",
         "Query heads are treated as a weak width-derived prior, not as a monotonic quality law. KV heads are treated as a direct memory/latency tradeoff with uncertain GQA-sharing quality risk.",
         "",
+        f"- Model version: {result.quality_model_version}",
         f"- Loss proxy: {result.loss_proxy:.4f}",
+        f"- Pretraining loss proxy: {result.pretraining_loss_proxy:.4f}",
         f"- Spine baseline: {result.chinchilla_baseline:.4f}",
         f"- Spine active proxy: {result.spine_active_params/1e9:.3f}B active non-embedding params",
+        f"- Spine effective proxy: {result.spine_effective_params/1e9:.3f}B effective non-embedding params",
         f"- Residual total: {result.total_penalty_fraction * 100:.2f}%",
         f"- Uncertainty total: ±{result.uncertainty_total * 100:.2f}%",
         f"- Confidence: {result.confidence}",
@@ -2636,7 +3778,7 @@ KNOWN_ARCHITECTURES = {
 def evaluate_known(
     arch_name: str,
     hardware: str = "h100",
-    training_tokens: int = 2_000_000_000_000,  # 2T tokens
+    training_tokens: int = DEFAULT_TRAINING_TOKENS,
     weight_precision: str = "bf16",
     kv_bits: int = 16,
 ) -> QualityResult:
@@ -2675,7 +3817,7 @@ if __name__ == "__main__":
         print(f"{'='*70}")
 
         for name in KNOWN_ARCHITECTURES:
-            r = evaluate_known(name, hw, training_tokens=2_000_000_000_000)
+            r = evaluate_known(name, hw, training_tokens=DEFAULT_TRAINING_TOKENS)
             penalties_str = ", ".join(
                 f"{k}={v.value:.4f}" for k, v in r.penalty_breakdown.items()
                 if v.value > 0 and v.value < INFEASIBLE

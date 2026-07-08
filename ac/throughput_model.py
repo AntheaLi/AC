@@ -57,6 +57,11 @@ except ImportError:  # direct-script invocation: synthesize sibling import
         KNOWN_ARCHITECTURES,
     )
 
+try:
+    from .architecture import parameter_ledger  # type: ignore[no-redef]
+except ImportError:
+    from architecture import parameter_ledger  # type: ignore[no-redef]
+
 
 # =============================================================================
 # Data classes
@@ -108,7 +113,7 @@ class ArchConfig:
     # latent (c_kv) plus the RoPE'd key (d_rope), regardless of n_kv_heads.
     # This dramatically cuts decode KV bandwidth at long context. Quality
     # cost is captured by `attention_mla` in the architecture residual.
-    attention_type: str = "full"          # "full" | "mla" | "nsa"
+    attention_type: str = "full"          # "full" | "mla" | "nsa" | "csa" | "indexshare" | "msa"
     mla_kv_latent_dim: Optional[int] = None     # c_kv
     mla_q_latent_dim: Optional[int] = None      # c_q
     mla_rope_head_dim: Optional[int] = None     # d_rope
@@ -121,6 +126,26 @@ class ArchConfig:
     nsa_select_block_size: Optional[int] = None
     nsa_select_top_k: Optional[int] = None
     nsa_window_size: Optional[int] = None
+    # Wave 9 (Jun 2026): compressed-attention variants from 2025-2026 frontier.
+    # See plan/redesign/09-compressed-attention-coverage.md for full scope.
+    #
+    # CSA (Compressed Sparse Attention) — DeepSeek-V4. KV stored per
+    # compressed block; query attends top_k_blocks. KV reduction ≈
+    # block_size / top_k_blocks at long ctx.
+    csa_block_size: Optional[int] = None       # tokens per compressed block
+    csa_top_k_blocks: Optional[int] = None     # blocks attended per query
+    csa_compression_dim: Optional[int] = None  # per-block latent dim
+    # IndexShare — GLM-5.2 / MiniMax M3. Bucket-routed KV cache; query
+    # hashes to top_k_buckets. Constant-time decode at the cost of a
+    # bucket-routing step.
+    indexshare_num_buckets: Optional[int] = None
+    indexshare_top_k_buckets: Optional[int] = None
+    indexshare_index_dim: Optional[int] = None
+    # MSA (Mixture of Sparse Attention) — sum of (window + dilated + global).
+    # Each fraction is the share of attention heads using that pattern.
+    msa_window_size: Optional[int] = None        # local window tokens
+    msa_dilated_top_k: Optional[int] = None      # dilated heads top-k
+    msa_global_top_k: Optional[int] = None       # global heads top-k
 
     # v1-fix MTP: Multi-Token Prediction training overhead. Inference path
     # is unchanged (heads dropped); training path pays per-depth FLOPs.
@@ -136,6 +161,23 @@ class ArchConfig:
     cp_degree: int = 1                    # 1 = no CP
     cp_method: str = "ring"               # "ring" | "ulysses"
 
+    # v1-fix Wave 1 Step 1.4/1.5 (Jun 2026): pipeline schedule.
+    # "gpipe" — flush after every M_micro microbatches, queue depth = pp_degree.
+    # "1f1b" — interleave 1F1B, queue depth ≈ (pp_degree + 1) / 2, bubble ≈ 0.5 × GPipe.
+    # "interleaved" — Megatron interleaved 1F1B with `pp_virtual_stages` chunks,
+    #                  bubble ≈ GPipe / pp_virtual_stages.
+    pp_schedule: str = "1f1b"
+    pp_virtual_stages: int = 2
+    # Training execution plan. These are deliberately separate from serving
+    # batch and from pipeline microbatch count.
+    dp_degree: int = 1
+    training_micro_batch: int = 8
+    pipeline_microbatches: int = 1
+    serving_scheduler: str = "continuous"
+    serving_concurrency: int = 1
+    serving_output_len: int = 1
+    prefill_chunk_size: int = 65536
+
     # v1-fix 2:4 structured sparsity. Per-component flags driving the
     # tensor-core sparse path. NVIDIA H100/B200 give 2× matmul throughput
     # on 2:4-sparsified weights. Other vendors (TPU, Trainium) fall back
@@ -148,11 +190,51 @@ class ArchConfig:
     # bandwidth too (modulo the cross-attention read pattern).
     yoco_n_self_attn_layers: int = 0  # 0 = YOCO off
 
+    # Wave 18g (Jul 2026): per-layer attention heterogeneity — local:global
+    # interleave (GPT-OSS / Gemma-2 / Llama-4 pattern). `n_local_attn_layers`
+    # of the attention layers use sliding-window attention with
+    # `local_window`; the remainder are global (full/GQA or MLA, per
+    # `attention_type`). Local layers cap their KV cache and decode reads at
+    # the window and their prefill attention at S x W. Globals are spread
+    # evenly through the stack (periodic placement), matching published
+    # interleaves. `local_window` alone (without n_local_attn_layers) keeps
+    # its legacy meaning: every attention layer is windowed.
+    # NOTE: local_window was previously only ever set dynamically by the
+    # optimizer bridge (tput_arch.local_window = swa_window) — it was not a
+    # declared field, so any code path that read it on a freshly-constructed
+    # ArchConfig would AttributeError. Declared properly as of Wave 18g.
+    local_window: Optional[int] = None
+    n_local_attn_layers: int = 0
+
     def __post_init__(self):
         if self.layer_types is None:
             self.layer_types = ["attention"] * self.n_layers
         if self.layer_type_list is None:
-            self.layer_type_list = ["attention"] * self.n_layers
+            n_local = int(self.n_local_attn_layers or 0)
+            if 0 < n_local < self.n_layers:
+                # Even periodic spread of global layers through the stack.
+                n_global = self.n_layers - n_local
+                lst = []
+                acc = 0
+                for i in range(self.n_layers):
+                    nxt = (i + 1) * n_global // self.n_layers
+                    if nxt > acc:
+                        lst.append("attention")
+                        acc = nxt
+                    else:
+                        lst.append("local_attention")
+                self.layer_type_list = lst
+            elif n_local >= self.n_layers and self.n_layers > 0:
+                self.layer_type_list = ["local_attention"] * self.n_layers
+            else:
+                self.layer_type_list = ["attention"] * self.n_layers
+
+    def local_kv_len(self, full_len: int) -> int:
+        """Effective KV length of a local (sliding-window) attention layer."""
+        w = int(self.local_window or 0)
+        if w <= 0:
+            return int(full_len)
+        return int(min(full_len, w))
 
     def kv_bytes_per_token_per_layer(self, context_length: int = 0) -> int:
         """v1-fix MLA/NSA: per-token per-layer KV cache bytes.
@@ -202,6 +284,47 @@ class ArchConfig:
             # per_token × L = effective_tokens × per_kv_head_bytes_per_tok.
             per_kv_head = 2 * self.n_kv_heads * self.d_head * bpe
             return int(per_kv_head * effective_tokens / max(1, L))
+        if self.attention_type == "csa" and self.csa_top_k_blocks:
+            # Wave 9 CSA: KV stored at per-block compressed representation
+            # (compression_dim per block instead of block_size × d_head).
+            # Each query reads top_k_blocks compressed blocks.
+            # Per-token effective: (top_k_blocks × compression_dim) bytes,
+            # write-side reduced to (compression_dim / block_size) of dense.
+            block_size = int(self.csa_block_size or 64)
+            top_k = int(self.csa_top_k_blocks or 16)
+            comp_dim = int(self.csa_compression_dim or self.d_head)
+            # Effective per-token: amortize compression over block_size tokens.
+            # Read bandwidth = (top_k × comp_dim × 2) / block_size, weighted by
+            # n_kv_heads for shape parity with full attention.
+            per_kv_head_csa = 2 * self.n_kv_heads * comp_dim * bpe
+            return int(per_kv_head_csa * top_k / max(1, block_size))
+        if self.attention_type == "indexshare" and self.indexshare_top_k_buckets:
+            # Wave 9 IndexShare: KV stored per bucket; query routes to
+            # top_k_buckets. Effective per-token KV ≈ (top_k / num_buckets)
+            # of dense, plus a small constant for the index dim.
+            num_buckets = int(self.indexshare_num_buckets or 64)
+            top_k = int(self.indexshare_top_k_buckets or 4)
+            idx_dim = int(self.indexshare_index_dim or 64)
+            dense_per_token = 2 * self.n_kv_heads * self.d_head * bpe
+            # Top-K bucket coverage + per-token index lookup.
+            return int(dense_per_token * top_k / max(1, num_buckets)
+                       + 2 * idx_dim * bpe)
+        if self.attention_type == "msa":
+            # Wave 9 MSA: weighted sum of (window + dilated + global) sub-
+            # patterns. Each sub-pattern reads its own share of KV per
+            # query; we sum the per-token effective bytes across patterns.
+            L = int(context_length or 65536)
+            win = int(self.msa_window_size or 512)
+            dilated_k = int(self.msa_dilated_top_k or 64)
+            global_k = int(self.msa_global_top_k or 16)
+            # Window: read `win` per query — local always-paid.
+            window_share = win / max(1, L)
+            # Dilated + global: read top_k per query (sampled across L).
+            dilated_share = dilated_k / max(1, L)
+            global_share = global_k / max(1, L)
+            dense_per_token = 2 * self.n_kv_heads * self.d_head * bpe
+            effective_share = min(1.0, window_share + dilated_share + global_share)
+            return int(dense_per_token * effective_share)
         return int(2 * self.n_kv_heads * self.d_head * bpe)
 
 
@@ -228,6 +351,12 @@ class HardwareConfig:
     # 8 for DGX-H100/HGX-H100/DGX-B200, 72 for NVL72, 16 for TPU v5p single torus axis,
     # 8 for TPU v5e. Optional in JSON — falls back to family-based inference when absent.
     nvlink_domain_size: Optional[int] = None
+
+    # Wave 20 (feedback #2): vendor DATASHEET dense Tensor-Core peaks, for
+    # implied-MFU reporting only. On NVIDIA parts `peak_flops_tf` is the
+    # internal roofline baseline (~half of datasheet by convention); on
+    # TPU/Trainium the two coincide. The roofline model must NOT use this.
+    datasheet_peak_flops_tf: Optional[Dict[str, float]] = None
 
     # Calibration constants — account for real-world overheads not modeled analytically
     calibration: dict = field(default_factory=lambda: {
@@ -261,6 +390,7 @@ class HardwareConfig:
             gpus_per_node=d.get("gpus_per_node", d.get("chips_per_host", 8)),
             chips_per_host=d.get("chips_per_host", d.get("gpus_per_node", 4)),
             nvlink_domain_size=d.get("nvlink_domain_size"),
+            datasheet_peak_flops_tf=d.get("datasheet_peak_flops_tf"),
             calibration=calibration,
         )
 
@@ -272,16 +402,45 @@ class HardwareConfig:
         """Peak FLOPS in raw FLOPS (not teraflops)."""
         return self.peak_flops_tf.get(precision, self.peak_flops_tf.get("bf16", 0)) * 1e12
 
+    def datasheet_peak_flops_s(self, precision: str) -> float:
+        """Vendor datasheet dense peak in raw FLOPS — for implied-MFU
+        reporting only (Wave 20, feedback #2). Falls back to the internal
+        roofline baseline when the spec file lacks the field."""
+        table = self.datasheet_peak_flops_tf or self.peak_flops_tf
+        return table.get(precision, table.get("bf16", 0)) * 1e12
+
+    # Wave 21: canonical fallback byte widths. The per-spec JSON
+    # `bytes_per_element` tables are incomplete (h100_sxm.json has no
+    # mxfp4/mxfp6/int4 entries), and the old `.get(precision, 2)` fallback
+    # silently priced any missing narrow format as bf16-sized — so the
+    # SAME mxfp4 expert weights cost 0.53 B/elem in the memory estimator
+    # (module-level map) but 2 B/elem in the matmul/decode roofline
+    # (spec-table lookup). On the gpt-oss-120b anchor this inflated decode
+    # TBT by ~2.2x while memory read ~4x small: two panels, two physics.
+    # MX formats include the shared scale (1 byte / 32 elems).
+    _CANONICAL_BPE = {"bf16": 2, "fp16": 2, "fp32": 4, "tf32": 4,
+                      "fp8": 1, "int8": 1, "fp4": 0.5, "int4": 0.5,
+                      "mxfp4": 0.53, "mxfp6": 0.78}
+
     def bytes_per_elem(self, precision: str) -> float:
-        return self.bytes_per_element.get(precision, 2)
+        v = self.bytes_per_element.get(precision)
+        if v is not None:
+            return v
+        return self._CANONICAL_BPE.get(precision, 2)
 
     def interconnect_bw_bytes_s(self, tp_degree: int) -> float:
         """Effective interconnect bandwidth for TP all-reduce."""
         if tp_degree <= 1:
             return float("inf")
         ic = self.interconnect
-        per_node = self.gpus_per_node if self.vendor == "nvidia" else self.chips_per_host
-        if tp_degree <= per_node:
+        local_domain = (
+            self.nvlink_domain_size
+            if self.vendor == "nvidia" and self.nvlink_domain_size
+            else self.gpus_per_node
+            if self.vendor == "nvidia"
+            else self.chips_per_host
+        )
+        if tp_degree <= local_domain:
             return ic["intra_node_bw_gb_s"] * 1e9
         else:
             return ic["inter_node_bw_gb_s"] * 1e9
@@ -323,13 +482,26 @@ class ThroughputResult:
     # Training
     training_time_per_step_s: float = 0.0
     training_throughput_tokens_per_sec: float = 0.0
+    # v1-fix Wave 1 Step 1.2 (Jun 2026): time spent in the DP gradient
+    # reduce-scatter + weight all-gather under FSDP/ZeRO-3. Folded into
+    # training_time_per_step_s; reported here so the optimizer / report
+    # can flag DP-bandwidth-bound configs explicitly.
+    dp_grad_allreduce_s: float = 0.0
 
     # Inference — prefill
     prefill_time_ms: float = 0.0
+    # Wave 29: additive serving-stack TTFT floor included in
+    # prefill_time_ms (tokenize + scheduler admission + sampler +
+    # detokenize + transport; EXCLUDES load-dependent queueing).
+    # Recorded separately so reports can attribute it.
+    ttft_serving_overhead_ms: float = 0.0
 
     # Inference — decode (per generated token, at a given KV cache length)
     decode_time_per_token_ms: float = 0.0
     decode_kv_cache_length: int = 0
+    serving_request_latency_ms: float = 0.0
+    serving_scheduler: str = "continuous"
+    effective_serving_batch: int = 1
 
     # v1-fix throughput uncertainty. One-sigma absolute uncertainty in
     # milliseconds for the matching phase, derived from the calibrated
@@ -347,6 +519,18 @@ class ThroughputResult:
 
     # Memory
     memory_footprint_per_gpu_gb: float = 0.0
+    # v1-fix Wave 2a Step 2a.2 (Jun 2026): HBM-overflow as continuous cost.
+    # When memory_footprint_per_gpu_gb exceeds HBM, the v0 model declared
+    # infeasibility. In a 10k+ GPU deployment the model actually spills via
+    # NVLink (intra-node, 3-5× slower than HBM) and then PCIe/IB (50-100×
+    # slower). We now record the overflow and the tier, and adjust the
+    # reported decode/prefill times to reflect the bandwidth penalty. The
+    # serving-side hard cap moves out of optimizer.py:_check_feasibility
+    # (Step 2a.3) so memory becomes a continuous Pareto axis.
+    hbm_spill_gb: float = 0.0
+    spill_tier: str = "fits"          # "fits" | "nvlink" | "pcie" | "mixed"
+    tbt_ms_no_spill: float = 0.0       # what TBT would be if it fit in HBM
+    ttft_ms_no_spill: float = 0.0      # same for prefill
     # v1-fix demo-audit-2 (Jun 2026): the field above is *inference* memory
     # (weights + KV cache + activations). The field below is the per-GPU
     # *training* memory under FSDP/ZeRO-3 sharding across DP replicas, which
@@ -365,7 +549,14 @@ class ThroughputResult:
     # Parallelism
     tp_degree: int = 1
     pp_degree: int = 1
+    dp_degree: int = 1
+    ep_degree: int = 1
+    cp_degree: int = 1
+    pipeline_microbatches: int = 1
     bubble_fraction: float = 0.0
+    pp_training_comm_s: float = 0.0
+    pp_prefill_comm_s: float = 0.0
+    pp_decode_comm_s: float = 0.0
 
     # Metadata
     hardware_name: str = ""
@@ -380,6 +571,20 @@ _SPEC_DIR = os.environ.get(
     "AC_HARDWARE_SPEC_DIR",
     os.path.join(os.path.dirname(__file__), "hardware_specs"),
 )
+
+# Wave 29: default serving-stack TTFT floor. Published TTFTs include a
+# stack floor AC's pure-compute prefill never modeled — every anchor's
+# TTFT was under-predicted −30…−90% with the small-prompt anchors worst
+# (predicted 6.8 ms vs published 90 ms on GPT-OSS-120B @ 1k prompt).
+# The floor is tokenize (~1-2 µs/token BPE on a CPU core) + scheduler
+# admission + sampling + detokenize + HTTP framing (~10-20 ms on
+# vLLM/TRT-LLM-class stacks). It deliberately EXCLUDES queueing: p95
+# endpoint numbers under load sit far above this floor, and charging
+# load-dependent waiting to the architecture would be dishonest.
+# Override per hardware target via the spec's calibration block:
+#   "ttft_serving_overhead": {"fixed_ms": 15.0, "per_prompt_token_us": 1.5}
+DEFAULT_TTFT_FIXED_OVERHEAD_MS = 15.0
+DEFAULT_TTFT_PER_PROMPT_TOKEN_US = 1.5
 _CALIBRATION_DIR = os.environ.get(
     "AC_CALIBRATION_DIR",
     os.path.join(os.path.dirname(__file__), "calibration"),
@@ -397,7 +602,24 @@ class CalibrationTable:
     attention_latencies: Dict[str, float] = field(default_factory=dict)
     decode_kv_latencies: Dict[str, float] = field(default_factory=dict)
     allreduce_latencies: Dict[str, float] = field(default_factory=dict)
+    # Wave 7b.4: per-hardware Wave 1-5 calibration fits. Each field is
+    # optional — when None the throughput/quality models fall back to the
+    # Python default the spec lists (dp_grad_overlap=0.7, tp_overlap=0.5,
+    # state_long_context_weight=0.030, hbm_spill_factor=1.0). pp_queue is
+    # a per-schedule dict, e.g. {"1f1b": 1.05, "gpipe": 0.98}.
+    dp_grad_overlap_fraction: Optional[float] = None
+    tp_allreduce_overlap_fraction: Optional[float] = None
+    # Wave 19 (P0-1): fraction of MoE dispatch/combine all-to-all hidden
+    # behind expert/shared compute in training & prefill (DeepEP-style
+    # overlap). None → the throughput model's default (0.6).
+    moe_alltoall_overlap_fraction: Optional[float] = None
+    pp_queue_multipliers: Dict[str, float] = field(default_factory=dict)
+    state_long_context_weight: Optional[float] = None
+    hbm_spill_decode_factor: Optional[float] = None
     source: str = "analytic"
+    _gemm_lookup_cache: Dict[Tuple[int, int, int, str], Optional[float]] = field(
+        default_factory=dict, repr=False
+    )
 
     @classmethod
     def from_json(cls, path: str) -> "CalibrationTable":
@@ -419,10 +641,53 @@ class CalibrationTable:
             key = f"tp{entry['tp']}_msg{entry['message_size_mb']}mb"
             if entry.get("latency_ms", 0) > 0:
                 table.allreduce_latencies[key] = entry["latency_ms"]
+        # Wave 7b.4: read the new Wave 1-5 fits. Two shapes are accepted:
+        #   (a) Top-level `dp_grad_overlap_fraction: 0.65` etc. — the
+        #       simplest case where the calibration JSON has been hand-merged
+        #       per-hw from the auto_calibrate output.
+        #   (b) Nested `wave5: {dp_grad_overlap: 0.65, tp_overlap: 0.42,
+        #       pp_queue: {"1f1b": 1.05}, state_long_context_weight: 0.028,
+        #       hbm_spill_factor: 1.10}` — what a copy of the auto_calibrate
+        #       pack's per-hw section looks like before flattening.
+        w5 = d.get("wave5", {}) if isinstance(d.get("wave5"), dict) else {}
+        def _pick(key_top, key_w5):
+            v = d.get(key_top, w5.get(key_w5))
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        table.dp_grad_overlap_fraction = _pick(
+            "dp_grad_overlap_fraction", "dp_grad_overlap")
+        table.tp_allreduce_overlap_fraction = _pick(
+            "tp_allreduce_overlap_fraction", "tp_overlap")
+        table.moe_alltoall_overlap_fraction = _pick(
+            "moe_alltoall_overlap_fraction", "moe_a2a_overlap")
+        table.state_long_context_weight = _pick(
+            "state_long_context_weight", "state_long_context_weight")
+        table.hbm_spill_decode_factor = _pick(
+            "hbm_spill_decode_factor", "hbm_spill_factor")
+        pq_top = d.get("pp_queue_multipliers")
+        pq_w5 = w5.get("pp_queue")
+        pq = pq_top if isinstance(pq_top, dict) else (
+            pq_w5 if isinstance(pq_w5, dict) else {})
+        # `pq` may itself be {"1f1b": 1.05} or {"1f1b": {"multiplier": 1.05}}
+        for sched, val in pq.items():
+            if isinstance(val, dict):
+                v = val.get("multiplier")
+            else:
+                v = val
+            try:
+                if v is not None:
+                    table.pp_queue_multipliers[str(sched).lower()] = float(v)
+            except (TypeError, ValueError):
+                continue
         return table
 
     def lookup_gemm_efficiency(self, M: int, N: int, K: int, precision: str) -> Optional[float]:
         """Find closest matching GEMM efficiency from calibration data."""
+        cache_key = (int(M), int(N), int(K), str(precision))
+        if cache_key in self._gemm_lookup_cache:
+            return self._gemm_lookup_cache[cache_key]
         best_key = None
         best_dist = float("inf")
         for key, eff in self.gemm_efficiencies.items():
@@ -437,11 +702,27 @@ class CalibrationTable:
                 best_dist = dist
                 best_key = key
         if best_key is not None and best_dist < 2.0:
-            return self.gemm_efficiencies[best_key]
-        return None
+            result = self.gemm_efficiencies[best_key]
+        else:
+            result = None
+        self._gemm_lookup_cache[cache_key] = result
+        return result
 
 
 _CALIBRATION_CACHE: Dict[str, Optional[CalibrationTable]] = {}
+
+# Wave 7b.4: module-level holder used by helpers that don't currently take a
+# cal_table argument (e.g. `_allreduce_cost`, `estimate_memory_per_gpu`). The
+# top of `throughput()` sets this to the per-hw calibration; the helpers
+# read it via `_current_calibration()`. We deliberately do NOT make this a
+# contextvar — the throughput model is fully synchronous and the existing
+# code path is already single-threaded per call. A try/finally inside
+# `throughput()` clears it on exit so the next call sees a clean slate.
+_CURRENT_CALIBRATION: Optional[CalibrationTable] = None
+
+
+def _current_calibration() -> Optional[CalibrationTable]:
+    return _CURRENT_CALIBRATION
 
 
 # =============================================================================
@@ -501,12 +782,29 @@ _DEFAULT_EFFICIENCY_TABLE = {
                           "communication": (0.32, 0.12)},
         "mla_dense":     {"compute": (0.42, 0.11), "memory": (0.40, 0.10),
                           "communication": (0.30, 0.13)},
+        # Wave 25 (2026-07): expert_load raised 0.20/0.18 → 0.42/0.38.
+        # The expert_load term is a pure HBM weight stream, already priced
+        # at datasheet bandwidth by _moe_ffn_cost; the overheads the old
+        # 0.20 was meant to cover (kernel launch, scheduler dispatch, TP
+        # allreduce, a2a) are ALL priced separately in the layer breakdown,
+        # so the low value double-counted them and put every large-MoE
+        # decode ~5× over roofline. Anchor evidence: the implied streaming
+        # efficiency of the five MoE anchors' PUBLISHED TBTs spans
+        # 0.29 (Mixtral, 2024-era vLLM) … 0.68 (Qwen3-235B, Alibaba
+        # stack) — the old default sat BELOW the worst published stack,
+        # biasing the whole family (mean +66% signed TBT error, Qwen3
+        # +194%). 0.42 matches the dense memory-bound decode μ (same
+        # physics — contiguous weight streaming); moe_mla keeps the same
+        # −0.04 discount that mla_dense carries vs dense for the extra
+        # latent-projection work. σ widened vs dense to reflect the
+        # published-stack spread. Regenerate family_bias_v1.json
+        # (ac-trust-audit --out) whenever these move.
         "moe":           {"compute": (0.36, 0.13), "memory": (0.34, 0.12),
                           "communication": (0.26, 0.14), "alltoall": (0.22, 0.16),
-                          "expert_load": (0.20, 0.15)},
+                          "expert_load": (0.42, 0.14)},
         "moe_mla":       {"compute": (0.34, 0.14), "memory": (0.32, 0.13),
                           "communication": (0.24, 0.15), "alltoall": (0.20, 0.17),
-                          "expert_load": (0.18, 0.16)},
+                          "expert_load": (0.38, 0.15)},
         "hybrid_state":  {"compute": (0.44, 0.10), "memory": (0.40, 0.10),
                           "communication": (0.30, 0.13)},
     },
@@ -524,24 +822,52 @@ _REGIME_ALIASES = {
 
 
 def _arch_family(arch: ArchConfig) -> str:
-    """Classify an arch into one of the calibrated families."""
-    is_moe = arch.moe_config is not None
-    is_mla = (arch.attention_type == "mla"
-              and int(getattr(arch, "mla_kv_latent_dim", 0) or 0) > 0)
-    is_hybrid = (arch.layer_type_list is not None
-                 and any(lt == "state" for lt in arch.layer_type_list)
-                 and arch.state_config is not None)
-    if is_hybrid:
+    """Classify an arch into one of the calibrated families.
+
+    Wave 18a: derived from the canonical ArchitectureSignature so this
+    calibration-key taxonomy stays consistent with the user-visible
+    ``legacy_family``. The mapping projects the 4-axis signature into the
+    5-bucket calibration space:
+      hybrid_state   ← any state mixer
+      moe_mla        ← ffn_mode=moe   AND kv_projection=mla
+      moe            ← ffn_mode=moe
+      mla_dense      ← kv_projection=mla
+      dense_gqa      ← kv_projection=gqa/mqa (all grouped attention shares a bucket)
+      dense          ← kv_projection=mha (full MHA)
+    """
+    try:
+        from ac.architecture import architecture_signature
+        sig = architecture_signature(arch)
+    except (ValueError, ImportError):
+        # Defensive fallback — pre-Wave-18a inline classifier so partial
+        # test fixtures without minimal shape fields still get a bucket.
+        is_moe = arch.moe_config is not None
+        is_mla = (arch.attention_type == "mla"
+                  and int(getattr(arch, "mla_kv_latent_dim", 0) or 0) > 0)
+        is_hybrid = (arch.layer_type_list is not None
+                     and any(lt == "state" for lt in arch.layer_type_list)
+                     and arch.state_config is not None)
+        if is_hybrid:
+            return "hybrid_state"
+        if is_moe and is_mla:
+            return "moe_mla"
+        if is_moe:
+            return "moe"
+        if is_mla:
+            return "mla_dense"
+        if arch.n_kv_heads < arch.n_heads:
+            return "dense_gqa"
+        return "dense"
+
+    if sig.has_state_mixer:
         return "hybrid_state"
-    if is_moe and is_mla:
+    if sig.is_moe and sig.uses_mla:
         return "moe_mla"
-    if is_moe:
+    if sig.is_moe:
         return "moe"
-    if is_mla:
+    if sig.uses_mla:
         return "mla_dense"
-    # GQA distinguished from MHA by n_kv_heads < n_heads — same calibration
-    # bucket in our defaults, but readable separately if a lab fits them.
-    if arch.n_kv_heads < arch.n_heads:
+    if sig.kv_projection in ("gqa", "mqa"):
         return "dense_gqa"
     return "dense"
 
@@ -862,6 +1188,38 @@ def _attention_cost(
     return max(t_compute, t_memory)
 
 
+def _sparse_attention_cost(
+    B: int,
+    query_len: int,
+    attended_len: int,
+    n_heads: int,
+    d_head: int,
+    n_kv_heads: int,
+    precision: str,
+    hw: HardwareConfig,
+    tp_degree: int = 1,
+) -> float:
+    """Fused rectangular attention cost for sparse/compressed patterns."""
+    heads_per_gpu = n_heads // tp_degree
+    kv_heads_per_gpu = max(
+        1, math.ceil(n_kv_heads / max(1, tp_degree))
+    )
+    bpe = hw.bytes_per_elem(precision)
+    q = max(1, int(query_len))
+    k = max(1, min(q, int(attended_len)))
+    flops = 4 * B * heads_per_gpu * q * k * d_head
+    hbm_bytes = B * d_head * bpe * (
+        2 * heads_per_gpu * q + 2 * kv_heads_per_gpu * k
+    )
+    fused_eff = hw.fused_attention_efficiency.get(
+        precision, hw.fused_attention_efficiency.get("bf16", 0.75)
+    )
+    return max(
+        flops / max(1.0, hw.peak_flops_s(precision) * fused_eff),
+        hbm_bytes / max(1.0, hw.hbm_bandwidth_bytes_s),
+    )
+
+
 def _membound_ops_cost(
     B: int, S: int, d_model: int,
     precision: str,
@@ -886,10 +1244,37 @@ def _allreduce_cost(
     hw: HardwareConfig,
     tp_degree: int,
     n_allreduces: int = 2,  # one after attention, one after FFN
+    overlap_fraction: float = 0.5,
+    phase: str = "training",
 ) -> float:
     """
-    TP all-reduce cost per layer (no compute-communication overlap in v0).
+    TP all-reduce cost per layer.
     GPU: NVLink ring/tree. TPU: ICI.
+
+    v1-fix Wave 1 Step 1.3 (Jun 2026): now accepts an overlap_fraction so
+    Megatron-style async TP and cuBLAS-stream overlap can be modelled.
+    The v0 cost assumed serial exposed comm (`overlap_fraction=0`), which
+    over-counts TP comm by ~1.4-2× for matmul-bound layers. Public
+    reports from Megatron-LM and DeepSpeed put overlap at 0.4-0.7 across
+    common shapes; 0.5 is a conservative middle. Set to 0.0 to recover
+    the v0 behavior. Caller can pass a smaller overlap when the
+    collective follows another collective on the same fabric (e.g. EP
+    alltoall → shared-expert allreduce; see Step 1.6).
+
+    Wave 17 Part 2 fix (Jun 2026): two refinements that the original
+    formula missed at decode:
+      - `phase="decode"` uses overlap_fraction=0.1 (default 0.5 hides
+        all-reduce behind matmul, which only applies during training/
+        prefill; decode is memory-bound with nothing to hide behind).
+        Explicit caller-supplied non-default overlap_fraction still wins.
+      - Add per-collective launch-latency floor. NCCL/NVSHMEM round-trip
+        latency is ~5-8 µs intra-NVLink, ~12-15 µs cross-IB. Without this
+        floor, decode all-reduces at TP=32 with tiny (S=1) payloads round
+        to near-zero in the bandwidth-only formula and the throughput
+        model under-counts the per-token cost by 1-3 ms.
+
+    See plan/redesign/17-pp-decode-serving-cost-fix.md Part 2 + the
+    superseded 17-tp-amortization-cost-fix.md plan for full context.
     """
     if tp_degree <= 1:
         return 0.0
@@ -901,12 +1286,138 @@ def _allreduce_cost(
 
     if hw.vendor == "nvidia":
         # Ring all-reduce: 2 × (P-1)/P × bytes / BW
-        t_per = 2 * (tp_degree - 1) / tp_degree * per_allreduce_bytes / link_bw
+        t_per_bw = 2 * (tp_degree - 1) / tp_degree * per_allreduce_bytes / link_bw
     else:
         # TPU ICI: simpler model — 2 × bytes / effective_BW
-        t_per = 2 * per_allreduce_bytes / link_bw
+        t_per_bw = 2 * per_allreduce_bytes / link_bw
 
-    return n_allreduces * t_per
+    # Wave 17 Part 2: per-collective launch latency floor. Inter-node hops
+    # add ~12-15 µs round-trip; intra-NVLink adds ~5-8 µs. At decode where
+    # payload (B × 1 × d_model) is tiny, this is the dominant cost.
+    local_domain = (
+        hw.nvlink_domain_size
+        if hw.vendor == "nvidia" and hw.nvlink_domain_size
+        else hw.gpus_per_node
+        if hw.vendor == "nvidia"
+        else hw.chips_per_host
+    )
+    if tp_degree <= local_domain:
+        per_ar_latency_s = 6e-6   # intra-NVLink NCCL launch round-trip
+    else:
+        per_ar_latency_s = 14e-6  # cross-IB NCCL launch round-trip
+    t_per = t_per_bw + per_ar_latency_s
+
+    # Wave 7b.4: when a per-hw calibration provides a fitted TP overlap, use
+    # it instead of the function's default. The override only fires if the
+    # caller didn't pass an explicit non-default overlap (else the explicit
+    # arg wins). `0.5` is the Wave 1 Step 1.3 default; we detect "user didn't
+    # override" by comparing against it. This keeps callers that explicitly
+    # tune overlap (e.g. the EP→AR chain in Step 1.6) unaffected.
+    if abs(overlap_fraction - 0.5) < 1e-9:
+        # Wave 17 Part 2: decode has no big matmul to overlap with —
+        # bandwidth-bound autoregressive token gen. Drop overlap to 0.1.
+        # Training/prefill keep the 0.5 default.
+        if phase == "decode":
+            overlap_fraction = 0.1
+        _cal = _current_calibration()
+        if _cal is not None and _cal.tp_allreduce_overlap_fraction is not None:
+            overlap_fraction = float(_cal.tp_allreduce_overlap_fraction)
+
+    exposed = max(0.0, 1.0 - overlap_fraction)
+    return exposed * n_allreduces * t_per
+
+
+def _pipeline_link_costs(
+    payload_bytes: float,
+    pp_degree: int,
+    hw: HardwareConfig,
+) -> Tuple[float, float]:
+    """Return (one_boundary_worst_case, full_pipeline_path) transfer cost.
+
+    Ranks are assumed contiguous within a local NVLink/ICI domain. Most stage
+    boundaries are local; only boundaries crossing a domain use inter-node
+    fabric. Training throughput pays the slowest boundary once per direction,
+    while prefill/decode latency pays every boundary on the path.
+    """
+    if pp_degree <= 1:
+        return 0.0, 0.0
+    local_domain = int(
+        hw.nvlink_domain_size
+        if hw.vendor == "nvidia" and hw.nvlink_domain_size
+        else hw.gpus_per_node
+        if hw.vendor == "nvidia"
+        else hw.chips_per_host
+    )
+    local_boundaries = pp_degree - 1
+    cross_boundaries = 0
+    if pp_degree > local_domain:
+        cross_boundaries = (pp_degree - 1) // max(1, local_domain)
+        local_boundaries -= cross_boundaries
+    local_cost = (
+        payload_bytes
+        / max(1.0, hw.interconnect["intra_node_bw_gb_s"] * 1e9)
+        + 5e-6
+    )
+    cross_cost = (
+        payload_bytes
+        / max(1.0, hw.interconnect["inter_node_bw_gb_s"] * 1e9)
+        + 12e-6
+    )
+    worst = cross_cost if cross_boundaries else local_cost
+    full_path = local_boundaries * local_cost + cross_boundaries * cross_cost
+    return worst, full_path
+
+
+# =============================================================================
+# DP gradient allreduce (v1-fix Wave 1 Step 1.2, Jun 2026)
+# =============================================================================
+
+def _dp_grad_allreduce_cost(
+    total_params: int,
+    precision: str,
+    hw: HardwareConfig,
+    dp_degree: int,
+    zero_stage: int = 3,
+    overlap_fraction: float = 0.7,
+) -> float:
+    """Time for the DP gradient sync per training step.
+
+    At dp_degree=1 the cost is zero (no sync). Beyond that:
+      - ZeRO-0/1: full gradient allreduce, 2 × (dp-1)/dp × params × bpe.
+      - ZeRO-2/3 + FSDP: reduce-scatter (grad) + all-gather (weight before
+        next forward), same total byte volume on the wire because the
+        reduce-scatter halves the bytes per rank but doubles the number of
+        collectives in a step.
+
+    Intra-node uses NVLink/ICI; once dp_degree exceeds gpus_per_node we
+    saturate the inter-node fabric (IB/RoCE), which on most clusters is
+    50-200 GB/s vs the 600-1800 GB/s intra-node link — i.e. the dp cost
+    grows sharply at the node boundary.
+
+    overlap_fraction (default 0.7): modern frameworks (PyTorch FSDP,
+    DeepSpeed ZeRO-3, Megatron) launch the reduce-scatter for layer N
+    while still doing the backward of layer N-1, hiding most of the sync
+    behind compute. Empirical values from PyTorch FSDP blog posts and
+    DeepSpeed ZeRO-3 reports are 65-90%; 0.7 is a conservative middle.
+    The exposed cost is (1 - overlap_fraction) × raw_sync.
+
+    This term is missing from the v0 throughput model, which silently
+    assumed perfect DP scaling. Without it, `aggregate_tps = per_replica
+    × dp_degree` overcounts large-cluster throughput by ~1.2-3× at
+    dp ≥ 256, depending on params and fabric.
+    """
+    if dp_degree <= 1:
+        return 0.0
+    bpe = hw.bytes_per_elem(precision)
+    grad_bytes = total_params * bpe
+    intra_bw = hw.interconnect["intra_node_bw_gb_s"] * 1e9
+    inter_bw = hw.interconnect["inter_node_bw_gb_s"] * 1e9
+    per_node = hw.gpus_per_node if hw.vendor == "nvidia" else hw.chips_per_host
+    bw = intra_bw if dp_degree <= per_node else inter_bw
+    factor = 2.0 if zero_stage >= 1 else 1.0
+    raw = factor * (dp_degree - 1) / dp_degree * grad_bytes / max(bw, 1.0)
+    exposed = max(0.0, 1.0 - overlap_fraction)
+    return exposed * raw
 
 
 # =============================================================================
@@ -960,14 +1471,43 @@ def _moe_alltoall_cost(
 
     if hw.vendor == "nvidia":
         nvlink_domain = _nvlink_domain_size(hw)
+        off_rank = (ep_degree - 1) / ep_degree
         if ep_degree <= nvlink_domain:
             link_bw = hw.interconnect["intra_node_bw_gb_s"] * 1e9
             effective_bw = 0.67 * link_bw  # ring all-to-all efficiency
-        else:
-            # Beyond NVLink domain: use inter-node BW directly (much smaller).
-            inter_bw = hw.interconnect["inter_node_bw_gb_s"] * 1e9
-            effective_bw = 0.67 * inter_bw
-        return (ep_degree - 1) / ep_degree * volume_bytes / max(effective_bw, 1.0)
+            return off_rank * volume_bytes / max(effective_bw, 1.0)
+        # Wave 19 (P0-1): hierarchical all-to-all beyond the NVLink domain.
+        # The old model switched ALL volume to inter-node bandwidth once
+        # ep > domain, but with uniform routing only (ep - domain)/(ep - 1)
+        # of the off-rank destinations are on other nodes; the intra-node
+        # share still rides NVLink, and the two legs use different fabrics
+        # concurrently (take the max, not the sum).
+        #
+        # Node-limited routing (DeepSeek-V3 §3.4 "restrict each token to at
+        # most M nodes", Qwen3-MoE similar): the cross-node leg sends each
+        # token ONCE per destination node (then fans out over NVLink), so
+        # its volume scales with min(top_k, node_limit)/top_k. The volume
+        # passed in here is top_k-proportional; apply the dedup as a
+        # discount. node_limit=4 matches published practice and is a
+        # calibration surface, not a claim.
+        n_peers = ep_degree - 1
+        f_intra = (nvlink_domain - 1) / n_peers
+        f_inter = 1.0 - f_intra
+        node_limit = 4.0
+        # top_k is not visible here; the dedup ratio is folded in by the
+        # caller via ep_topology="node_limited:<ratio>" — default assume
+        # top_k=8-class routing → ratio 0.5 when unspecified.
+        dedup = 0.5
+        if isinstance(ep_topology, str) and ep_topology.startswith("node_limited:"):
+            try:
+                dedup = min(1.0, max(0.05, float(ep_topology.split(":", 1)[1])))
+            except ValueError:
+                pass
+        intra_bw = 0.67 * hw.interconnect["intra_node_bw_gb_s"] * 1e9
+        inter_bw = 0.67 * hw.interconnect["inter_node_bw_gb_s"] * 1e9
+        t_intra = off_rank * volume_bytes * f_intra / max(intra_bw, 1.0)
+        t_inter = off_rank * volume_bytes * f_inter * dedup / max(inter_bw, 1.0)
+        return max(t_intra, t_inter)
 
     # TPU (or any non-NVIDIA): 3D torus / ICI
     link_bw = hw.interconnect["intra_node_bw_gb_s"] * 1e9  # v5p: intra == inter
@@ -1020,12 +1560,28 @@ def _moe_ffn_cost(
     shared_dim_per_rank = max(shared_dim // max(tp_degree, 1), 1) if shared_dim else 0
 
     # --- Compute: per-rank tokens routed to local experts ---
-    # Balanced routing: each rank holds n_experts/ep experts and receives
-    # M * top_k * capacity / ep tokens. Decode treats S=1 here.
+    # Wave 19 (P0-1): EP semantics are PHASE-DEPENDENT.
+    #
+    # TRAINING — EP lays over the DP dimension (Megatron/DeepSpeed-MoE/
+    # DeepSeek layout): every EP rank carries its OWN microbatch of M
+    # tokens. Total (token, expert) assignments in the EP group are
+    # M × ep × top_k; the rank owns n_experts/ep experts, so balanced
+    # routing lands M × top_k assignments on it. The old formula
+    # (M × top_k / ep) modeled EP ranks as pure parameter servers sharing
+    # ONE microbatch — each rank looked ep× under-utilized, and per-GPU
+    # MoE training throughput came out ~ep× too low (the dominant factor
+    # in the "MoE 20× slower than dense" release-review finding).
+    #
+    # SERVING (prefill/decode) — an inference instance genuinely spans
+    # tp × ep GPUs sharing one batch (vLLM/SGLang EP layout), so the
+    # M × top_k / ep spread is correct there and is retained.
     S_eff = S if phase != "decode" else 1
     M = B * S_eff
 
-    tokens_per_rank = max(1, int(M * top_k * capacity / max(ep_degree, 1)))
+    if phase == "training":
+        tokens_per_rank = max(1, int(M * top_k * capacity))
+    else:
+        tokens_per_rank = max(1, int(M * top_k * capacity / max(ep_degree, 1)))
     tokens_per_rank = int(tokens_per_rank * imbalance)
 
     # SwiGLU expert: three matmuls (up, gate, down) per active expert per token.
@@ -1046,20 +1602,25 @@ def _moe_ffn_cost(
     )
     expert_compute_s = t_up + t_gate + t_down
 
-    # Shared expert (DeepSeek-style): always-on, sees every token (M, not
-    # tokens_per_rank). Replicated across EP; sharded across TP.
+    # Shared expert (DeepSeek-style): always-on, sees every LOCAL token.
+    # Replicated across EP; sharded across TP. Wave 19 (P0-1): the local
+    # token count is phase-dependent (training: per-rank microbatch M;
+    # serving: the instance batch is spread across EP ranks, M/ep each) —
+    # consistent with the routed-token accounting above.
     shared_compute_s = 0.0
     if shared_dim_per_rank > 0:
+        M_shared = max(1, int(M if phase == "training"
+                              else M / max(ep_degree, 1)))
         t_su, _, _ = _matmul_cost(
-            M, shared_dim_per_rank, d_model,
+            M_shared, shared_dim_per_rank, d_model,
             expert_precision, hw, lattice_hw, tp_degree, calibration,
         )
         t_sg, _, _ = _matmul_cost(
-            M, shared_dim_per_rank, d_model,
+            M_shared, shared_dim_per_rank, d_model,
             expert_precision, hw, lattice_hw, tp_degree, calibration,
         )
         t_sd, _, _ = _matmul_cost(
-            M, d_model, shared_dim_per_rank,
+            M_shared, d_model, shared_dim_per_rank,
             expert_precision, hw, lattice_hw, tp_degree, calibration,
         )
         shared_compute_s = t_su + t_sg + t_sd
@@ -1068,18 +1629,41 @@ def _moe_ffn_cost(
 
     # --- Decode-phase expert weight loading ---
     # At decode, each token activates top_k experts. Their weights must be
-    # streamed from HBM (caches don't help across tokens because routing
-    # changes). This is the *bandwidth* term that makes MoE economical for
-    # serving relative to a same-total-param dense.
+    # streamed from HBM. This is the *bandwidth* term that makes MoE
+    # economical for serving relative to a same-total-param dense.
+    #
+    # Wave 18e/19 fix (2026-07): the previous formula counted `B × top_k`
+    # expert-slot loads independently, which missed the batch-level
+    # weight-reuse: when multiple tokens in a decode batch route to the
+    # SAME expert, that expert's weights are streamed once and reused
+    # across all those tokens. The number of DISTINCT experts touched by
+    # a decode batch of size B with top_k routing is bounded by
+    # `min(B × top_k, n_experts)`. For B=16, top_k=4, n_experts=32 the
+    # old formula counted 64 expert-slots; reality touches at most 32.
+    # The 2× over-count was the dominant contributor to Qwen3-235B-A22B
+    # TBT blowing up from +45% to +1076% error against published data.
+    #
+    # Per-rank version: each rank owns `n_experts / ep_degree` experts.
+    # The batch stresses at most `min(B × top_k, n_experts) / ep_degree`
+    # distinct experts on any given rank.
     expert_load_s = 0.0
     if phase == "decode":
-        # Per token: top_k experts, three matmuls' worth of weights, sharded
-        # across TP only (each rank holds 1/ep of the experts; on a hit, the
-        # rank streams its TP-shard of those experts).
-        per_token_expert_bytes = top_k * 3 * d_model * expert_dim_per_rank * bpe_exp
-        total_expert_load_bytes = B * per_token_expert_bytes
+        # Number of distinct experts touched across the whole batch.
+        # Bounded above by n_experts (can't touch more than we have).
+        distinct_experts_batch = min(B * top_k, n_experts)
+        # Per-rank share (each rank owns n_experts / ep_degree of them).
+        distinct_experts_per_rank = max(
+            1, distinct_experts_batch // max(1, ep_degree)
+        )
+        # Bytes per expert (three SwiGLU matmuls, TP-sharded).
+        bytes_per_expert = 3 * d_model * expert_dim_per_rank * bpe_exp
+        total_expert_load_bytes = distinct_experts_per_rank * bytes_per_expert
         if shared_dim_per_rank > 0:
-            total_expert_load_bytes += B * 3 * d_model * shared_dim_per_rank * bpe_exp
+            # Shared expert is always-on: one load per rank per batch step
+            # (weights re-used across every token in the batch, so no B
+            # multiplier here either — this was correct in the old formula
+            # by coincidence when B was small).
+            total_expert_load_bytes += 3 * d_model * shared_dim_per_rank * bpe_exp
         expert_load_s = total_expert_load_bytes / hw.hbm_bandwidth_bytes_s
         # In decode the load typically *exceeds* the compute term — take the
         # max so the layer time reflects the bandwidth wall.
@@ -1088,12 +1672,56 @@ def _moe_ffn_cost(
     # --- All-to-all (dispatch + combine) ---
     # Two all-to-alls per MoE layer; each moves top_k × d_model bytes per
     # token (with capacity_factor inflation for dispatch overflow).
-    volume = 2 * M * top_k * d_model * bpe_act * capacity
-    alltoall_s = _moe_alltoall_cost(volume, ep_degree, hw, ep_topology)
+    #
+    # Wave 19 (P0-1): per-rank egress volume, phase-consistent with the
+    # token accounting above. Training: M is already per-rank (each EP rank
+    # dispatches its own microbatch), so the volume stands. Serving: the
+    # instance's batch of M tokens is spread over the ep ranks, so each
+    # rank's egress is M/ep — the old formula charged the WHOLE batch's
+    # bytes to every rank, over-pricing serving all-to-all by ep×.
+    M_a2a = M if phase == "training" else M / max(ep_degree, 1)
+    volume = 2 * M_a2a * top_k * d_model * bpe_act * capacity
+    # Node-limited routing dedup for the cross-node leg (only used when
+    # ep exceeds the NVLink domain — see _moe_alltoall_cost): each token
+    # is sent once per destination node (≤4 nodes in published practice),
+    # not once per expert.
+    _a2a_topology = ep_topology
+    if hw.vendor == "nvidia" and ep_topology == "single_axis":
+        _a2a_topology = f"node_limited:{min(1.0, 4.0 / max(1, top_k)):.3f}"
+    alltoall_s = _moe_alltoall_cost(volume, ep_degree, hw, _a2a_topology)
+
+    # Wave 19 (P0-1): dispatch/combine overlap. Production MoE stacks hide
+    # most all-to-all behind expert + shared-expert compute (DeepEP,
+    # dual-batch / 1F1B-overlap schedules). Charging it fully serial made
+    # per-replica MoE ~2-3× dense where measured runs sit at ~1.2-1.7×.
+    # Exposed cost = (1 - overlap) × raw. Default 0.6; calibratable per
+    # hardware via `moe_alltoall_overlap_fraction` (ac-auto-calibrate).
+    # Decode is latency-bound small-message a2a with little compute to hide
+    # behind — no overlap credit there.
+    if phase in ("training", "prefill"):
+        _overlap = getattr(calibration, "moe_alltoall_overlap_fraction", None) \
+            if calibration is not None else None
+        if _overlap is None:
+            _overlap = 0.6
+        alltoall_s = alltoall_s * max(0.0, 1.0 - float(_overlap))
+
+    # --- Shared-expert allreduce: REMOVED (Wave 19, P0-1) ---
+    # Wave 1 Step 1.6 charged a full-activation allreduce across the EP
+    # group for shared-expert combination, on the premise that the shared
+    # expert is sharded across EP ranks. That premise was wrong: in the
+    # DeepSeek-V3 layout the shared expert is REPLICATED per rank and runs
+    # on the rank's own tokens; its output is added locally to the routed
+    # combine result. No EP collective exists for it. The phantom AR grew
+    # with EP beyond the NVLink domain (12.8 ms/layer at EP=32 — 3× the
+    # entire real layer compute) and was a major contributor to the "MoE
+    # 20× slower than dense" release-review finding. TP sharding of the
+    # shared expert is already priced inside _matmul_cost's TP handling.
+    shared_expert_ar_s = 0.0
 
     return {
         "compute_s": compute_s,
         "shared_expert_s": shared_compute_s,
+        "shared_expert_ar_s": shared_expert_ar_s,
         "alltoall_s": alltoall_s,
         "expert_load_s": expert_load_s,
         "load_balance_factor": imbalance,
@@ -1297,6 +1925,7 @@ def estimate_memory_per_gpu(
     include_kv_cache: bool = True,
     kv_cache_len: int = 2048,
     ep_degree: int = 1,
+    cp_degree: int = 1,
 ) -> float:
     """Estimate memory footprint per GPU in bytes.
 
@@ -1315,48 +1944,24 @@ def estimate_memory_per_gpu(
     bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(arch.precision, 2)
     kv_bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1}.get(arch.kv_precision, 2)
 
-    # Baseline model parameters (dense estimate).
-    total_params = estimate_params(
-        arch.d_model, arch.n_heads, arch.d_head, arch.ffn_dim,
-        arch.n_layers, arch.n_kv_heads, arch.vocab_size
-    )
-    layers_per_stage = arch.n_layers // max(pp_degree, 1)
-    params_this_stage = total_params * layers_per_stage / arch.n_layers
-    model_bytes = params_this_stage * bpe / tp_degree
-
-    # MoE FFN adjustment: swap the dense-FFN contribution for the MoE one.
+    layers_per_stage = math.ceil(arch.n_layers / max(pp_degree, 1))
+    ledger = parameter_ledger(arch)
     if arch.moe_config is not None:
-        moe_cfg = arch.moe_config
-        n_experts = int(moe_cfg["n_experts"])
-        expert_dim = int(moe_cfg["expert_dim"])
-        shared_block = moe_cfg.get("shared_expert")
-        shared_dim = int(shared_block["ffn_dim"]) if shared_block else 0
-        expert_prec = moe_cfg.get("precision", arch.precision)
-        bpe_exp = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(expert_prec, 2)
-
-        # v1-fix Part B: only the MoE-layer subset of the stack gets the
-        # dense→MoE swap. The first n_dense_ffn_layers keep their dense FFN
-        # bytes (already baked in by estimate_params and not subtracted).
-        n_dense = max(0, min(int(getattr(arch, "n_dense_ffn_layers", 0)), arch.n_layers))
-        n_moe = max(0, arch.n_layers - n_dense)
-        moe_layers_per_stage = max(0, layers_per_stage - int(n_dense * layers_per_stage / max(1, arch.n_layers)))
-
-        # Remove the dense-FFN bytes for the MoE subset only.
-        dense_ffn_params_per_layer = 3 * arch.d_model * arch.ffn_dim
-        dense_ffn_bytes_moe_subset = dense_ffn_params_per_layer * moe_layers_per_stage * bpe / tp_degree
-        model_bytes -= dense_ffn_bytes_moe_subset
-
-        # Add MoE expert weights only for the MoE subset (sharded by TP and EP).
-        expert_params_per_layer = n_experts * 3 * arch.d_model * expert_dim
-        expert_bytes = (expert_params_per_layer * moe_layers_per_stage * bpe_exp
-                        / (tp_degree * max(ep_degree, 1)))
-        model_bytes += expert_bytes
-
-        # Add shared-expert weights (MoE subset only; sharded by TP, replicated across EP).
-        if shared_dim > 0:
-            shared_params_per_layer = 3 * arch.d_model * shared_dim
-            shared_bytes = shared_params_per_layer * moe_layers_per_stage * bpe_exp / tp_degree
-            model_bytes += shared_bytes
+        expert_prec = arch.moe_config.get("precision", arch.precision)
+        bpe_exp = {
+            "bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4,
+            "mxfp4": 0.53, "mxfp6": 0.78,
+        }.get(expert_prec, 2)
+    else:
+        bpe_exp = bpe
+    shared_nonexpert = max(0, ledger.shared_params - ledger.shared_expert)
+    shared_divisor = max(1, tp_degree) * max(1, pp_degree)
+    expert_divisor = shared_divisor * max(1, ep_degree)
+    model_bytes = (
+        shared_nonexpert * bpe / shared_divisor
+        + ledger.shared_expert * bpe_exp / shared_divisor
+        + ledger.expert_total * bpe_exp / expert_divisor
+    )
 
     # KV cache
     kv_bytes = 0
@@ -1374,10 +1979,84 @@ def estimate_memory_per_gpu(
             effective_kv_layers = max(1, int(yoco_k * layers_per_stage / arch.n_layers + 0.5))
         else:
             effective_kv_layers = layers_per_stage
-        kv_bytes = kv_per_layer * effective_kv_layers / tp_degree
+        # Wave 18g: local:global interleave — local layers only store
+        # min(L, window) KV entries. Weight the effective layer count by
+        # the per-layer-type KV length ratio.
+        n_local = int(getattr(arch, "n_local_attn_layers", 0) or 0)
+        if 0 < n_local <= arch.n_layers and int(arch.local_window or 0) > 0:
+            local_ratio = arch.local_kv_len(kv_cache_len) / max(1, kv_cache_len)
+            local_frac = n_local / arch.n_layers
+            effective_kv_layers = effective_kv_layers * (
+                (1.0 - local_frac) + local_frac * local_ratio)
+        # v1-fix long-ctx (June 2026): CP splits the sequence axis, so
+        # each rank only holds 1/(cp_degree) of the KV cache for the full
+        # sequence. Previously the memory estimator ignored cp_degree
+        # entirely, which made every long-ctx cell stamp infeasible
+        # even when CP would have made it fit.
+        cp = max(1, int(cp_degree))
+        # When n_kv_heads < TP, KV heads are replicated across TP rank
+        # groups. Only min(TP, n_kv_heads) is a real KV-sharding factor.
+        kv_tp_shards = (
+            1
+            if arch.attention_type == "mla"
+            else max(1, min(tp_degree, arch.n_kv_heads))
+        )
+        kv_bytes = kv_per_layer * effective_kv_layers / (kv_tp_shards * cp)
 
-    # Activations (rough: batch x seq x d_model x ~10 tensors per layer)
-    act_bytes = arch.batch_size * arch.seq_len * arch.d_model * bpe * 10
+    # Activations.
+    # v1-fix long-ctx (June 2026): the previous formula
+    # (batch × seq × d_model × bpe × 10) modelled UNCHECKPOINTED training
+    # peak — keeping every intermediate alive across all layers. At long
+    # context that's astronomically larger than any real deployment.
+    #
+    # Real frameworks (Megatron, DeepSpeed, FSDP) on long context use:
+    #   - Activation checkpointing: only sqrt(n_layers) boundaries kept
+    #   - Megatron-style sequence-parallel: activations / TP
+    #   - CP: activations / CP along seq axis
+    #
+    # Peak memory ≈ B × S × d × bpe × (4 + sqrt(L)) / (TP × CP). The
+    # constant 4 covers one layer's working set (Q, K, V, O) during
+    # recompute; sqrt(L) is the checkpoint boundary count.
+    #
+    # v1-fix Wave 1 Step 1.4 (Jun 2026): multiply activations by the PP
+    # queue depth. GPipe holds `pp_degree` in-flight microbatches per
+    # stage; 1F1B holds (pp_degree+1)/2 on average; interleaved 1F1B with
+    # v virtual stages holds (pp_degree+1)/2 × v. The v0 model omitted
+    # this entirely, under-reporting memory by `pp_degree×` on PP-heavy
+    # configs.
+    import math as _math
+    cp = max(1, int(cp_degree))
+    tp_act = max(1, int(tp_degree))
+    n_layers = max(1, arch.n_layers)
+    layer_factor = 4 + _math.sqrt(n_layers)
+    pp = max(1, int(pp_degree))
+    schedule = getattr(arch, "pp_schedule", "1f1b")
+    if pp <= 1:
+        pp_act_queue = 1.0
+    elif schedule == "gpipe":
+        pp_act_queue = float(pp)
+    elif schedule == "interleaved":
+        v_stages = max(1, int(getattr(arch, "pp_virtual_stages", 2)))
+        pp_act_queue = ((pp + 1) / 2) * v_stages
+    else:  # "1f1b" — modern default
+        pp_act_queue = (pp + 1) / 2
+    # Wave 18e post-audit fix (2026-07): activations are sized by the
+    # actual prefill sequence length used during serving, not by the
+    # model's supported context. `arch.seq_len` carries the model's
+    # capacity (e.g. 8192 for Llama-3-8B); `kv_cache_len` carries the
+    # workload's actual prefill length (e.g. 1024 for the vLLM benchmark
+    # against which Llama-3-8B TTFT=55ms was measured). Using seq_len
+    # over-allocated activations by up to 8× on the Llama-3-8B anchor
+    # and explained the +48% memory error. Use max(kv_cache_len,
+    # arch.seq_len when kv_cache_len is unset) so callers that didn't
+    # thread kv_cache_len see the old behavior.
+    act_seq_len = (
+        int(kv_cache_len) if kv_cache_len and kv_cache_len > 0 else int(arch.seq_len)
+    )
+    # Guard: never larger than the model's supported context.
+    act_seq_len = min(act_seq_len, int(arch.seq_len)) if arch.seq_len else act_seq_len
+    act_bytes = (arch.batch_size * act_seq_len * arch.d_model * bpe
+                 * layer_factor * pp_act_queue / (tp_act * cp))
 
     return model_bytes + kv_bytes + act_bytes
 
@@ -1389,6 +2068,7 @@ def estimate_memory_per_gpu_hybrid(
     include_kv_cache: bool = True,
     kv_cache_len: int = 2048,
     ep_degree: int = 1,
+    cp_degree: int = 1,
 ) -> float:
     """Estimate memory footprint for hybrid attention/state architectures.
 
@@ -1396,7 +2076,13 @@ def estimate_memory_per_gpu_hybrid(
     State layers contribute SSM projection weights but no KV cache.
     """
     layer_types = arch.layer_type_list or (["attention"] * arch.n_layers)
-    n_attn_layers = sum(1 for lt in layer_types if lt == "attention")
+    # Wave 18g: "local_attention" layers are attention layers for weight
+    # and KV-cache purposes (GQA projection + windowed KV); they must NOT
+    # fall into the state-layer bucket, which would price them as SSM
+    # blocks and drop their KV entirely.
+    n_global_attn_layers = sum(1 for lt in layer_types if lt == "attention")
+    n_local_attn_layers = sum(1 for lt in layer_types if lt == "local_attention")
+    n_attn_layers = n_global_attn_layers + n_local_attn_layers
     n_state_layers = sum(1 for lt in layer_types if lt == "state")
 
     bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(arch.precision, 2)
@@ -1442,7 +2128,25 @@ def estimate_memory_per_gpu_hybrid(
     # Norm params
     norm_bytes = 2 * arch.d_model * layers_per_stage * bpe
 
-    model_bytes = attn_bytes + state_bytes + embed_bytes + norm_bytes
+    # Use the shared parameter ledger so hybrid+MoE stores all experts rather
+    # than one dense-FFN surrogate.
+    ledger = parameter_ledger(arch)
+    if arch.moe_config is not None:
+        expert_prec = arch.moe_config.get("precision", arch.precision)
+        bpe_exp = {
+            "bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4,
+            "mxfp4": 0.53, "mxfp6": 0.78,
+        }.get(expert_prec, 2)
+    else:
+        bpe_exp = bpe
+    shared_nonexpert = max(0, ledger.shared_params - ledger.shared_expert)
+    shared_divisor = max(1, tp_degree) * max(1, pp_degree)
+    expert_divisor = shared_divisor * max(1, ep_degree)
+    model_bytes = (
+        shared_nonexpert * bpe / shared_divisor
+        + ledger.shared_expert * bpe_exp / shared_divisor
+        + ledger.expert_total * bpe_exp / expert_divisor
+    )
 
     # KV cache: only for attention layers
     kv_bytes = 0
@@ -1458,10 +2162,45 @@ def estimate_memory_per_gpu_hybrid(
             effective_kv_layers = max(1, int(yoco_k * layers_per_stage / arch.n_layers + 0.5))
         else:
             effective_kv_layers = attn_layers_this_stage
-        kv_bytes = kv_per_layer * effective_kv_layers / tp_degree
+        # Wave 18g: local:global interleave — local attention layers only
+        # store min(L, window) KV entries. Weight by the local share of the
+        # ATTENTION layer count (state layers already excluded above).
+        if n_local_attn_layers > 0 and int(arch.local_window or 0) > 0 and n_attn_layers > 0:
+            local_ratio = arch.local_kv_len(kv_cache_len) / max(1, kv_cache_len)
+            local_frac = n_local_attn_layers / n_attn_layers
+            effective_kv_layers = effective_kv_layers * (
+                (1.0 - local_frac) + local_frac * local_ratio)
+        cp = max(1, int(cp_degree))
+        # v1-fix long-ctx (June 2026): CP splits the sequence axis, so KV
+        # and seq-parallel activations are 1/cp per rank.
+        kv_tp_shards = (
+            1
+            if arch.attention_type == "mla"
+            else max(1, min(tp_degree, arch.n_kv_heads))
+        )
+        kv_bytes = kv_per_layer * effective_kv_layers / (kv_tp_shards * cp)
 
-    # Activations
-    act_bytes = arch.batch_size * arch.seq_len * arch.d_model * bpe * 10
+    # Activations: TP-sequence-parallel + CP-sharded + sqrt(L) checkpoint
+    # boundaries + PP queue depth. See estimate_memory_per_gpu for the
+    # derivation. Wave 1 Step 1.4 added the PP queue multiplier.
+    import math as _math
+    cp = max(1, int(cp_degree))
+    tp_act = max(1, int(tp_degree))
+    n_layers = max(1, arch.n_layers)
+    layer_factor = 4 + _math.sqrt(n_layers)
+    pp = max(1, int(pp_degree))
+    schedule = getattr(arch, "pp_schedule", "1f1b")
+    if pp <= 1:
+        pp_act_queue = 1.0
+    elif schedule == "gpipe":
+        pp_act_queue = float(pp)
+    elif schedule == "interleaved":
+        v_stages = max(1, int(getattr(arch, "pp_virtual_stages", 2)))
+        pp_act_queue = ((pp + 1) / 2) * v_stages
+    else:  # "1f1b"
+        pp_act_queue = (pp + 1) / 2
+    act_bytes = (arch.batch_size * arch.seq_len * arch.d_model * bpe
+                 * layer_factor * pp_act_queue / (tp_act * cp))
 
     return model_bytes + kv_bytes + act_bytes
 
@@ -1499,6 +2238,19 @@ def compute_layer_time(
     nkv = arch.n_kv_heads
     ffn = arch.ffn_dim
     prec = arch.precision
+
+    # Wave 18g: local (sliding-window) attention layer. Same projections
+    # and FFN as a global attention layer; the only differences are that
+    # decode reads at most `local_window` KV entries and prefill attention
+    # is S x min(S, W) instead of S x S. Handled here by capping the
+    # phase-relevant lengths, then falling through the ordinary attention
+    # path. Local layers always use the GQA projection (matches GPT-OSS /
+    # Gemma-2 practice) even when the global layers are MLA — MLA's latent
+    # brings nothing once the window already bounds the KV read.
+    _is_local_layer = (layer_type == "local_attention"
+                       and int(arch.local_window or 0) > 0)
+    if _is_local_layer and phase == "decode":
+        kv_cache_len = arch.local_kv_len(kv_cache_len)
 
     heads_per_gpu = nh // tp_degree
     kv_heads_per_gpu = max(1, math.ceil(nkv / max(1, tp_degree)))
@@ -1569,7 +2321,12 @@ def compute_layer_time(
 
         # Membound ops and allreduce
         breakdown.membound_ops_s = _membound_ops_cost(B, S if phase != "decode" else 1, d, prec, hw)
-        breakdown.allreduce_s = _allreduce_cost(B, S if phase != "decode" else 1, d, prec, hw, tp_degree)
+        # Wave 17 Part 2: pass phase through so decode picks lower overlap +
+        # picks up the per-collective launch-latency floor.
+        breakdown.allreduce_s = _allreduce_cost(
+            B, S if phase != "decode" else 1, d, prec, hw, tp_degree,
+            phase=phase,
+        )
 
         # Aggregate
         compute_total = (breakdown.qkv_proj_s + breakdown.attention_s +
@@ -1598,8 +2355,11 @@ def compute_layer_time(
     M = B * S  # tokens in this step
 
     # --- QKV projection ---
+    # Wave 18g: local layers use the plain GQA projection even when the
+    # global layers are MLA (mixed-projection stacks a la Kimi-linear).
     is_mla = (arch.attention_type == "mla"
-              and int(getattr(arch, "mla_kv_latent_dim", 0) or 0) > 0)
+              and int(getattr(arch, "mla_kv_latent_dim", 0) or 0) > 0
+              and not _is_local_layer)
     if is_mla:
         # v1-fix MLA compute path (DeepSeek-V2/V3). Instead of one fused
         # (d → (nh+2nkv)*dh) projection, MLA has:
@@ -1663,9 +2423,17 @@ def compute_layer_time(
         # v1-fix MLA: MLA caches a single shared latent (c_kv + d_rope) per
         # token, NOT 2 × n_kv × d_head. The latent is not sharded across TP
         # because it's shared across query heads.
-        if arch.attention_type == "mla" and arch.mla_kv_latent_dim:
+        if _is_local_layer:
+            # Wave 18g: local layer under any global projection — plain GQA
+            # KV, already length-capped at the window above.
+            kv_bytes_per_layer = 2 * B * kv_heads_per_gpu * L * dh * kv_bpe
+        elif arch.attention_type == "mla" and arch.mla_kv_latent_dim:
             kv_bytes_per_layer = B * L * arch.kv_bytes_per_token_per_layer(L)
         elif arch.attention_type == "nsa" and arch.nsa_window_size:
+            kv_bytes_per_layer = B * L * arch.kv_bytes_per_token_per_layer(L)
+        elif arch.attention_type in ("csa", "indexshare", "msa"):
+            # Wave 9: compressed-attention variants. Each maps per-token KV
+            # bytes through the helper above; multiply by B × L for layer total.
             kv_bytes_per_layer = B * L * arch.kv_bytes_per_token_per_layer(L)
         else:
             kv_bytes_per_layer = 2 * B * kv_heads_per_gpu * L * dh * kv_bpe
@@ -1685,10 +2453,34 @@ def compute_layer_time(
         t_attn_compute = attn_flops / (hw.peak_flops_s(prec) * fused_eff)
         breakdown.attention_s = max(t_kv_load, t_attn_compute)
     else:
-        # Training / prefill: full S×S attention
-        breakdown.attention_s = _attention_cost(
-            B, arch.seq_len, nh, dh, nkv, prec, hw, tp_degree
-        )
+        if _is_local_layer:
+            # Wave 18g: sliding-window prefill/training attention is
+            # S x min(S, W) — same sparse-cost model NSA uses, with the
+            # window as the attended span.
+            attended = min(arch.seq_len, int(arch.local_window or 0))
+            breakdown.attention_s = _sparse_attention_cost(
+                B, arch.seq_len, attended, nh, dh, nkv, prec, hw, tp_degree
+            )
+        elif arch.attention_type == "nsa" and arch.nsa_window_size:
+            stride = int(arch.nsa_compress_block_stride or 16)
+            selected = (
+                int(arch.nsa_select_top_k or 16)
+                * int(arch.nsa_select_block_size or 64)
+            )
+            attended = min(
+                arch.seq_len,
+                math.ceil(arch.seq_len / max(1, stride))
+                + selected
+                + int(arch.nsa_window_size or 512),
+            )
+            breakdown.attention_s = _sparse_attention_cost(
+                B, arch.seq_len, attended, nh, dh, nkv, prec, hw, tp_degree
+            )
+        else:
+            # Training / prefill: full S×S attention
+            breakdown.attention_s = _attention_cost(
+                B, arch.seq_len, nh, dh, nkv, prec, hw, tp_degree
+            )
 
     # --- Output projection ---
     # (M, heads_per_gpu * dh) × (heads_per_gpu * dh, d)
@@ -1776,7 +2568,12 @@ def compute_layer_time(
     breakdown.membound_ops_s = _membound_ops_cost(B, S if phase != "decode" else 1, d, prec, hw)
 
     # --- Communication ---
-    breakdown.allreduce_s = _allreduce_cost(B, S if phase != "decode" else 1, d, prec, hw, tp_degree)
+    # Wave 17 Part 2: pass phase through so decode picks lower overlap +
+    # picks up the per-collective launch-latency floor.
+    breakdown.allreduce_s = _allreduce_cost(
+        B, S if phase != "decode" else 1, d, prec, hw, tp_degree,
+        phase=phase,
+    )
 
     # --- Aggregate ---
     compute_total = (breakdown.qkv_proj_s + breakdown.attention_s +
@@ -1857,7 +2654,8 @@ def throughput(
     hardware: str,         # "h100", "b200", "tpu_v5e", "tpu_v5p"
     tp_degree: int = 1,
     pp_degree: int = 1,
-    microbatches: int = 1,
+    microbatches: Optional[int] = None,
+    dp_degree: Optional[int] = None,
     decode_kv_len: int = 1024,
     prefill_seq_len: Optional[int] = None,
     lattice_hw_override: str = None,
@@ -1870,12 +2668,40 @@ def throughput(
     Main entry point. Computes training throughput, prefill time, and
     decode time per token for a given (architecture, hardware) pair.
 
+    -----------------------------------------------------------------
+    DEFERRED (Wave 1 Step 1.6.5): bandwidth-contention sharing
+    -----------------------------------------------------------------
+    The current critical path sums comm times for TP allreduce, DP grad
+    sync, EP all-to-all, CP all-gather, and PP send/recv as if they
+    each owned the fabric. In a 4D-parallel deployment (TP×PP×DP×EP×CP)
+    several of these collectives can land in the same window on the
+    same NVLink / IB fabric and should split the available bandwidth:
+
+        effective_bw_for_collective_c = bw / N_overlapping_at_window
+
+    Implementing this requires:
+      1. Annotating each collective with a "window phase" (forward-attn,
+         forward-FFN, backward-attn, backward-FFN, gradient-sync).
+      2. Tracking which collectives co-occur per phase given the chosen
+         schedule (1F1B reorders backward differently than GPipe).
+      3. Reshaping the critical-path computation in this function to
+         compute per-window exposed comm rather than summing terms.
+
+    Deferred to v2 because it's a structural change. For 1-2 dimensional
+    parallelism (TP-only, DP-only, TP+PP) the current model is within
+    20% of reality; the gap is largest at 4D-parallel 1000+ GPU runs.
+    See plan/redesign/01-parallelism-fixes.md Step 1.6.5.
+    -----------------------------------------------------------------
+
     Args:
         arch: Architecture configuration.
         hardware: Hardware target name.
         tp_degree: Tensor parallelism degree.
         pp_degree: Pipeline parallelism degree.
-        microbatches: Number of microbatches for pipeline parallelism.
+        microbatches: Number of pipeline microbatches. This is independent of
+            the data-parallel replica count.
+        dp_degree: Data-parallel degree used for gradient synchronization and
+            FSDP/ZeRO-3 memory sharding.
         decode_kv_len: KV cache length for decode phase estimate.
         prefill_seq_len: Prompt length for cold-prefill TTFT. Defaults to
             arch.seq_len for backward compatibility; callers should pass the
@@ -1883,7 +2709,42 @@ def throughput(
         lattice_hw_override: Override lattice hardware name (if different from throughput hw).
     """
     hw = load_hardware(hardware)
+    # Wave 21: EP=1 MoE is a legal execution plan, not an error. With TP>1
+    # the experts are TP-sharded like any FFN (each rank holds a
+    # 1/tp-slice of EVERY expert) — this is the standard vLLM/TRT-LLM
+    # Mixtral TP8 deployment, and the parameter ledger already shards
+    # expert params by tp×pp×ep. The old guard ("EP=1 would replicate all
+    # experts") was wrong for tp>1, and its blast radius was large: the
+    # trust audit fabricated EP=2 for MoE anchors whose published
+    # benchmarks ran TP-only, inflating the modeled GPU count 2× and
+    # manufacturing a uniform −50…−62% per-GPU memory "model bias" (plus
+    # inflated TBT/TTFT errors) that got baked into family_bias_v1.json.
+    # The MoE cost path needs no special-casing at ep=1: all-to-all
+    # degenerates to a ~1us local dispatch, every routed token stays
+    # local, and expert_dim is already TP-sharded.
+    dp_degree = max(
+        1, int(dp_degree if dp_degree is not None else getattr(arch, "dp_degree", 1))
+    )
+    microbatches = max(
+        1,
+        int(
+            microbatches
+            if microbatches is not None
+            else getattr(arch, "pipeline_microbatches", 1)
+        ),
+    )
     cal_table = load_calibration(hardware)
+    # Wave 7b.4: publish the per-hw calibration on a module-level holder so
+    # helpers that don't take a cal_table argument (e.g. `_allreduce_cost`)
+    # can consult the fitted overrides. The throughput model is synchronous,
+    # so each top-level `throughput()` call overwrites this before doing
+    # work; we deliberately do not use try/finally because (a) the model
+    # never holds external resources we'd need to release on exception,
+    # (b) the next throughput() call always sets a fresh value, and
+    # (c) wrapping the 450-line body in try/finally just to clear a
+    # cache pointer is structural noise.
+    global _CURRENT_CALIBRATION
+    _CURRENT_CALIBRATION = cal_table
 
     # Map throughput hardware name to lattice hardware name
     lattice_hw_name = lattice_hw_override or hardware
@@ -1900,7 +2761,13 @@ def throughput(
         precision=arch.precision,
         tp_degree=tp_degree,
         pp_degree=pp_degree,
+        dp_degree=dp_degree,
+        ep_degree=ep_degree,
+        cp_degree=max(1, int(getattr(arch, "cp_degree", 1) or 1)),
+        pipeline_microbatches=microbatches,
         decode_kv_cache_length=decode_kv_len,
+        serving_scheduler=str(getattr(arch, "serving_scheduler", "continuous")),
+        effective_serving_batch=max(1, int(arch.batch_size)),
     )
 
     layers_per_stage = arch.n_layers // max(pp_degree, 1)
@@ -1912,13 +2779,21 @@ def throughput(
         cal.get("kernels_per_layer", 12) * 1e-6
     )
 
-    # Check if we have a heterogeneous (hybrid) architecture
+    # Check if we have a heterogeneous (hybrid) architecture.
+    # Wave 18g: a local:global attention interleave is also heterogeneous —
+    # local layers cost differently in decode KV reads and prefill span.
     is_hybrid = (arch.layer_type_list is not None and
-                 any(lt == "state" for lt in arch.layer_type_list) and
-                 arch.state_config is not None)
+                 ((any(lt == "state" for lt in arch.layer_type_list) and
+                   arch.state_config is not None) or
+                  any(lt == "local_attention" for lt in arch.layer_type_list)))
 
     # Kernel launch overhead across all layers
+    # Wave 17 Part 1 fix (Jun 2026): training/prefill see only this stage's
+    # layers per step, but decode walks every layer for every new token
+    # (autoregressive), so the decode kernel-overhead total must scale with
+    # arch.n_layers, not layers_per_stage.
     kernel_overhead_total = kernel_overhead_per_layer_s * layers_per_stage
+    kernel_overhead_decode_total = kernel_overhead_per_layer_s * arch.n_layers
     prefill_arch = arch
     if prefill_seq_len is not None and int(prefill_seq_len) != arch.seq_len:
         prefill_arch = replace(arch, seq_len=max(1, int(prefill_seq_len)))
@@ -1946,11 +2821,15 @@ def throughput(
     # default here; future work: thread an explicit
     # `constraints.training_micro_batch` through evaluate_candidate.
     TRAINING_MICRO_BATCH_PER_REPLICA = 8
+    configured_training_mb = int(
+        getattr(arch, "training_micro_batch", 0) or 0
+    )
     train_arch = replace(
         arch,
-        batch_size=max(
-            int(getattr(arch, "training_micro_batch", 0) or 0),
-            TRAINING_MICRO_BATCH_PER_REPLICA,
+        batch_size=(
+            configured_training_mb
+            if configured_training_mb > 0
+            else TRAINING_MICRO_BATCH_PER_REPLICA
         ),
     )
 
@@ -1977,7 +2856,18 @@ def throughput(
             kv_cache_len=decode_kv_len, calibration=cal_table,
             ep_degree=ep_degree, ep_topology=ep_topology,
         )
-        raw_decode_s = sum(bd.total_s for bd in decode_layers[:layers_per_stage])
+        # Wave 17 Part 1 fix (Jun 2026): decode is autoregressive — every
+        # new token must traverse all `arch.n_layers` sequentially regardless
+        # of PP. The prior code used `layers_per_stage = n_layers / pp_degree`
+        # for raw_decode_s, which made PP look like a linear decode speedup
+        # (1000B@TP=32,PP=8 reported 6.9ms TBT — *lower* than 7B@TP=4 at
+        # 12.8ms — physically impossible). PP only helps TRAINING (microbatch
+        # pipelining); at decode each token still walks the whole stack.
+        # We use sum of ALL per-layer costs from the heterogeneous path; the
+        # first `layers_per_stage` slice is a leftover from when this branch
+        # mistakenly mirrored the training/prefill subsampling.
+        # See plan/redesign/17-pp-decode-serving-cost-fix.md.
+        raw_decode_s = sum(bd.total_s for bd in decode_layers[:arch.n_layers])
         layer_decode = decode_layers[0]
     else:
         # --- Uniform path (v0 behavior) ---
@@ -1996,22 +2886,39 @@ def throughput(
             kv_cache_len=decode_kv_len, calibration=cal_table,
             ep_degree=ep_degree, ep_topology=ep_topology,
         )
-        raw_decode_s = layer_decode.total_s * layers_per_stage
+        # Wave 17 Part 1 fix (Jun 2026): decode walks all `arch.n_layers`
+        # regardless of PP — see the hybrid branch comment above for the
+        # full reasoning. Replaces `layer_decode.total_s * layers_per_stage`
+        # which made PP > 1 erroneously divide decode TBT linearly.
+        raw_decode_s = layer_decode.total_s * arch.n_layers
 
     # Optimizer step: read params + gradients, write params + optimizer states
     # AdamW: ~12 bytes per param (fp32 master weights + m + v)
-    total_params = estimate_params(
-        arch.d_model, arch.n_heads, arch.d_head, arch.ffn_dim,
-        arch.n_layers, arch.n_kv_heads, arch.vocab_size
+    ledger = parameter_ledger(arch)
+    params_per_gpu = ledger.local_total_params(
+        tp=tp_degree, pp=pp_degree, ep=ep_degree
     )
-    params_per_gpu = total_params / tp_degree / max(pp_degree, 1)
     opt_bytes = params_per_gpu * cal.get("optimizer_bytes_per_param", 12)
     optimizer_step_s = opt_bytes / hw.hbm_bandwidth_bytes_s
 
     # Pipeline bubble
+    # v1-fix Wave 1 Step 1.5 (Jun 2026): the GPipe formula
+    # (pp - 1) / (M_micro + pp - 1) was the only option in v0; 1F1B
+    # cuts the bubble in half (backward of microbatch i overlaps with
+    # forward of microbatch i + pp), and Megatron interleaved 1F1B with
+    # v virtual stages cuts it by another factor of v.
+    # Reference: Narayanan et al. (Megatron-LM v2, 2021), §3.
     if pp_degree > 1:
         M_micro = max(microbatches, 1)
-        bubble = (pp_degree - 1) / (M_micro + pp_degree - 1)
+        gpipe_bubble = (pp_degree - 1) / (M_micro + pp_degree - 1)
+        schedule = getattr(arch, "pp_schedule", "1f1b")
+        if schedule == "1f1b":
+            bubble = 0.5 * gpipe_bubble
+        elif schedule == "interleaved":
+            v_stages = max(1, int(getattr(arch, "pp_virtual_stages", 2)))
+            bubble = gpipe_bubble / v_stages
+        else:  # "gpipe"
+            bubble = gpipe_bubble
     else:
         bubble = 0.0
     result.bubble_fraction = bubble
@@ -2021,6 +2928,38 @@ def throughput(
     sys_eff_train, sigma_train, bucket_train = _efficiency_for(
         "training", train_bottleneck, arch, cal)
     train_step_s = (raw_train_s * 3.0 + kernel_overhead_total * 3 + optimizer_step_s) * (1 + bubble) / sys_eff_train
+    optimizer_step_exposed_s = (
+        optimizer_step_s * (1 + bubble) / sys_eff_train
+    )
+
+    # Pipeline activation/gradient transfers. In steady-state training, each
+    # stage sends activations forward and gradients backward once per
+    # microbatch; the slowest boundary limits throughput. Bubble cost remains
+    # separate above. Prefill/decode latency traverses every boundary.
+    pp_prefill_path_s = 0.0
+    if pp_degree > 1:
+        train_payload = (
+            train_arch.batch_size
+            * train_arch.seq_len
+            * train_arch.d_model
+            * hw.bytes_per_elem(arch.precision)
+        )
+        worst_boundary_s, _ = _pipeline_link_costs(
+            train_payload, pp_degree, hw
+        )
+        result.pp_training_comm_s = 2.0 * worst_boundary_s
+        train_step_s += result.pp_training_comm_s
+
+        prefill_payload = (
+            prefill_arch.batch_size
+            * prefill_arch.seq_len
+            * prefill_arch.d_model
+            * hw.bytes_per_elem(arch.precision)
+        )
+        _, pp_prefill_path_s = _pipeline_link_costs(
+            prefill_payload, pp_degree, hw
+        )
+        result.pp_prefill_comm_s = pp_prefill_path_s
 
     # v1-fix MTP: extra training compute from MTP heads (DeepSeek-V3 §2.2).
     # Each MTP depth is a small transformer block run on the same batch,
@@ -2035,22 +2974,97 @@ def throughput(
 
     # v1-fix CP: Context Parallelism — split sequence across `cp_degree` ranks.
     # Attention compute and KV memory both shrink by 1/cp; the all-gather/
-    # ring-attention comm cost is (cp-1)/cp × n_layers × B × S × d_model × bpe.
+    # ring-attention comm cost is (cp-1)/cp × n_attn_layers × B × S × d_model × bpe.
     # Ulysses is roughly 2× cheaper in comm than Ring (head scatter vs ring KV).
+    #
+    # v1-fix CP-hybrid (Jun 2026, redesign Wave 1 Step 1.1): state layers do
+    # NOT need full-activation all-gather. Under chunk-parallel SSM (Mamba-2
+    # production path), the comm cost across cp ranks is just the recurrent
+    # SSM state per layer boundary: heads × d_state × d_head × bpe per chunk,
+    # passed in log2(cp) rounds via parallel scan (Brent-Kung). For a striped
+    # hybrid (e.g. 1:7 attention:state) this is ~3-5 orders of magnitude
+    # smaller than the attention all-gather. Treating all layers as attention
+    # over-counted CP comm by ~n_layers/n_attn_layers and made hybrids look
+    # artificially expensive at long context.
     cp = max(1, int(getattr(arch, "cp_degree", 1) or 1))
     if cp > 1:
-        # Compute & memory share of the seq-parallel work (training batch)
         bpe_act = hw.bytes_per_elem(arch.precision)
-        seq_bytes_per_layer = train_arch.batch_size * train_arch.seq_len * train_arch.d_model * bpe_act
         comm_factor = (cp - 1) / cp
         cp_method_factor = 0.5 if getattr(arch, "cp_method", "ring") == "ulysses" else 1.0
-        cp_comm_bytes = comm_factor * arch.n_layers * seq_bytes_per_layer * cp_method_factor
+
+        # Split layers by type
+        layer_types_for_cp = arch.layer_type_list or (["attention"] * arch.n_layers)
+        n_attn_cp = sum(
+            1 for lt in layer_types_for_cp
+            if lt in ("attention", "local_attention")
+        )
+        n_state_cp = sum(1 for lt in layer_types_for_cp if lt == "state")
+
+        # Attention layers: ring/ulysses on full activations
+        attn_seq_bytes_per_layer = train_arch.batch_size * train_arch.seq_len * train_arch.d_model * bpe_act
+        attn_cp_comm_bytes = comm_factor * n_attn_cp * attn_seq_bytes_per_layer * cp_method_factor
+
+        # State layers: chunk-parallel SSM — pass the SSM state, log2(cp) rounds
+        state_cp_comm_bytes = 0.0
+        if n_state_cp > 0:
+            sc = arch.state_config or {}
+            state_n_heads = int(sc.get("n_heads", arch.n_heads))
+            state_d_head = int(sc.get("d_head", 64))
+            d_state = int(sc.get("d_state", 128))
+            state_bytes_per_layer = (train_arch.batch_size * state_n_heads
+                                     * d_state * state_d_head * bpe_act)
+            state_cp_comm_bytes = (math.log2(max(2, cp)) * n_state_cp
+                                   * state_bytes_per_layer)
+
+        cp_comm_bytes = attn_cp_comm_bytes + state_cp_comm_bytes
         # All-gather over NVLink within the CP group
-        nvlink_bw = hw.interconnect["intra_node_bw_gb_s"] * 1e9
-        cp_comm_s = cp_comm_bytes / max(1.0, nvlink_bw)
+        cp_bw = hw.interconnect_bw_bytes_s(cp)
+        cp_comm_s = cp_comm_bytes / max(1.0, cp_bw)
         # CP reduces the attention compute proportionally; sequence-parallel
         # FLOP savings are folded into raw_train_s here.
-        train_step_s = train_step_s / cp + cp_comm_s
+        # CP partitions token work, not optimizer-state traffic or pipeline
+        # transfers. Preserve those non-shardable components rather than
+        # granting them an artificial 1/cp speedup.
+        non_cp_shardable_s = (
+            optimizer_step_exposed_s + result.pp_training_comm_s
+        )
+        cp_shardable_s = max(0.0, train_step_s - non_cp_shardable_s)
+        train_step_s = (
+            cp_shardable_s / cp + non_cp_shardable_s + cp_comm_s
+        )
+
+    # v1-fix Wave 1 Step 1.2 (Jun 2026): DP gradient sync.
+    # The v0 model assumed aggregate_tps = per_replica × dp_degree (perfect
+    # scaling). At dp ≥ 64 the gradient reduce-scatter + weight all-gather
+    # cost grows with params × bpe / inter_node_bw and becomes 10-50% of
+    # the training step time. Folding it into train_step_s here makes
+    # `training_throughput_tokens_per_sec × dp_degree` an honest
+    # aggregate.
+    dp_degree_for_grad = dp_degree
+    if dp_degree_for_grad > 1:
+        local_params_for_dp = ledger.local_total_params(
+            tp=tp_degree, pp=pp_degree, ep=ep_degree
+        )
+        # Wave 7b.4: pull the DP overlap fraction from the calibration
+        # table when fitted; fall back to the default in the function
+        # signature otherwise. The pattern is to read the override into a
+        # local then pass it explicitly so the function's own default
+        # remains the source of truth for "no calibration available".
+        _dp_overlap_override = (
+            cal_table.dp_grad_overlap_fraction if cal_table is not None else None
+        )
+        _dp_overlap_kw = (
+            {"overlap_fraction": _dp_overlap_override}
+            if _dp_overlap_override is not None else {}
+        )
+        dp_grad_s = _dp_grad_allreduce_cost(
+            int(local_params_for_dp), arch.precision, hw,
+            dp_degree_for_grad, zero_stage=3,
+            **_dp_overlap_kw,
+        )
+        train_step_s = train_step_s + dp_grad_s
+        result.dp_grad_allreduce_s = dp_grad_s
+
     # Per-replica tokens per step uses the *training* batch, not serving.
     tokens_per_step = train_arch.batch_size * train_arch.seq_len
     result.training_time_per_step_s = train_step_s
@@ -2062,23 +3076,94 @@ def throughput(
         "prefill", prefill_bottleneck, arch, cal)
     raw_prefill = raw_prefill_s + kernel_overhead_total
     if cp > 1 and (prefill_seq_len or arch.seq_len) >= 32768:
+        # Mirror of the training CP block: split comm by layer type so state
+        # layers pay state-pass cost (log2(cp) × state_bytes), not full-
+        # activation all-gather. See Wave 1 Step 1.1 in plan/redesign/.
         bpe_act = hw.bytes_per_elem(arch.precision)
         prefill_s = max(1, int(prefill_seq_len or arch.seq_len))
-        seq_bytes_per_layer = prefill_arch.batch_size * prefill_s * prefill_arch.d_model * bpe_act
         comm_factor = (cp - 1) / cp
         cp_method_factor = 0.5 if getattr(arch, "cp_method", "ring") == "ulysses" else 1.0
-        cp_comm_bytes = comm_factor * layers_per_stage * seq_bytes_per_layer * cp_method_factor
-        nvlink_bw = hw.interconnect["intra_node_bw_gb_s"] * 1e9
-        cp_prefill_comm_s = cp_comm_bytes / max(1.0, nvlink_bw)
+
+        layer_types_for_cp = arch.layer_type_list or (["attention"] * arch.n_layers)
+        n_attn_cp_stage = int(
+            sum(
+                1 for lt in layer_types_for_cp
+                if lt in ("attention", "local_attention")
+            )
+            * layers_per_stage / max(1, arch.n_layers) + 0.5
+        )
+        n_state_cp_stage = int(
+            sum(1 for lt in layer_types_for_cp if lt == "state")
+            * layers_per_stage / max(1, arch.n_layers) + 0.5
+        )
+
+        attn_seq_bytes_per_layer = (prefill_arch.batch_size * prefill_s
+                                    * prefill_arch.d_model * bpe_act)
+        attn_cp_comm_bytes = comm_factor * n_attn_cp_stage * attn_seq_bytes_per_layer * cp_method_factor
+
+        state_cp_comm_bytes = 0.0
+        if n_state_cp_stage > 0:
+            sc = arch.state_config or {}
+            state_n_heads = int(sc.get("n_heads", arch.n_heads))
+            state_d_head = int(sc.get("d_head", 64))
+            d_state = int(sc.get("d_state", 128))
+            state_bytes_per_layer = (prefill_arch.batch_size * state_n_heads
+                                     * d_state * state_d_head * bpe_act)
+            state_cp_comm_bytes = (math.log2(max(2, cp)) * n_state_cp_stage
+                                   * state_bytes_per_layer)
+
+        cp_comm_bytes = attn_cp_comm_bytes + state_cp_comm_bytes
+        cp_bw = hw.interconnect_bw_bytes_s(cp)
+        cp_prefill_comm_s = cp_comm_bytes / max(1.0, cp_bw)
         raw_prefill = raw_prefill / cp + cp_prefill_comm_s
+    raw_prefill += pp_prefill_path_s
     result.prefill_time_ms = raw_prefill / sys_eff_prefill * 1000
 
     # --- Decode ---
     decode_bottleneck = getattr(layer_decode, "bottleneck", "memory")
     sys_eff_decode, sigma_decode, bucket_decode = _efficiency_for(
         "decode", decode_bottleneck, arch, cal)
-    raw_decode = raw_decode_s + kernel_overhead_total
+    # Wave 17 Part 1 fix (Jun 2026): use the decode-specific kernel-overhead
+    # total (which scales with arch.n_layers, not layers_per_stage) — the
+    # original used kernel_overhead_total which divided by PP and made the
+    # serving cost look linearly cheaper as PP grew.
+    raw_decode = raw_decode_s + kernel_overhead_decode_total
+    # Wave 17 Part 1 fix (Jun 2026): PP decode bubble. At PP > 1, every
+    # token crosses (pp_degree - 1) stage boundaries; each boundary needs
+    # an activation send/recv between adjacent pipeline stages. For decode
+    # the activation is small (B × 1 × d_model × bpe) so this is bandwidth-
+    # dominated, but latency adds up at long pipelines. Round-trip across
+    # NVLink is ~3-5 µs; over IB ~10-15 µs. We use a conservative 5 µs per
+    # boundary intra-island and the inter-node BW transit time outside it.
+    if pp_degree > 1:
+        bpe_act = hw.bytes_per_elem(arch.precision)
+        decode_payload = max(1, arch.batch_size) * arch.d_model * bpe_act
+        _, pp_decode_path_s = _pipeline_link_costs(
+            decode_payload, pp_degree, hw
+        )
+        result.pp_decode_comm_s = pp_decode_path_s
+        raw_decode += pp_decode_path_s
     result.decode_time_per_token_ms = raw_decode / sys_eff_decode * 1000
+
+    # Scheduler launch/dispatch overhead. Kernel service time is already
+    # modeled above; this adds only the control-plane work that differs by
+    # scheduler. Values are calibration knobs, not hidden changes to GEMM
+    # efficiency.
+    scheduler = str(getattr(arch, "serving_scheduler", "continuous"))
+    scheduler_overheads = cal.get("scheduler_overhead_us", {}) or {}
+    default_overheads = {"static": 0.0, "continuous": 2.0, "chunked": 4.0}
+    scheduler_overhead_us = float(
+        scheduler_overheads.get(
+            scheduler, default_overheads.get(scheduler, 0.0)
+        )
+    )
+    result.decode_time_per_token_ms += scheduler_overhead_us / 1000.0
+    if scheduler == "chunked":
+        chunk_size = max(1, int(getattr(arch, "prefill_chunk_size", 65536)))
+        n_chunks = max(1, math.ceil(int(prefill_seq_len or arch.seq_len) / chunk_size))
+        result.prefill_time_ms += (
+            n_chunks * scheduler_overhead_us / 1000.0
+        )
 
     # --- Sigma propagation (v1-fix #28) ---
     # Convert efficiency sigma into absolute uncertainty on each phase's
@@ -2104,17 +3189,20 @@ def throughput(
     )
 
     # --- Memory ---
+    # v1-fix long-ctx (June 2026): pass cp through so the KV cache and
+    # CP-sharded activations get their 1/cp credit; without this every
+    # long-ctx cell was infeasible by KV alone regardless of cp_degree.
     if is_hybrid:
         mem_bytes = estimate_memory_per_gpu_hybrid(
             arch, tp_degree, pp_degree,
             include_kv_cache=True, kv_cache_len=decode_kv_len,
-            ep_degree=ep_degree,
+            ep_degree=ep_degree, cp_degree=cp,
         )
     else:
         mem_bytes = estimate_memory_per_gpu(
             arch, tp_degree, pp_degree,
             include_kv_cache=True, kv_cache_len=decode_kv_len,
-            ep_degree=ep_degree,
+            ep_degree=ep_degree, cp_degree=cp,
         )
     result.memory_footprint_per_gpu_gb = mem_bytes / (1024**3)
 
@@ -2129,18 +3217,16 @@ def throughput(
     # We surface this so the optimizer / report can flag training-infeasible
     # configs even when inference-memory fits.
     try:
-        total_params_for_train = estimate_params(
-            arch.d_model, arch.n_heads, arch.d_head, arch.ffn_dim,
-            arch.n_layers, arch.n_kv_heads, arch.vocab_size,
-        )
         bpe_train = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(
             arch.precision, 2)
         opt_bpp = float(cal.get("optimizer_bytes_per_param", 12))
-        dp_shard = max(1, int(getattr(arch, "dp_degree", 1)))
-        full_shard = max(1, tp_degree * dp_shard)
-        weight_bytes = total_params_for_train * bpe_train / full_shard
-        grad_bytes = total_params_for_train * bpe_train / full_shard
-        opt_bytes_total = total_params_for_train * opt_bpp / full_shard
+        dp_shard = dp_degree
+        local_params = ledger.local_total_params(
+            tp=tp_degree, pp=pp_degree, ep=ep_degree
+        )
+        weight_bytes = local_params * bpe_train / dp_shard
+        grad_bytes = local_params * bpe_train / dp_shard
+        opt_bytes_total = local_params * opt_bpp / dp_shard
         # Activations: rough O(microbatch * seq * d_model * 10 * bpe) per
         # gradient checkpoint region. We reuse the activations term computed
         # by estimate_memory_per_gpu by recomputing it for the training
@@ -2153,6 +3239,89 @@ def throughput(
         # If anything is missing (e.g. estimate_params unavailable for
         # exotic state-space configs), leave at 0.0 and skip the check.
         result.training_memory_per_gpu_gb = 0.0
+
+    # --- HBM-overflow → continuous spill penalty (Wave 2a Step 2a.2) ---
+    # When memory_per_gpu exceeds HBM, replace the v0 hard-cap with a
+    # smooth bandwidth-tiered penalty. Decode is HBM-bandwidth bound (weights
+    # + KV stream), so the overflow fraction effectively reads from a slower
+    # tier (NVLink first, then PCIe / IB). Prefill is more compute-bound,
+    # so it's hit by only ~30% of the same multiplier.
+    #
+    # Tiers, per GPU:
+    #   - HBM:    full hbm_bandwidth_bytes_s
+    #   - NVLink: intra_node_bw_gb_s × 1e9 (3-5× slower than HBM)
+    #   - PCIe:   ~64 GB/s default (PCIe 5) — 50-100× slower than HBM
+    #   - IB:     inter_node_bw_gb_s — comparable to PCIe on most clusters
+    #
+    # NVLink pool ≈ (gpus_per_node - 1) × HBM (one rank's worth per peer).
+    # Anything past that spills to PCIe (or remote node via IB; we pick min).
+    result.tbt_ms_no_spill = result.decode_time_per_token_ms
+    result.ttft_ms_no_spill = result.prefill_time_ms
+    hbm_bytes_per_gpu = float(hw.hbm_capacity_gb) * (1024 ** 3)
+    mem_bytes_for_spill = float(result.memory_footprint_per_gpu_gb) * (1024 ** 3)
+    overflow_bytes = max(0.0, mem_bytes_for_spill - hbm_bytes_per_gpu)
+    if overflow_bytes > 0:
+        nvlink_pool_bytes = max(1, hw.gpus_per_node - 1) * hbm_bytes_per_gpu
+        nvlink_bytes = min(overflow_bytes, nvlink_pool_bytes)
+        pcie_bytes = max(0.0, overflow_bytes - nvlink_pool_bytes)
+
+        hbm_bw = hw.hbm_bandwidth_bytes_s
+        nvlink_bw = max(1.0, hw.interconnect["intra_node_bw_gb_s"] * 1e9)
+        pcie_bw_default = hw.interconnect.get("pcie_bw_gb_s", 64) * 1e9
+        inter_bw = max(1.0, hw.interconnect["inter_node_bw_gb_s"] * 1e9)
+        # If the user has many remote nodes, IB might be faster than PCIe;
+        # take the better of the two as the second-tier spill bandwidth.
+        spill_far_bw = max(pcie_bw_default, inter_bw)
+
+        # Effective bandwidth as a weighted harmonic mean across tiers.
+        hbm_frac = (mem_bytes_for_spill - overflow_bytes) / mem_bytes_for_spill
+        nvlink_frac = nvlink_bytes / mem_bytes_for_spill
+        far_frac = pcie_bytes / mem_bytes_for_spill
+        inv_bw = (hbm_frac / hbm_bw
+                  + nvlink_frac / nvlink_bw
+                  + far_frac / spill_far_bw)
+        effective_bw = 1.0 / inv_bw if inv_bw > 0 else hbm_bw
+        decode_spill_factor = hbm_bw / max(effective_bw, 1.0)
+        # Prefill is partially compute-bound; apply only 30% of the
+        # bandwidth penalty so we don't double-count the compute path.
+        prefill_spill_factor = 1.0 + 0.3 * (decode_spill_factor - 1.0)
+
+        result.decode_time_per_token_ms *= decode_spill_factor
+        result.prefill_time_ms *= prefill_spill_factor
+        result.hbm_spill_gb = overflow_bytes / (1024 ** 3)
+        if pcie_bytes <= 0:
+            result.spill_tier = "nvlink"
+        elif nvlink_bytes <= 0:
+            result.spill_tier = "pcie"
+        else:
+            result.spill_tier = "mixed"
+    else:
+        result.hbm_spill_gb = 0.0
+        result.spill_tier = "fits"
+
+    # Wave 29: additive serving-stack TTFT floor (tokenize + scheduler
+    # admission + sampler + detokenize + transport). Applied AFTER the
+    # spill adjustment because it is control-plane latency, not HBM
+    # traffic. Excludes load-dependent queueing — see the module-level
+    # note at DEFAULT_TTFT_FIXED_OVERHEAD_MS. Calibratable per hardware
+    # target via calibration["ttft_serving_overhead"].
+    _ttft_ovh_cfg = cal.get("ttft_serving_overhead", {}) or {}
+    _ttft_fixed_ms = float(
+        _ttft_ovh_cfg.get("fixed_ms", DEFAULT_TTFT_FIXED_OVERHEAD_MS))
+    _ttft_per_tok_us = float(
+        _ttft_ovh_cfg.get("per_prompt_token_us",
+                          DEFAULT_TTFT_PER_PROMPT_TOKEN_US))
+    _ttft_prompt_tokens = max(1, int(prefill_seq_len or arch.seq_len))
+    result.ttft_serving_overhead_ms = (
+        _ttft_fixed_ms + _ttft_per_tok_us * _ttft_prompt_tokens / 1000.0)
+    result.prefill_time_ms += result.ttft_serving_overhead_ms
+    result.ttft_ms_no_spill += result.ttft_serving_overhead_ms
+
+    result.serving_request_latency_ms = (
+        result.prefill_time_ms
+        + max(1, int(getattr(arch, "serving_output_len", 1)))
+        * result.decode_time_per_token_ms
+    )
 
     # Per-layer breakdowns for all phases
     result.per_layer_breakdown = layer_train

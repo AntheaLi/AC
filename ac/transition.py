@@ -11,14 +11,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from stress import (
-    StressVector,
-    STRESS_AXES,
-    active_axes_for_phase,
-    severity_band,
-    PRESSURED_OR_WORSE,
-)
-from quality_stress import QualityStressVector, QUALITY_STRESS_AXES
+try:
+    from .stress import (
+        StressVector, STRESS_AXES, active_axes_for_phase, severity_band,
+        PRESSURED_OR_WORSE,
+    )
+    from .quality_stress import QualityStressVector, QUALITY_STRESS_AXES
+except ImportError:
+    from stress import (
+        StressVector, STRESS_AXES, active_axes_for_phase, severity_band,
+        PRESSURED_OR_WORSE,
+    )
+    from quality_stress import QualityStressVector, QUALITY_STRESS_AXES
 
 
 @dataclass
@@ -90,9 +94,17 @@ class Transition:
     # ------------------------------------------------------------------
 
     def relief_score(self) -> float:
-        """Sum of stress relief over baseline's binding axes (instruction §5.2).
+        """Signed stress relief over baseline's binding axes (instruction §5.2).
 
         Higher = more relief on what was binding. Used by the ranker.
+
+        Signed, not clamped: a candidate that pushes an already-binding
+        axis further into violation must rank *below* a neutral candidate.
+        The old `max(0.0, bv - cv)` clamp let e.g. MLA-at-TP>=latent-width
+        (which replicates the latent KV per rank and worsens hbm_capacity)
+        tie at 0.0 with a genuinely neutral change — and the axis could
+        never appear in `new_binding_axes` because it was already binding
+        at baseline, so no penalty fired anywhere.
         """
         if not self.baseline_stress or not self.candidate_stress:
             return 0.0
@@ -100,7 +112,7 @@ class Transition:
         for axis in self.baseline_stress.binding_axes:
             bv = getattr(self.baseline_stress, axis)
             cv = getattr(self.candidate_stress, axis)
-            s += max(0.0, bv - cv)
+            s += bv - cv
         # Penalize newly pressured axes that weren't pressured before.
         for axis in self.new_binding_axes:
             cv = getattr(self.candidate_stress, axis)

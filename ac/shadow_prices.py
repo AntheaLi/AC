@@ -63,6 +63,23 @@ class ShadowPriceReport:
     arch_dim_prices: List[ArchDimShadowPrice] = field(default_factory=list)
     base_loss: float = 0.0
     hardware: str = ""
+    # Wave 29: when the main search ran uncapped (or above the shadow
+    # cap), perturbation re-runs use a deterministic stride-sampled cap
+    # and the deltas are computed against a base re-optimized under the
+    # SAME cap, so sampling bias cancels in the difference. Empty when
+    # perturbations ran at the main search's own candidate budget.
+    sampling_note: str = ""
+
+
+# Wave 29: candidate cap for the constraint-perturbation re-runs. The v0
+# docstring priced shadow prices at "~30 seconds"; once the default main
+# search went uncapped (~9-10k candidates at 7B), 6 perturbation re-runs
+# each re-enumerated the full lattice and tripled the CLI's total
+# runtime. 1600 stride-sampled candidates keep each re-run in the
+# seconds range; deltas stay clean because the base is re-optimized
+# under the same cap (like-for-like), not borrowed from the uncapped
+# main search.
+SHADOW_PERTURBATION_CANDIDATE_CAP = 1600
 
 
 # =============================================================================
@@ -215,6 +232,32 @@ def compute_shadow_prices(
     base_loss = base_result.optimal.predicted_loss
     prices = []
 
+    # Wave 29: cap the perturbation re-runs. When the main search ran
+    # uncapped (max_candidates unset/0) or above the shadow cap, each of
+    # the ~6 re-runs below would re-enumerate the full lattice — on the
+    # default 7B run that tripled total CLI time. Re-optimize the BASE
+    # once under the same deterministic stride-sampled cap and compute
+    # every delta capped-vs-capped, so lattice-sampling bias cancels in
+    # the difference instead of contaminating small (~0.1-1%) deltas.
+    sampling_note = ""
+    mc = int(getattr(constraints, "max_candidates", 0) or 0)
+    if mc == 0 or mc > SHADOW_PERTURBATION_CANDIDATE_CAP:
+        capped_constraints = copy.deepcopy(constraints)
+        capped_constraints.max_candidates = SHADOW_PERTURBATION_CANDIDATE_CAP
+        capped_base = optimize(hw_name, capped_constraints)
+        if capped_base.optimal is not None:
+            constraints = capped_constraints
+            base_loss = capped_base.optimal.predicted_loss
+            sampling_note = (
+                f"Perturbation re-runs stride-sampled at "
+                f"{SHADOW_PERTURBATION_CANDIDATE_CAP} candidates (main "
+                f"search ran {'uncapped' if mc == 0 else f'at {mc}'}); "
+                "deltas are computed against a base re-optimized under "
+                "the same cap, so sampling bias cancels in the "
+                "difference. Loss levels here may differ slightly from "
+                "the main search's optimum."
+            )
+
     # 1. TBT budget +20%
     if constraints.serving_tbt_ms is not None:
         pc = copy.deepcopy(constraints)
@@ -293,6 +336,7 @@ def compute_shadow_prices(
         arch_dim_prices=arch_dim,
         base_loss=round(base_loss, 4),
         hardware=hw_name,
+        sampling_note=sampling_note,
     )
 
 
@@ -482,6 +526,8 @@ def shadow_prices_to_json(report: ShadowPriceReport) -> dict:
     return {
         "base_loss": report.base_loss,
         "hardware": report.hardware,
+        **({"sampling_note": report.sampling_note}
+           if getattr(report, "sampling_note", "") else {}),
         "prices": [
             {
                 "constraint": p.constraint,

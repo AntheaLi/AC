@@ -15,8 +15,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from stress import severity_band, PRESSURED_OR_WORSE
-from transition import Transition
+try:
+    from .stress import severity_band, PRESSURED_OR_WORSE
+    from .transition import Transition
+except ImportError:
+    from stress import severity_band, PRESSURED_OR_WORSE
+    from transition import Transition
 
 
 # Pretty names for stress axes when surfaced in prose.
@@ -82,6 +86,41 @@ def _format_binding_state(transition: Transition) -> str:
     return ("Baseline binding stresses: " + ", ".join(parts) + ".")
 
 
+_UTILIZATION_AXIS_STEP_KEY = {
+    # Utilization-style axes: value = volume / (capacity × step_time). A drop
+    # can mean "less pressure" (volume fell) OR "the step got slower" (time
+    # denominator grew). Only the first is relief.
+    "hbm_bw_decode": ("decode_step_s", "kv_bytes"),
+    "hbm_bw_prefill": ("prefill_step_s", "act_bytes"),
+    "tc_util_decode": ("decode_step_s", "decode_flops"),
+    "tc_util_prefill": ("prefill_step_s", "prefill_flops"),
+}
+
+
+def _utilization_drop_caveat(transition: Transition, axis: str) -> str:
+    """Wave 18h: distinguish a true traffic reduction from a denominator
+    artifact. Previously an MLA swap that made decode 50% SLOWER printed
+    "drops HBM-BW-decode by 0.25" — reading as a win — because the
+    utilization ratio fell when the step time grew. Check the step-time
+    intermediates and say which one moved."""
+    keys = _UTILIZATION_AXIS_STEP_KEY.get(axis)
+    if keys is None:
+        return ""
+    step_key, _vol_key = keys
+    b_i = getattr(transition.baseline_stress, "intermediates", None) or {}
+    c_i = getattr(transition.candidate_stress, "intermediates", None) or {}
+    b_t = float(b_i.get(step_key, 0.0) or 0.0)
+    c_t = float(c_i.get(step_key, 0.0) or 0.0)
+    if b_t <= 0 or c_t <= 0:
+        return ""
+    step_pct = 100.0 * (c_t - b_t) / b_t
+    if step_pct > 2.0:
+        return (f" — utilization fell because the step SLOWED "
+                f"({step_pct:+.0f}% step time), not because pressure was "
+                "relieved")
+    return ""
+
+
 def _format_relief(transition: Transition) -> str:
     """Sentence 2 — what the transformation actually did to stress."""
     if transition.candidate_stress is None:
@@ -93,9 +132,12 @@ def _format_relief(transition: Transition) -> str:
             axis = max(transition.delta_stress.keys(),
                        key=lambda a: abs(transition.delta_stress[a]))
             d = transition.delta_stress[axis]
-            direction = "drops" if d < 0 else "rises"
+            # "Applying X <verb> <axis> by <n>" needs a transitive verb —
+            # "rises" was ungrammatical here (Wave 24 fix).
+            direction = "lowers" if d < 0 else "raises"
+            caveat = _utilization_drop_caveat(transition, axis) if d < 0 else ""
             return (f"Applying {pretty_name} {direction} {_pretty_axis(axis)} "
-                    f"by {abs(d):.2f}; no binding axis was relieved.")
+                    f"by {abs(d):.2f}{caveat}; no binding axis was relieved.")
         return f"Applying {pretty_name} produces no measurable stress change."
     relieved_clause = ""
     if transition.relieved_binding_axes:
@@ -117,7 +159,15 @@ def _format_relief(transition: Transition) -> str:
 
 
 def _format_quality_cost(transition: Transition) -> str:
-    """Sentence 3 — what it cost in quality."""
+    """Sentence 3 — what it cost (or gained) in quality.
+
+    Wave 7a.4: post-Wave-5, `state_residual` can be a **benefit** (signed
+    negative). The other axes still behave as non-negative penalties. When
+    a state-residual delta is negative we label it "state benefit"; when
+    the *total* delta is negative we label the whole sentence "quality
+    gain" instead of "cost", so a reader doesn't have to parse the minus
+    sign to figure out which direction the move went.
+    """
     if not transition.delta_quality:
         return ""
     # Show the two axes with largest absolute delta.
@@ -130,10 +180,22 @@ def _format_quality_cost(transition: Transition) -> str:
     parts = []
     for axis, d in top:
         sign = "+" if d >= 0 else ""
-        parts.append(f"{sign}{d:.4f} {_pretty_quality(axis)}")
+        # Wave 7a.4: only state_residual is signed today. When the candidate
+        # *lowered* the state-residual (d < 0) that's a state benefit; label
+        # it so the reader doesn't read the bare minus as "wait, what?".
+        suffix = ""
+        if axis == "state_residual":
+            if d < -1e-6:
+                suffix = " (state benefit at long ctx)"
+            elif d > 1e-6:
+                suffix = " (state penalty)"
+        parts.append(f"{sign}{d:.4f} {_pretty_quality(axis)}{suffix}")
     total = transition.delta_quality_total
     sign = "+" if total >= 0 else ""
-    return (f"Quality cost: {', '.join(parts)} ({sign}{total:.4f} total "
+    # Headline matches the sign of the net change: "Quality cost" for a
+    # penalty (total ≥ 0), "Quality gain" for an improvement (total < 0).
+    headline = "Quality cost" if total >= 0 else "Quality gain"
+    return (f"{headline}: {', '.join(parts)} ({sign}{total:.4f} total "
             f"residual change).")
 
 

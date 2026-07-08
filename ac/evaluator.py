@@ -17,41 +17,43 @@ from __future__ import annotations
 
 import copy
 import math
-import os
-import sys
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
-# --- repo path bootstrap --------------------------------------------------
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-# v0/v1 imports
-from optimizer import (  # noqa: E402
-    CandidateArch,
-    DeploymentConstraints,
-    EvaluatedCandidate,
-    evaluate_candidate,
-)
-from throughput_model import ArchConfig as TArchConfig  # noqa: E402
-from lattice_engine import estimate_params  # noqa: E402
-
-# v1-stress imports
-from stress import (  # noqa: E402
-    StressVector,
-    Workload,
-    STRESS_AXES,
-    PRESSURED_OR_WORSE,
-    compute_throughput_stress,
-    severity_band,
-)
-from transition import Transition  # noqa: E402
-from delta_engine import apply_transition  # noqa: E402
-from deltas import REGISTRY, get as get_transformation  # noqa: E402
-from justify_transition import justify  # noqa: E402
-from optimizer_bridge import candidate_to_arch, stress_relief_vs  # noqa: E402
-from penalties import INFEASIBLE  # noqa: E402
+try:
+    from .optimizer import (
+        CandidateArch, DeploymentConstraints, EvaluatedCandidate,
+        evaluate_candidate,
+    )
+    from .throughput_model import ArchConfig as TArchConfig
+    from .lattice_engine import estimate_params
+    from .stress import (
+        StressVector, Workload, STRESS_AXES, PRESSURED_OR_WORSE,
+        compute_throughput_stress, severity_band,
+    )
+    from .transition import Transition
+    from .delta_engine import apply_transition
+    from .deltas import REGISTRY, get as get_transformation
+    from .justify_transition import justify
+    from .optimizer_bridge import candidate_to_arch, stress_relief_vs
+    from .penalties import INFEASIBLE
+except ImportError:
+    from optimizer import (
+        CandidateArch, DeploymentConstraints, EvaluatedCandidate,
+        evaluate_candidate,
+    )
+    from throughput_model import ArchConfig as TArchConfig
+    from lattice_engine import estimate_params
+    from stress import (
+        StressVector, Workload, STRESS_AXES, PRESSURED_OR_WORSE,
+        compute_throughput_stress, severity_band,
+    )
+    from transition import Transition
+    from delta_engine import apply_transition
+    from deltas import REGISTRY, get as get_transformation
+    from justify_transition import justify
+    from optimizer_bridge import candidate_to_arch, stress_relief_vs
+    from penalties import INFEASIBLE
 
 
 # Any predicted_loss at or above this threshold is treated as the
@@ -265,7 +267,17 @@ def arch_to_candidate(arch: TArchConfig, base: CandidateArch) -> CandidateArch:
         attn_precision=copy.deepcopy(base.attn_precision),
         kv_cache_bits=_kv_bits_from_precision(arch.kv_precision),
         moe=copy.deepcopy(arch.moe_config) if arch.moe_config else None,
-        ep_degree=getattr(base, "ep_degree", 1),
+        # Parallelism identity must survive the arch→candidate round-trip.
+        # Bug fix (Jul 2026): tp/pp/cp were dropped here, so a delta'd
+        # candidate silently re-evaluated at TP=1/PP=1/CP=1 — wrong TTFT,
+        # wrong TP all-reduce (cross-node comm) in TBT, wrong per-GPU
+        # memory. `change_parallelism` sidecar overrides on `arch` win over
+        # the baseline's degrees.
+        tp_degree=int(getattr(arch, "_tp_override", 0) or getattr(base, "tp_degree", 0) or 0),
+        pp_degree=int(getattr(arch, "_pp_override", 0) or getattr(base, "pp_degree", 0) or 0),
+        ep_degree=int(getattr(arch, "_ep_override", 0) or getattr(base, "ep_degree", 1) or 1),
+        cp_degree=int(getattr(arch, "_cp_override", 0) or getattr(arch, "cp_degree", 0) or getattr(base, "cp_degree", 1) or 1),
+        cp_method=str(getattr(arch, "cp_method", None) or getattr(base, "cp_method", "ring") or "ring"),
         n_dense_ffn_layers=getattr(arch, "n_dense_ffn_layers", 0),
         state_config=copy.deepcopy(arch.state_config) if arch.state_config else None,
         layer_type_list=(
@@ -284,6 +296,26 @@ def arch_to_candidate(arch: TArchConfig, base: CandidateArch) -> CandidateArch:
         mla_q_latent_dim=int(getattr(arch, "mla_q_latent_dim", 0) or 0),
         mla_rope_head_dim=int(getattr(arch, "mla_rope_head_dim", 0) or 0),
         mla_nope_head_dim=int(getattr(arch, "mla_nope_head_dim", 0) or 0),
+        # Bug fix (Jul 2026): sparse-attention blocks, YOCO, and MTP also
+        # have to survive the round-trip — YOCO changes KV memory, the
+        # sparse blocks change decode KV bandwidth (TBT) and prefill cost.
+        nsa_compress_block_size=int(getattr(arch, "nsa_compress_block_size", 0) or 0),
+        nsa_compress_block_stride=int(getattr(arch, "nsa_compress_block_stride", 0) or 0),
+        nsa_select_block_size=int(getattr(arch, "nsa_select_block_size", 0) or 0),
+        nsa_select_top_k=int(getattr(arch, "nsa_select_top_k", 0) or 0),
+        nsa_window_size=int(getattr(arch, "nsa_window_size", 0) or 0),
+        csa_block_size=int(getattr(arch, "csa_block_size", 0) or 0),
+        csa_top_k_blocks=int(getattr(arch, "csa_top_k_blocks", 0) or 0),
+        csa_compression_dim=int(getattr(arch, "csa_compression_dim", 0) or 0),
+        indexshare_num_buckets=int(getattr(arch, "indexshare_num_buckets", 0) or 0),
+        indexshare_top_k_buckets=int(getattr(arch, "indexshare_top_k_buckets", 0) or 0),
+        indexshare_index_dim=int(getattr(arch, "indexshare_index_dim", 0) or 0),
+        msa_window_size=int(getattr(arch, "msa_window_size", 0) or 0),
+        msa_dilated_top_k=int(getattr(arch, "msa_dilated_top_k", 0) or 0),
+        msa_global_top_k=int(getattr(arch, "msa_global_top_k", 0) or 0),
+        yoco_n_self_attn_layers=int(getattr(arch, "yoco_n_self_attn_layers", 0) or 0),
+        mtp_n_predict_depths=int(getattr(arch, "mtp_n_predict_depths", 0) or 0),
+        mtp_depth_n_layers=int(getattr(arch, "mtp_depth_n_layers", 1) or 1),
         # SWA: read both the canonical local_window and the sidecar
         # _swa_window so candidates produced either by the delta engine
         # (sidecar) or by a baseline loader that already populated the
@@ -293,45 +325,53 @@ def arch_to_candidate(arch: TArchConfig, base: CandidateArch) -> CandidateArch:
             or getattr(arch, "local_window", 0)
             or 0
         ),
+        # Wave 18g: local:global interleave — read both the delta sidecar
+        # and the canonical field (baseline loader populates the latter).
+        n_local_attn_layers=int(
+            getattr(arch, "_n_local_attn_layers", 0)
+            or getattr(arch, "n_local_attn_layers", 0)
+            or 0
+        ),
     )
     # Normalise attention_type label when SWA window is set but the upstream
     # arch left attention_type="full" (delta.to_quality_arch sets type=swa
     # but a baseline-loaded SWA config may carry just the window).
-    if cand.swa_window > 0 and cand.attention_type == "full":
+    # Wave 18g: an interleave keeps the global layers' projection type —
+    # only whole-model SWA (n_local == 0) relabels.
+    if (cand.swa_window > 0 and cand.attention_type == "full"
+            and int(getattr(cand, "n_local_attn_layers", 0) or 0) == 0):
         cand.attention_type = "swa"
-    # Recompute param count from new shape. For dense models this is direct;
-    # for MoE we need to add (n_experts - 1) expert masses on top of the
-    # single-expert mass that estimate_params produces, plus any shared expert.
-    dense_like_params = estimate_params(
-        cand.d_model, cand.n_heads, cand.d_head,
-        cand.ffn_dim, cand.n_layers, cand.n_kv_heads, cand.vocab_size,
-    )
-    if cand.moe is not None:
-        n_experts = int(cand.moe.get("n_experts", 1))
-        top_k = max(1, int(cand.moe.get("top_k", 1)))
-        expert_dim = int(cand.moe.get("expert_dim", cand.ffn_dim))
-        per_expert_ffn = 3 * cand.d_model * expert_dim
-        # Strip the one-expert FFN mass that estimate_params added.
-        attention_and_other = dense_like_params - per_expert_ffn * cand.n_layers
-        cand.total_params = attention_and_other + n_experts * per_expert_ffn * cand.n_layers
-        cand.active_params = attention_and_other + top_k * per_expert_ffn * cand.n_layers
-        shared = cand.moe.get("shared_expert")
-        if isinstance(shared, dict):
-            shared_ffn_dim = int(shared.get("ffn_dim", 0))
-            if shared_ffn_dim > 0:
-                shared_mass = 3 * cand.d_model * shared_ffn_dim * cand.n_layers
-                cand.total_params += shared_mass
-                cand.active_params += shared_mass
-        cand.active_params_b = round(cand.active_params / 1e9, 2)
-    else:
-        cand.total_params = dense_like_params
-        cand.active_params = dense_like_params
-        cand.active_params_b = round(cand.active_params / 1e9, 2)
+    # Recompute param count from the new shape.
+    #
+    # Wave 20 (loop finding): route through the canonical
+    # `architecture.parameter_ledger` instead of a third inline estimate.
+    # The previous inline formula was MLA-blind and state-blind: an
+    # MLA+MoE baseline reported active_params_b=55.46 here while the
+    # ledger (and therefore the quality model's scaling spine) computed
+    # 35.27B — and a mixer swap that moved the spine by +28% showed
+    # +0.00% in this field. One ledger, one truth.
+    try:
+        from ac.architecture import parameter_ledger as _ledger_fn
+    except ImportError:
+        from architecture import parameter_ledger as _ledger_fn
+    try:
+        _led = _ledger_fn(cand)
+        cand.total_params = int(_led.total_params)
+        cand.active_params = int(_led.active_params)
+    except Exception:
+        # Fallback: legacy dense estimate (shape fields always present).
+        cand.total_params = estimate_params(
+            cand.d_model, cand.n_heads, cand.d_head,
+            cand.ffn_dim, cand.n_layers, cand.n_kv_heads, cand.vocab_size,
+        )
+        cand.active_params = cand.total_params
+    cand.active_params_b = round(cand.active_params / 1e9, 2)
     cand.total_params_b = round(cand.total_params / 1e9, 2)
     # State/MoE bookkeeping
     if cand.state_config is not None and cand.layer_type_list:
         cand.n_attention_layers = sum(
-            1 for lt in cand.layer_type_list if lt == "attention")
+            1 for lt in cand.layer_type_list
+            if lt in ("attention", "local_attention"))
         cand.n_state_layers = sum(
             1 for lt in cand.layer_type_list if lt == "state")
     if cand.moe is not None:
@@ -346,6 +386,7 @@ _SIDECAR_LABELS = {
     "_pp_override": "parallelism.pipeline_parallel",
     "_ep_override": "parallelism.expert_parallel",
     "_cp_override": "parallelism.context_parallel",
+    "_dp_override": "parallelism.data_parallel",
 }
 
 # Fix #6: when a parallelism sidecar is set on the candidate, we report it as
@@ -358,6 +399,7 @@ _SIDECAR_BASELINE_ATTRS = {
     "_pp_override": ("pp_degree", "pipeline_parallel", "pp"),
     "_ep_override": ("ep_degree", "expert_parallel", "ep"),
     "_cp_override": ("cp_degree", "context_parallel", "cp"),
+    "_dp_override": ("dp_degree", "data_parallel", "dp"),
 }
 
 
@@ -366,6 +408,7 @@ def _append_sidecar_changes(
     baseline_arch: Any,
     candidate_arch: Any,
     baseline_constraints: Any = None,
+    baseline_candidate: Any = None,
 ) -> None:
     """Surface non-dataclass sidecar attributes (MLA latent, SWA window, etc.)
     in the field-level diff. Without this, attention swaps that only set a
@@ -374,19 +417,34 @@ def _append_sidecar_changes(
     `baseline_constraints` is the optional DeploymentConstraints used to
     evaluate the baseline; we read TP/PP/CP/EP from it as the last fallback
     when the candidate arch carries no canonical attribute. (Fix #6.)
+
+    `baseline_candidate` is the optional baseline CandidateArch. The delta
+    engine's ArchConfig does not carry parallelism, but the baseline loader
+    threads tp/pp/ep/cp_degree onto the CandidateArch — and those are the
+    degrees evaluation actually used. Checking it before the constraints
+    prevents a spurious `parallelism.expert_parallel: None -> 16` row when
+    the baseline config already declared expert_parallel=16.
     """
     for attr, label in _SIDECAR_LABELS.items():
         b = getattr(baseline_arch, attr, None)
         c = getattr(candidate_arch, attr, None)
         # Fix #6: if the baseline has no sidecar, walk the canonical attribute
-        # candidates on the arch, then on the constraints, before falling back
-        # to None.
+        # candidates on the arch, then the baseline CandidateArch, then the
+        # constraints, before falling back to None.
         if b is None and attr in _SIDECAR_BASELINE_ATTRS:
             for cand_attr in _SIDECAR_BASELINE_ATTRS[attr]:
                 canonical = getattr(baseline_arch, cand_attr, None)
                 if canonical is not None:
                     b = canonical
                     break
+            if b is None and baseline_candidate is not None:
+                for cand_attr in _SIDECAR_BASELINE_ATTRS[attr]:
+                    canonical = getattr(baseline_candidate, cand_attr, None)
+                    # CandidateArch uses 0 as an "unset" sentinel for
+                    # tp_degree/pp_degree; treat it as absent.
+                    if canonical:
+                        b = canonical
+                        break
             if b is None and baseline_constraints is not None:
                 for cand_attr in _SIDECAR_BASELINE_ATTRS[attr]:
                     canonical = getattr(baseline_constraints, cand_attr, None)
@@ -713,6 +771,29 @@ def _evaluated_metrics(base_ev: EvaluatedCandidate,
         "total_params_b",
         base_ev.arch.total_params_b, cand_ev.arch.total_params_b,
         lower_is_better=True)  # neutral — direction signal less meaningful
+    # Wave 20 (feedback #4): ACTIVE params must be visible in the panel.
+    # Structural deltas (e.g. add_state_layers swapping MLA attention for
+    # gated-deltanet mixers) can change active params at constant total;
+    # the resulting scaling-law loss move was silently booked as if it
+    # were an architecture-quality win. Total-only reporting hid it.
+    #
+    # IMPORTANT: use the quality model's scaling-spine count
+    # (quality.spine_active_params), not the CandidateArch ledger copy —
+    # the ledger is not state-mixer-aware and reports an unchanged number
+    # for exactly the deltas where the spine (and therefore the predicted
+    # loss) moves. The spine number is the one the scaling law actually
+    # consumed.
+    def _spine_b(ev_: "EvaluatedCandidate") -> float:
+        q = getattr(ev_, "quality", None)
+        spine = float(getattr(q, "spine_active_params", 0.0) or 0.0)
+        if spine > 0:
+            return spine / 1e9
+        return float(
+            getattr(ev_.arch, "active_params_b", 0.0)
+            or ev_.arch.total_params_b)
+    m["active_params_b"] = _metric(
+        "active_params_b", _spine_b(base_ev), _spine_b(cand_ev),
+        lower_is_better=True)  # neutral — direction signal less meaningful
     # Quality-term decomposition (when available)
     base_q_terms = getattr(base_ev.quality, "terms", {}) or {}
     cand_q_terms = getattr(cand_ev.quality, "terms", {}) or {}
@@ -723,6 +804,26 @@ def _evaluated_metrics(base_ev: EvaluatedCandidate,
         c_val = float(getattr(c_term, "value", 0.0) or 0.0) if c_term else 0.0
         m[f"quality_{term_name}"] = _metric(
             f"quality_{term_name}", b_val, c_val, lower_is_better=True)
+    # Wave 20 (feedback #4): scaling-law component of the loss, so the
+    # markdown/JSON can decompose the loss move into (scaling law from
+    # N_spine/D) vs (residual terms). quality_model composes
+    # predicted_loss = chinchilla_baseline × (1 + Σ term fractions), so
+    # read the baseline the model actually computed rather than deriving
+    # it by subtraction (which is wrong under the multiplicative form).
+    def _chin(ev_: "EvaluatedCandidate") -> float:
+        q = getattr(ev_, "quality", None)
+        chin = float(getattr(q, "chinchilla_baseline", 0.0) or 0.0)
+        if chin > 0:
+            return chin
+        # Fallback: invert the multiplicative composition.
+        terms = getattr(q, "terms", {}) or {}
+        s = sum(float(getattr(t, "value", 0.0) or 0.0)
+                for t in terms.values())
+        denom = max(1e-9, 1.0 + s)
+        return float(ev_.predicted_loss) / denom
+    m["scaling_law_loss"] = _metric(
+        "scaling_law_loss", _chin(base_ev), _chin(cand_ev),
+        lower_is_better=True)
     return m
 
 
@@ -754,10 +855,19 @@ def _kv_cache_gb_for_cand(cand: CandidateArch,
         or getattr(cand, "local_window", 0)
         or 0
     )
-    if window > 0:
+    n_local_kv = int(getattr(cand, "n_local_attn_layers", 0) or 0)
+    if window > 0 and n_local_kv == 0:
+        # Whole-model SWA: every layer's KV capped at the window.
         context = min(context, window)
+    elif window > 0 and n_local_kv > 0:
+        # Wave 18g interleave: only the local fraction is capped.
+        local_frac_kv = min(1.0, n_local_kv / max(1, cand.n_layers))
+        context = int(context * (1.0 - local_frac_kv)
+                      + min(context, window) * local_frac_kv)
     batch = 1
-    layers_per_stage = cand.n_layers // max(constraints.pp, 1)
+    cand_pp = int(getattr(cand, "pp_degree", 0) or 0)
+    effective_pp = cand_pp if cand_pp > 0 else int(constraints.pp)
+    layers_per_stage = cand.n_layers // max(effective_pp, 1)
     # State-hybrid: only attention layers carry KV.
     n_attn = int(getattr(cand, "n_attention_layers", 0) or 0)
     n_state = int(getattr(cand, "n_state_layers", 0) or 0)
@@ -779,7 +889,18 @@ def _kv_cache_gb_for_cand(cand: CandidateArch,
             batch * context * attn_layers_per_stage * 2
             * kv_heads_per_gpu * cand.d_head * kv_bpe
         )
-    return bytes_total / (1024 ** 3)
+    # Context parallelism partitions the sequence/KV axis across ranks.
+    # change_parallelism(cp=...) used to leave this diagnostic unchanged even
+    # though the throughput memory model correctly divided it by CP.
+    cp = max(
+        1,
+        int(
+            getattr(cand, "cp_degree", 0)
+            or getattr(constraints, "cp", 1)
+            or 1
+        ),
+    )
+    return bytes_total / cp / (1024 ** 3)
 
 
 # =============================================================================
@@ -853,6 +974,7 @@ def evaluate_delta(
         batch_size=max(1, int(getattr(constraints, "serving_batch", 1) or 1)),
         seq_len=int(constraints.prompt_len or constraints.context_length or 2048),
     )
+    base_arch.dp_degree = int(getattr(constraints, "dp", 1) or 1)
 
     workload = Workload(
         batch_size=base_arch.batch_size,
@@ -868,6 +990,7 @@ def evaluate_delta(
         tp_degree=int(constraints.tp),
         pp_degree=int(getattr(constraints, "pp", 1) or 1),
         ep_degree=int(getattr(baseline_candidate, "ep_degree", 1) or 1),
+        dp_degree=int(getattr(constraints, "dp", 1) or 1),
         baseline_name=baseline_name,
     )
 
@@ -903,6 +1026,9 @@ def evaluate_delta(
     base_constraints.tp = int(constraints.tp)
     cand_constraints = copy.deepcopy(constraints)
     cand_constraints.tp = effective_tp
+    cand_constraints.dp = int(
+        getattr(candidate_arch_t, "_dp_override", constraints.dp)
+    )
 
     # 3) Evaluate baseline + candidate
     try:
@@ -950,7 +1076,8 @@ def evaluate_delta(
     # overrides) so multi-delta composition is visible in the report.
     _append_sidecar_changes(
         ev.field_changes, base_arch, candidate_arch_t,
-        baseline_constraints=base_constraints)
+        baseline_constraints=base_constraints,
+        baseline_candidate=baseline_candidate)
     # B1 follow-up: the canonical and sidecar paths can both emit a row for
     # the same conceptual field (e.g. `attention.type` is set by both
     # CandidateArch.attention_type and the `_mla_latent_dim` sidecar; the
@@ -1072,6 +1199,7 @@ def evaluate_delta_sequence(
         batch_size=max(1, int(getattr(constraints, "serving_batch", 1) or 1)),
         seq_len=int(constraints.prompt_len or constraints.context_length or 2048),
     )
+    base_arch.dp_degree = int(getattr(constraints, "dp", 1) or 1)
     cumulative = base_arch
     for name, args in deltas:
         xf = get_transformation(name)
@@ -1101,6 +1229,7 @@ def evaluate_delta_sequence(
         tp_degree=int(constraints.tp),
         pp_degree=int(getattr(constraints, "pp", 1) or 1),
         ep_degree=int(getattr(baseline_candidate, "ep_degree", 1) or 1),
+        dp_degree=int(getattr(constraints, "dp", 1) or 1),
         arch_name=baseline_name,
     )
     cand_tp = int(getattr(cumulative, "_tp_override", constraints.tp))
@@ -1108,9 +1237,12 @@ def evaluate_delta_sequence(
                           getattr(constraints, "pp", 1) or 1))
     cand_ep = int(getattr(cumulative, "_ep_override",
                           getattr(baseline_candidate, "ep_degree", 1) or 1))
+    cand_dp = int(getattr(cumulative, "_dp_override",
+                          getattr(constraints, "dp", 1) or 1))
     cand_stress = compute_throughput_stress(
         cumulative, hardware, workload,
         tp_degree=cand_tp, pp_degree=cand_pp, ep_degree=cand_ep,
+        dp_degree=cand_dp,
         arch_name=baseline_name + "+composed",
     )
 
@@ -1118,6 +1250,7 @@ def evaluate_delta_sequence(
     base_constraints.tp = int(constraints.tp)
     cand_constraints = copy.deepcopy(constraints)
     cand_constraints.tp = cand_tp
+    cand_constraints.dp = cand_dp
     base_ev = evaluate_candidate(baseline_candidate, hardware, base_constraints)
     cand_ev = evaluate_candidate(composed_cand, hardware, cand_constraints)
     base_kv = _kv_cache_gb_for_cand(baseline_candidate, base_constraints,
@@ -1151,7 +1284,8 @@ def evaluate_delta_sequence(
     composed_field_changes = _arch_changes(baseline_candidate, composed_cand)
     _append_sidecar_changes(
         composed_field_changes, base_arch, cumulative,
-        baseline_constraints=base_constraints)
+        baseline_constraints=base_constraints,
+        baseline_candidate=baseline_candidate)
     # Same dedup as the single-delta path (see comment above).
     composed_field_changes = _dedupe_field_changes(composed_field_changes)
     # Forward the delta-resolution summary from add_state_layers (if any)

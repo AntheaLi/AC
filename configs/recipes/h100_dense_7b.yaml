@@ -4,7 +4,7 @@
 flags:
   hardware: h100
   params: 7
-  tokens: 2
+  tokens: 20
   context: 8192
   serving_tbt: 50
   serving_ttft: 500

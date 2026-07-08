@@ -4,37 +4,37 @@
   "accelerator_name": "TPU v5e",
   "compute_units": 1,
   "compute_unit_type": "MXU",
-
   "hbm_capacity_gb": 16,
-  "hbm_bandwidth_tb_s": 1.6,
-
+  "hbm_bandwidth_tb_s": 0.819,
   "peak_flops_tf": {
     "bf16": 197,
     "int8": 394
   },
-
+  "_datasheet_peak_flops_tf_note": "Wave 20 (feedback #2): vendor datasheet dense Tensor-Core peaks, for implied-MFU reporting ONLY. The roofline model must keep using peak_flops_tf. On NVIDIA parts peak_flops_tf is ~half of these (see _peak_flops_tf_convention); on TPU/Trainium the two coincide.",
+  "datasheet_peak_flops_tf": {
+    "bf16": 197,
+    "int8": 394
+  },
   "bytes_per_element": {
     "bf16": 2,
     "int8": 1
   },
-
-  "supported_precisions": ["bf16", "int8"],
-
+  "supported_precisions": [
+    "bf16",
+    "int8"
+  ],
   "fused_attention_efficiency": {
     "bf16": 0.72
   },
   "fused_attention_kernel": "Pallas fused attention",
-
   "interconnect": {
     "type": "ici",
     "intra_node_bw_gb_s": 400,
     "inter_node_bw_gb_s": 400,
     "topology": "2D torus / mesh"
   },
-
   "chips_per_host": 4,
   "nvlink_domain_size": 8,
-
   "calibration": {
     "kernel_launch_overhead_us": 8.0,
     "kernels_per_layer": 10,
@@ -43,10 +43,9 @@
     "decode_system_efficiency": 0.38,
     "prefill_system_efficiency": 0.55
   },
-
   "notes": {
     "fused_efficiency_source": "Pallas-based fused attention on v5e, 0.70-0.75 range",
-    "hbm_bw_source": "Google TPU v5e specs, 1.6 TB/s HBM2e, 16 GB per chip",
+    "hbm_bw_source": "Google Cloud TPU v5e docs: 16 GB HBM2E at 819.2 GB/s per chip (the previous 1.6 TB/s figure was a 2x error; v5p is the 2.77 TB/s part)",
     "topology_note": "v5e uses 2D ICI topology, smaller pods than v5p",
     "nvlink_domain_size_note": "v5e 2D torus axis ~ 8 chips; cross-axis triggers the ICI penalty in _moe_alltoall_cost."
   }

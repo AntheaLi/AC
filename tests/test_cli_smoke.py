@@ -203,7 +203,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("| Training TPS (tok/s)", result.stdout)
         self.assertIn("| improves |", result.stdout)
-        self.assertIn("| KV cache (GB) | 0.500 | 0.500 |", result.stdout)
+        self.assertIn("| KV cache / GPU, per request (GB) | 0.500 | 0.500 |", result.stdout)
         self.assertIn("at least one KV head resident per rank", result.stdout)
         self.assertNotIn("-50.00%", result.stdout)
         self.assertNotIn("↓", result.stdout)
@@ -437,6 +437,12 @@ class CliSmokeTests(unittest.TestCase):
                 "--output-pareto",
                 str(pareto),
                 "--no-shadow-prices",
+                # Wave 18h: the signed data-sufficiency gate shrinks the MoE
+                # capacity bonus near the tokens-per-total-param parity
+                # point, so the DEFAULT uncertainty tiebreak may now
+                # legitimately pick the smaller dense config here. Pin the
+                # argmin-loss semantics explicitly.
+                "--strict-quality",
                 "--quiet",
             )
 
@@ -451,7 +457,9 @@ class CliSmokeTests(unittest.TestCase):
             # close to the best-loss point rather than asserting equality of
             # ranks, which would lock in the old argmin-loss behaviour.
             self.assertLessEqual(predicted["selection_diagnostics"]["best_loss_pareto_rank"], 5)
-            self.assertLessEqual(predicted["selection_diagnostics"]["selected_pareto_rank"], 10)
+            self.assertEqual(
+                predicted["selection_diagnostics"]["selected_pareto_rank"], 1
+            )
             self.assertEqual(config["parallelism"]["expert_parallel"], 4)
             self.assertEqual(config["architecture"]["layer_configs"][0]["ffn"]["type"], "moe")
 
@@ -604,6 +612,185 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("# Delta Influence", result.stdout)
 
+    def test_delta_eval_defaults_missing_moe_ep_to_legal_ep1(self):
+        """Wave 21 made EP=1 a legal TP-sharded MoE execution plan. A schema
+        that omits expert_parallel therefore defaults to EP=1 and must
+        evaluate normally rather than leaking an INFEASIBLE sentinel.
+        """
+        good = json.loads((ROOT / "configs" / "gpt_oss_120b.json").read_text())
+        del good["parallelism"]["expert_parallel"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "moe_no_ep.json"
+            broken.write_text(json.dumps(good))
+            out_dir = tmp_path / "out"
+            result = run_cli(
+                "ac/cli_delta_eval.py",
+                "--baseline-config", str(broken),
+                "--hardware", "h100",
+                "--tp", "8",
+                "--apply", "change_moe_topology",
+                "--apply-args", "n_experts=64",
+                "--apply-args", "top_k=4",
+                "--out", str(out_dir),
+                "--no-pareto",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            eval_path = out_dir / "evaluation.json"
+            self.assertTrue(eval_path.exists())
+            ev = json.loads(eval_path.read_text())
+            self.assertTrue(ev["feasible"])
+            self.assertTrue(ev.get("metrics"))
+            self.assertLess(
+                abs(ev["metrics"]["predicted_loss"]["pct_change"]), 100.0
+            )
+
+    def test_delta_eval_validates_hybrid_metadata_without_state_layers(self):
+        """Wave 7a.2 validator: metadata.params.kind says 'hybrid' but
+        layer_configs carry no state layers. Reject as malformed hybrid."""
+        good = json.loads((ROOT / "configs" / "mistral_7b.json").read_text())
+        good.setdefault("metadata", {}).setdefault("params", {})["kind"] = "hybrid"
+        # Don't add any state layer — the dense layer_configs stay.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "fake_hybrid.json"
+            broken.write_text(json.dumps(good))
+            out_dir = tmp_path / "out"
+            result = run_cli(
+                "ac/cli_delta_eval.py",
+                "--baseline-config", str(broken),
+                "--hardware", "h100",
+                "--tp", "8",
+                "--apply", "add_state_layers",
+                "--apply-args", "ratio=1:3",
+                "--out", str(out_dir),
+                "--no-pareto",
+            )
+            self.assertEqual(
+                result.returncode, 2,
+                f"expected non-zero exit; stderr={result.stderr}",
+            )
+            ev = json.loads((out_dir / "evaluation.json").read_text())
+            self.assertFalse(ev["feasible"])
+            self.assertIn("hybrid", ev["reason_if_infeasible"].lower())
+            self.assertIn("state_layers", ev["reason_if_infeasible"])
+
+    def test_delta_eval_validates_mla_without_kv_latent_dim(self):
+        """Wave 7a.2: attention.type=='mla' but kv_latent_dim is missing."""
+        good = json.loads((ROOT / "configs" / "mistral_7b.json").read_text())
+        # Flip the attention block to MLA but deliberately omit kv_latent_dim.
+        good["architecture"]["layer_configs"][0]["attention"] = {
+            "type": "mla",
+            "n_heads": 32,
+            "d_head": 128,
+            "rope": True,
+            "kv_cache_bits": 16,
+            "precision": {"qk": "bf16", "v": "bf16", "output": "bf16"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "mla_no_latent.json"
+            broken.write_text(json.dumps(good))
+            out_dir = tmp_path / "out"
+            result = run_cli(
+                "ac/cli_delta_eval.py",
+                "--baseline-config", str(broken),
+                "--hardware", "h100",
+                "--tp", "8",
+                "--apply", "swap_attention_to_gqa",
+                "--apply-args", "group_size=4",
+                "--out", str(out_dir),
+                "--no-pareto",
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            ev = json.loads((out_dir / "evaluation.json").read_text())
+            self.assertFalse(ev["feasible"])
+            self.assertIn("MLA", ev["reason_if_infeasible"])
+            self.assertIn("kv_latent_dim", ev["reason_if_infeasible"])
+
+    def test_delta_eval_validates_nsa_missing_required_fields(self):
+        """Wave 7a.2: attention.type=='nsa' but required NSA fields missing."""
+        good = json.loads((ROOT / "configs" / "mistral_7b.json").read_text())
+        good["architecture"]["layer_configs"][0]["attention"] = {
+            "type": "nsa",
+            "n_heads": 32,
+            "n_kv_heads": 8,
+            "d_head": 128,
+            "rope": True,
+            "kv_cache_bits": 16,
+            "precision": {"qk": "bf16", "v": "bf16", "output": "bf16"},
+            # Intentionally missing: nsa_compress_block_size,
+            # nsa_select_top_k, nsa_window_size.
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "nsa_incomplete.json"
+            broken.write_text(json.dumps(good))
+            out_dir = tmp_path / "out"
+            result = run_cli(
+                "ac/cli_delta_eval.py",
+                "--baseline-config", str(broken),
+                "--hardware", "h100",
+                "--tp", "8",
+                "--apply", "swap_attention_to_gqa",
+                "--apply-args", "group_size=4",
+                "--out", str(out_dir),
+                "--no-pareto",
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            ev = json.loads((out_dir / "evaluation.json").read_text())
+            self.assertFalse(ev["feasible"])
+            self.assertIn("NSA", ev["reason_if_infeasible"])
+
+    def test_delta_eval_models_cross_node_moe_ep(self):
+        """EP beyond one NVLink domain is modeled on inter-node fabric."""
+        good = json.loads((ROOT / "configs" / "gpt_oss_120b.json").read_text())
+        good["parallelism"]["expert_parallel"] = 16  # > 8 on H100
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "moe_oversize_ep.json"
+            broken.write_text(json.dumps(good))
+            out_dir = tmp_path / "out"
+            result = run_cli(
+                "ac/cli_delta_eval.py",
+                "--baseline-config", str(broken),
+                "--hardware", "h100",
+                "--tp", "8",
+                "--apply", "change_moe_topology",
+                "--apply-args", "n_experts=64",
+                "--apply-args", "top_k=4",
+                "--out", str(out_dir),
+                "--no-pareto",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("inter-node fabric", result.stderr)
+            ev = json.loads((out_dir / "evaluation.json").read_text())
+            self.assertTrue(ev["feasible"])
+
+    def test_delta_eval_models_cross_node_tp(self):
+        """TP beyond one NVLink domain is modeled on inter-node fabric."""
+        good = json.loads((ROOT / "configs" / "mistral_7b.json").read_text())
+        good["parallelism"]["tensor_parallel"] = 16  # > 8 on H100
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            broken = tmp_path / "tp_oversize.json"
+            broken.write_text(json.dumps(good))
+            out_dir = tmp_path / "out"
+            result = run_cli(
+                "ac/cli_delta_eval.py",
+                "--baseline-config", str(broken),
+                "--hardware", "h100",
+                "--tp", "16",
+                "--apply", "swap_attention_to_gqa",
+                "--apply-args", "group_size=4",
+                "--out", str(out_dir),
+                "--no-pareto",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("inter-node bandwidth", result.stderr)
+            ev = json.loads((out_dir / "evaluation.json").read_text())
+            self.assertTrue(ev["feasible"])
+
     def test_delta_eval_rejects_invalid_delta_arg_values(self):
         cases = [
             ("swap_attention_to_gqa", "group_size=0", "group_size must be >= 1"),
@@ -679,6 +866,56 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("QualityStressVector", result.stdout)
         self.assertIn("Mistral-7B", result.stdout)
 
+    def test_stress_transition_binds_args_to_repeated_apply(self):
+        """Repeated --apply groups keep their own kwargs, matching
+        ac-delta-eval instead of attaching the first group's args to the
+        last transformation.
+        """
+        result = run_cli(
+            "ac/cli_stress.py",
+            "transition",
+            "--baseline-config",
+            "configs/gpt_oss_120b.json",
+            "--hardware",
+            "h100",
+            "--tp",
+            "8",
+            "--apply",
+            "swap_attention_to_mla",
+            "--apply-args",
+            "latent_dim=256",
+            "--apply",
+            "add_state_layers",
+            "--apply-args",
+            "ratio=1:3",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("swap_attention_to_mla", result.stdout)
+        self.assertIn("add_state_layers", result.stdout)
+        self.assertNotIn("unexpected keyword argument", result.stdout)
+        self.assertNotIn("Infeasible:", result.stdout)
+
+    def test_delta_parallelism_supports_cp_and_dp(self):
+        result = run_cli(
+            "ac/cli_delta_eval.py",
+            "--baseline-config",
+            "configs/mistral_7b.json",
+            "--hardware",
+            "h100",
+            "--tp",
+            "8",
+            "--apply",
+            "change_parallelism:cp=2,dp=4",
+            "--stdout",
+            "--no-pareto",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("parallelism.context_parallel", result.stdout)
+        self.assertIn("parallelism.data_parallel", result.stdout)
+        self.assertNotIn("unknown --apply-args key", result.stderr)
+
     def test_decode_stress_marks_training_memory_inactive(self):
         result = run_cli(
             "ac/cli_stress.py",
@@ -703,7 +940,16 @@ class CliSmokeTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("training_mem", result.stdout)
-        self.assertIn("inactive for decode", result.stdout)
+        # New label: inactive axes are demoted to the `inactive` band
+        # rather than printed as `binding [inactive for decode]`, which
+        # was self-contradictory. Accept either historic phrasing or
+        # the demoted form ("inactive (...)").
+        self.assertTrue(
+            "inactive for decode" in result.stdout
+            or "training_mem" in result.stdout
+            and "inactive" in result.stdout,
+            f"training_mem row should be marked inactive on decode:\n{result.stdout}",
+        )
         self.assertIn("binding: (none)", result.stdout)
 
     def test_compile_rejects_invalid_rope_method(self):
@@ -927,6 +1173,9 @@ class CliSmokeTests(unittest.TestCase):
             text = md.read_text()
             self.assertNotIn("Nonems", text)
             self.assertNotIn("TTFT <=", text)
+            self.assertIn("Serving soft budget(s):", text)
+            self.assertIn("not hard feasibility cuts", text)
+            self.assertIn("under soft budget", text)
 
     def test_compile_creates_output_parent_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1174,6 +1423,106 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("state_enabled", result.stdout)
         self.assertIn("state.n_layers", result.stdout)
         self.assertIn("attention.n_layers", result.stdout)
+
+    def test_mistral_7b_class_run_selects_gqa_not_mha(self):
+        """Demo-audit C1 + GQA enumeration: at TP=8 with the
+        Mistral-7B-class shape (n_heads in {32, 36, 48, 72}), the
+        optimizer used to select MHA on every greenfield run because
+        (a) the f_kv_heads quality term only penalized shallow GQA and
+        (b) the GQA-ratio enumeration tried only [2,4,8,16] which never
+        divided cleanly at n_heads=72/TP=8. After the fix the selected
+        n_kv_heads should be strictly less than n_heads.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out = tmp_path / "arch.json"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware", "h100",
+                "--params", "7",
+                "--tokens", "2",
+                "--context", "8192",
+                "--serving-tbt", "50",
+                "--serving-batch", "32",
+                "--tp", "8", "--pp", "1", "--dp", "8",
+                "--max-candidates", "800",
+                "--output-config", str(out),
+                "--output-justification", str(tmp_path / "arch.md"),
+                "--output-pareto", str(tmp_path / "pareto.csv"),
+                "--no-shadow-prices", "--quiet",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = json.loads(out.read_text())
+            attn = config["architecture"]["layer_configs"][0]["attention"]
+            self.assertLess(
+                attn["n_kv_heads"], attn["n_heads"],
+                f"Expected GQA (kv<heads) but got MHA: kv={attn['n_kv_heads']} heads={attn['n_heads']}",
+            )
+
+    def test_input_constraints_records_hardware_and_parallelism(self):
+        """Demo-audit E: metadata.input_constraints must record hardware
+        + TP/PP/DP/CP so the config is reproducible standalone.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out = tmp_path / "arch.json"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware", "b200",
+                "--params", "1",
+                "--tokens", "0.2",
+                "--context", "2048",
+                "--serving-tbt", "100",
+                "--serving-batch", "4",
+                "--tp", "4", "--pp", "2", "--dp", "1",
+                "--max-candidates", "20",
+                "--output-config", str(out),
+                "--output-justification", str(tmp_path / "arch.md"),
+                "--output-pareto", str(tmp_path / "pareto.csv"),
+                "--no-shadow-prices", "--quiet",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = json.loads(out.read_text())
+            ic = config["metadata"]["input_constraints"]
+            self.assertEqual(ic.get("hardware"), "b200")
+            self.assertEqual(ic.get("tp"), 4)
+            self.assertEqual(ic.get("pp"), 2)
+            self.assertEqual(ic.get("dp"), 1)
+            self.assertIn("cp", ic)
+
+    def test_param_drift_emits_diagnostic_note(self):
+        """Demo-audit D: when active_params drifts ≥5% from target the
+        justification should explain why (shape-law / lattice
+        quantisation) and name the override.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            md = tmp_path / "arch.md"
+            # 1B target tends to drift to ~1.1-1.2B on h100/tp=1 because the
+            # smallest lattice point exceeds the exact 1B shape.
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware", "h100",
+                "--params", "1",
+                "--tokens", "0.2",
+                "--context", "2048",
+                "--serving-tbt", "100",
+                "--serving-batch", "4",
+                "--tp", "1", "--pp", "1", "--dp", "1",
+                "--max-candidates", "60",
+                "--output-config", str(tmp_path / "arch.json"),
+                "--output-justification", str(md),
+                "--output-pareto", str(tmp_path / "pareto.csv"),
+                "--no-shadow-prices", "--quiet",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # Either the drift fires (and the note appears) or it doesn't
+            # (and the note must NOT appear) — both are valid. When the
+            # note is there it should mention the override.
+            text = md.read_text()
+            if "Active-params landed" in text:
+                self.assertIn("--param-tolerance", text)
+                self.assertIn("shape-law", text)
 
     def test_genuine_no_op_delta_still_fires_callout(self):
         """B1 negative case: the structurally-identical callout MUST

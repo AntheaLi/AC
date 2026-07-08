@@ -11,17 +11,16 @@ to this bridge, not to every caller.
 
 from __future__ import annotations
 
-import os
-import sys
 from typing import Any, Optional
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from throughput_model import ArchConfig  # noqa: E402
-
-from stress import StressVector, Workload, compute_throughput_stress  # noqa: E402
+try:
+    from .throughput_model import ArchConfig
+    from .stress import StressVector, Workload, compute_throughput_stress
+    from .architecture import compose_layer_type_list
+except ImportError:
+    from throughput_model import ArchConfig
+    from stress import StressVector, Workload, compute_throughput_stress
+    from architecture import compose_layer_type_list
 
 
 _KV_BITS_TO_PRECISION = {16: "bf16", 8: "int8", 4: "fp4"}
@@ -40,8 +39,19 @@ def candidate_to_arch(candidate, *, batch_size: int = 1, seq_len: int = 2048) ->
         moe (dict)    → moe_config
         state_config  → state_config
         layer_type_list → layer_type_list
+
+    Bug fix (Jul 2026): the bridge used to drop attention_type and every
+    attention-variant field (MLA latents, NSA/CSA/IndexShare/MSA blocks,
+    YOCO), plus MTP and CP. Any delta/stress round-trip through this
+    function therefore priced an MLA/sparse baseline as full MHA — wrong
+    decode KV bandwidth (TBT), wrong prefill cost (TTFT), and wrong KV
+    memory. Thread all throughput-relevant fields through.
     """
-    return ArchConfig(
+    def _opt_int(name: str) -> Optional[int]:
+        v = int(getattr(candidate, name, 0) or 0)
+        return v if v > 0 else None
+
+    arch = ArchConfig(
         d_model=candidate.d_model,
         n_layers=candidate.n_layers,
         n_heads=candidate.n_heads,
@@ -58,7 +68,53 @@ def candidate_to_arch(candidate, *, batch_size: int = 1, seq_len: int = 2048) ->
         n_dense_ffn_layers=getattr(candidate, "n_dense_ffn_layers", 0),
         state_config=getattr(candidate, "state_config", None),
         layer_type_list=getattr(candidate, "layer_type_list", None),
+        # Attention variant (drives kv_bytes_per_token_per_layer and the
+        # per-layer attention cost in the throughput model).
+        attention_type=str(getattr(candidate, "attention_type", "full") or "full"),
+        mla_kv_latent_dim=_opt_int("mla_kv_latent_dim"),
+        mla_q_latent_dim=_opt_int("mla_q_latent_dim"),
+        mla_rope_head_dim=_opt_int("mla_rope_head_dim"),
+        mla_nope_head_dim=_opt_int("mla_nope_head_dim"),
+        nsa_compress_block_size=_opt_int("nsa_compress_block_size"),
+        nsa_compress_block_stride=_opt_int("nsa_compress_block_stride"),
+        nsa_select_block_size=_opt_int("nsa_select_block_size"),
+        nsa_select_top_k=_opt_int("nsa_select_top_k"),
+        nsa_window_size=_opt_int("nsa_window_size"),
+        csa_block_size=_opt_int("csa_block_size"),
+        csa_top_k_blocks=_opt_int("csa_top_k_blocks"),
+        csa_compression_dim=_opt_int("csa_compression_dim"),
+        indexshare_num_buckets=_opt_int("indexshare_num_buckets"),
+        indexshare_top_k_buckets=_opt_int("indexshare_top_k_buckets"),
+        indexshare_index_dim=_opt_int("indexshare_index_dim"),
+        msa_window_size=_opt_int("msa_window_size"),
+        msa_dilated_top_k=_opt_int("msa_dilated_top_k"),
+        msa_global_top_k=_opt_int("msa_global_top_k"),
+        yoco_n_self_attn_layers=int(getattr(candidate, "yoco_n_self_attn_layers", 0) or 0),
+        mtp_n_predict_depths=int(getattr(candidate, "mtp_n_predict_depths", 0) or 0),
+        mtp_depth_n_layers=int(getattr(candidate, "mtp_depth_n_layers", 1) or 1),
+        cp_degree=int(getattr(candidate, "cp_degree", 1) or 1),
+        cp_method=str(getattr(candidate, "cp_method", "ring") or "ring"),
     )
+    # SWA is carried on CandidateArch as `swa_window`; the throughput model
+    # reads the dynamic `local_window` attribute (same wiring as
+    # evaluate_candidate).
+    _swa = int(getattr(candidate, "swa_window", 0) or 0)
+    _n_local = int(getattr(candidate, "n_local_attn_layers", 0) or 0)
+    if _swa > 0 and _n_local > 0:
+        # Wave 18g: local:global interleave — keep the global layers'
+        # projection type and let the heterogeneous layer list carry the
+        # per-layer window semantics.
+        arch.local_window = _swa
+        arch.n_local_attn_layers = _n_local
+        arch.layer_type_list = compose_layer_type_list(
+            getattr(candidate, "layer_type_list", None),
+            candidate.n_layers,
+            _n_local,
+        )
+    elif _swa > 0:
+        arch.local_window = _swa  # type: ignore[attr-defined]
+        arch.attention_type = "swa"
+    return arch
 
 
 def stress_for_candidate(
@@ -68,6 +124,7 @@ def stress_for_candidate(
     tp_degree: int,
     pp_degree: int = 1,
     ep_degree: int = 1,
+    dp_degree: int = 1,
     context_length: int,
     serving_batch: int = 1,
     prefill_seq_len: Optional[int] = None,
@@ -92,6 +149,7 @@ def stress_for_candidate(
         tp_degree=max(1, int(tp_degree)),
         pp_degree=max(1, int(pp_degree)),
         ep_degree=max(1, int(ep_degree)),
+        dp_degree=max(1, int(dp_degree)),
         arch_name=arch_name,
     )
 

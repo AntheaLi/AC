@@ -252,5 +252,169 @@ class MetricDeltaTests(unittest.TestCase):
         self.assertIsNone(d["pct_change"])
 
 
+class TpSearchTests(unittest.TestCase):
+    """Wave 4 — TP as a search variable.
+
+    Two invariants we want to lock in:
+      1. The grid driver's `context_aware_parallelism` planner produces a
+         tp_options list whose max never exceeds the NVLink island size
+         (we don't want to silently introduce cross-IB tensor parallelism).
+      2. With tp_options enabled, a long-context cell at a small param
+         target picks TP > 1 — i.e., the search actually uses the higher
+         entries when KV pressure makes them valuable.
+    """
+
+    def test_tp_search_respects_nvlink_domain(self):
+        import sys as _sys, os as _os
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from _generator_payload import (
+            context_aware_parallelism, NVLINK_DOMAIN_SIZE_SEARCH,
+        )
+
+        # Wave 4 follow-up: TP search cap is now per-hw. NVL72-class fabrics
+        # (B200) get a 72-rank domain; TPU v5p gets the 16-chip torus axis;
+        # plain DGX-H100 stays at 8 because no NVL72 H100 exists. We assert
+        # the planner never emits a TP option past the *per-hw* domain.
+        for hw in ("h100", "b200", "trainium2", "trainium3", "tpu_v5p"):
+            cap = NVLINK_DOMAIN_SIZE_SEARCH.get(hw, 8)
+            for params in (1.0, 7.0, 120.0):
+                for ctx in (8192, 131072, 4_194_304):
+                    tp_options, pp, cp_options = context_aware_parallelism(
+                        hw, params, ctx, serving_batch=16,
+                    )
+                    self.assertTrue(tp_options, f"empty tp_options for {hw} {params}B ctx={ctx}")
+                    self.assertLessEqual(
+                        max(tp_options), cap,
+                        f"{hw} {params}B ctx={ctx} tp_options={tp_options} "
+                        f"exceeded NVLink domain {cap}",
+                    )
+
+    def test_tp_search_picks_higher_tp_at_long_ctx(self):
+        """A small-model long-context cell with tp_options=[1, 4] should
+        produce a Pareto frontier that includes BOTH TPs (so the optimizer
+        actually evaluated the higher TP option).
+
+        The exact picked optimum can vary as the quality/throughput models
+        evolve; the locked invariant is that TP=4 candidates appear at all
+        — without Wave 4 the search would never even enumerate them.
+        """
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ac"))
+        from optimizer import DeploymentConstraints, optimize
+
+        c = DeploymentConstraints(
+            target_params_b=1.0,
+            training_tokens=int(2e11),
+            context_length=131072,   # 128k — KV pressure shows up here
+            serving_tbt_ms=None, serving_ttft_ms=None,
+            tp_options=[1, 4],
+            cp=1, cp_options=[1],
+            pp=1, dp=8,
+            serving_batch=4,
+            max_candidates=40,
+            allow_quality_sentinel=True,
+        )
+        r = optimize("h100", c)
+        # The frontier must contain candidates at both TPs — otherwise the
+        # outer tp_opts loop didn't actually run.
+        tp_values = {ev.arch.tp_degree for ev in r.all_evaluated}
+        self.assertEqual(
+            tp_values, {1, 4},
+            f"expected both TPs in evaluated set, got {sorted(tp_values)}",
+        )
+        # The picked optimum must record a TP from the search list, not a
+        # stray default.
+        if r.optimal is not None:
+            self.assertIn(
+                r.optimal.arch.tp_degree, (1, 4),
+                f"optimum tp_degree={r.optimal.arch.tp_degree} outside the "
+                f"search space [1, 4]",
+            )
+
+
+class StateResidualAnchorTests(unittest.TestCase):
+    """Wave 5 — state_residual must reproduce published hybrid anchor data.
+
+    The current quality model can drift; these tests pin it against the
+    Jamba ablations (AI21 2024), the NVIDIA Empirical Study of Mamba
+    (2024), and the Samba paper (Microsoft 2024). If a future model
+    change moves any anchor outside its tolerance band, that change
+    needs to be justified against the cited literature.
+    """
+
+    def _state_value(self, p_attn, ctx, d_model=4096, n_layers=32, n_heads=32):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ac"))
+        from quality_model import estimate_quality
+        attn = max(1, int(round(p_attn * n_layers)))
+        state = n_layers - attn
+        cfg = {
+            'd_model': d_model, 'n_layers': n_layers,
+            'n_heads': n_heads, 'd_head': 128, 'n_kv_heads': max(1, n_heads // 8),
+            'ffn_dim': d_model * 4, 'vocab_size': 32000,
+            'attention_type': 'gqa',
+            'weight_precision': 'bf16', 'kv_precision': 'bf16',
+            'activation_precision': 'bf16',
+        }
+        if state > 0:
+            cfg['model_type'] = 'hybrid'
+            cfg['state_config'] = {
+                'enabled': True, 'state_layers': state,
+                'attention_layers': attn, 'd_state': 192, 'state_type': 'mamba2',
+            }
+        else:
+            cfg['model_type'] = 'dense'
+        q = estimate_quality(
+            cfg,
+            {'training_tokens': int(3.5e12), 'sequence_length': ctx},
+            {'context_length': ctx, 'task_type': 'general'},
+        )
+        t = (q.terms or {}).get('state_residual')
+        return t.value if t else 0.0
+
+    def test_jamba_band_center_parity(self):
+        """Jamba 1:7 hybrid at short ctx: parity with pure attention.
+
+        AI21 ablations show p_attn = 0.125 (1:7 ratio) is the sweet
+        spot — hybrid quality matches pure attention at standard
+        contexts. state_residual must be ≈ 0 at this point.
+        """
+        val = self._state_value(p_attn=0.125, ctx=4096)
+        self.assertLess(abs(val), 0.015,
+                        f"Jamba sweet spot must be near-zero residual; got {val:.4f}")
+
+    def test_nvidia_long_context_benefit(self):
+        """NVIDIA 8B Mamba-2-Hybrid (p_attn≈0.07) at 128K beats the 8B
+        Transformer by ~2.65 points on 12 tasks → ~1.5% loss reduction.
+        state_residual must be negative at this point.
+        """
+        val = self._state_value(p_attn=0.07, ctx=131072)
+        self.assertLess(val, -0.005,
+                        f"NVIDIA 128K hybrid must show benefit (negative residual); got {val:.4f}")
+        # Don't let it run away: cap the magnitude inside a reasonable band.
+        self.assertGreater(val, -0.04,
+                           f"benefit shouldn't exceed NVIDIA's measured improvement; got {val:.4f}")
+
+    def test_state_residual_no_crush_at_large_scale(self):
+        """500B hybrid at 2M context, p_attn=0.125 (Jamba ratio).
+
+        Pre-Wave-5 the composition×ctx term inflated this to ≈ +0.108,
+        which made MoE crush MoE-hybrid by 17.6% loss. After Wave 5 +
+        Wave 5b's log-saturating compression, the value must be inside
+        ±0.05 (i.e. not a crushing penalty in either direction).
+        """
+        val = self._state_value(p_attn=0.125, ctx=2097152,
+                                d_model=12288, n_layers=80, n_heads=96)
+        self.assertLess(abs(val), 0.05,
+                        f"500B@2M hybrid penalty was the Wave-5 bug; "
+                        f"must be inside ±0.05, got {val:.4f}")
+
+    def test_pure_attention_no_state_benefit_or_penalty(self):
+        """At p_attn=1.0 (pure attention) the state_residual term is
+        not applicable — the new long-context benefit term must zero
+        out when p_state=0."""
+        val = self._state_value(p_attn=1.0, ctx=1048576)
+        self.assertAlmostEqual(val, 0.0, places=3,
+                               msg=f"pure-attention state_residual must be 0; got {val:.4f}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,29 +12,23 @@ Each transformation:
 from __future__ import annotations
 
 import copy
-import os
-import sys
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
-# Path bootstrap so callers can import this module from anywhere.
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_V1_STRESS = os.path.dirname(_HERE)
-_AC_ROOT = os.path.dirname(_V1_STRESS)
-for sub in (_V1_STRESS, os.path.join(_AC_ROOT, "v0-throughput"),
-            os.path.join(_AC_ROOT, "v0-quality"),
-            os.path.join(_AC_ROOT, "v0-tile-lattice")):
-    if sub not in sys.path:
-        sys.path.insert(0, sub)
-
-from throughput_model import ArchConfig as TArchConfig  # noqa: E402
-from quality_model import ArchConfig as QArchConfig  # noqa: E402
+try:
+    from ..throughput_model import ArchConfig as TArchConfig
+    from ..quality_model import ArchConfig as QArchConfig
+except ImportError:
+    from throughput_model import ArchConfig as TArchConfig
+    from quality_model import ArchConfig as QArchConfig
 
 
 _SIDECAR_ATTRS = (
     "_mla_latent_dim",
     "_swa_window",
+    "_n_local_attn_layers",  # Wave 18g: local:global interleave
     "_tp_override", "_pp_override", "_ep_override", "_cp_override",
+    "_dp_override",
     # Provenance: the ordered list of delta names already applied to this
     # arch. Used by compose-time precondition checks so a later
     # transformation can refuse to silently overwrite an earlier one.

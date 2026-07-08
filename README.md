@@ -39,10 +39,12 @@ python ac/auto_calibrate.py --help
 After install the console scripts are on your `PATH`:
 
 ```bash
-ac-compile        --help
-ac-delta-eval     --help
-ac-stress         --help
-ac-auto-calibrate --help
+ac-compile        --help    # greenfield / modifier entry
+ac-delta-eval     --help    # delta influence entry
+ac-stress         --help    # stress / quality / transition inspection
+ac-auto-calibrate --help    # ridge fit + fit-pairs + plan-ladder
+ac-matrix-18b     --help    # budget-matched matrix + scenario Pareto
+ac-trust-audit    --help    # public-model anchors + trust audit
 ```
 
 No external runtime dependencies beyond Python ≥ 3.10 and PyYAML.
@@ -177,6 +179,14 @@ architecture sweeps
   --mla-kv-latent          comma-list of c_kv options (default 512)
   --mla-q-latent           comma-list of c_q  options (default 1536)
 
+  --allow-local-global     enable local:global attention interleave sweep
+                           (GPT-OSS / Gemma-2 / Llama-4 pattern): a fraction
+                           of layers use sliding-window attention, the rest
+                           stay global (full/GQA, or MLA with --allow-mla)
+  --local-windows          comma-list of local windows (default "1024,4096")
+  --local-global-ratios    comma-list of local:global ratios
+                           (default "1:1,3:1,7:1")
+
   --allow-mtp              enable Multi-Token Prediction
   --mtp-depths             comma-list (e.g. "0,1,2")
 
@@ -296,7 +306,12 @@ output
                 pareto.csv + shadow_prices.md + justification.md +
                 assumptions.md + model_card.md
 ```
+
 </details>
+
+Modifier mode writes **fixed file names** into the `--out` directory; the
+greenfield `--output-config` / `--output-*` path flags do not apply here
+and are ignored with a stderr warning.
 
 The modifier and greenfield share all other flags (precision, parallelism,
 state, MoE, MLA, MTP, CP, RoPE, NSA, YOCO).
@@ -339,6 +354,7 @@ other
   --stdout           print Markdown to stdout instead of writing files
   --out      DIR     destination directory
 ```
+
 </details>
 
 
@@ -349,6 +365,7 @@ Available delta names (REGISTRY):
 | `swap_attention_to_gqa` | Set `n_kv_heads = n_heads / group_size` | `group_size` |
 | `swap_attention_to_mla` | Replace full attention with MLA at `latent_dim` | `latent_dim` |
 | `swap_attention_to_swa` | Sliding-window attention at `window_size` | `window_size` |
+| `interleave_local_attention` | Local:global interleave — `ratio` of layers become SWA at `window`, rest stay global | `ratio` (e.g. `"3:1"`), `window` |
 | `add_state_layers` | Replace a fraction of attention with a state mixer | `ratio` (e.g. `"1:3"`), `state_type` |
 | `densify_first_k` | Convert the first K MoE layers back to dense | `k` |
 | `change_moe_topology` | Reshape an MoE block | `n_experts`, `top_k` |
@@ -407,7 +424,7 @@ rest MoE). See `configs/mistral_7b.json` for the dense reference and
     "cp_method":         "ring"
   },
   "architecture": {
-    "d_model": 4096,           // MUST equal n_heads × d_head (see Caveats)
+    "d_model": 4096,           // MUST equal n_heads × d_head; the loader rejects mismatches
     "n_layers": 32,
     "vocab_size": 32000,
     "positional_encoding": {
@@ -511,6 +528,7 @@ field names.
 #### Minimal data needed for auto calibration
 
 <details>
+
 <summary> Minimal row </summary> 
 
 ```json
@@ -542,6 +560,7 @@ field names.
   "observed_prefill_time_ms": 39.0
 }
 ```
+
 </details>
 
 
@@ -559,6 +578,17 @@ ac-auto-calibrate fit \
   --max-hardware-scatter-p90-pct 15
 ```
 
+Two backend switches expose the calibration surface:
+
+- `--backend {ridge, hierarchical}` — `ridge` (default) runs the current
+  fitter. `hierarchical` is a stubbed posterior backend that exits with a
+  "not yet implemented" message.
+- `--public-anchor-gate {on, off}` — release gate. When `on` (default),
+  the fitter runs the public-model predictive-accuracy audit at
+  post-calibration tolerances; any failing entry demotes the pack from
+  `production_ready` to `experimental` and writes a per-model breakdown
+  to `public_anchor_report.md` alongside the pack.
+
 An editable starter file is included at
 `examples/lab_measurements.example.jsonl`.
 
@@ -570,6 +600,7 @@ out/lab_calibration/
   quality_overrides.json     overlay for quality uncertainty calibration
   hardware_specs/*.json      copied + tuned hardware specs
   report.md                  human-readable calibration report
+  public_anchor_report.md    anchor pass/fail table (when gate is on)
 ```
 
 <details>
@@ -615,6 +646,35 @@ Keep separate packs for materially different clusters, kernels, schedulers,
 recipes, and datamixes.
 
 </details>
+
+#### Zero-compute calibration
+
+Two subcommands sharpen decisions without any training runs:
+
+- **`ac-auto-calibrate fit-pairs`** — fits per-residual-term scale
+  factors from a corpus of published paired ablations (Waleffe/Jamba
+  hybrids, Ainslie GQA/MQA, DeepSeek MLA/MoE/MTP, Gemma-2 and Mistral
+  locality, YaRN/PI) and emits a coverage audit naming every term with
+  zero constraining pairs. Add lab pairs in the same format to sharpen.
+  Cross-paper scales are confounded by datamix/tokenizer — treat as
+  priors, not lab truth.
+
+    ```bash
+    ac-auto-calibrate fit-pairs --out out/pairfit
+    ```
+
+- **`ac-auto-calibrate plan-ladder`** — generates (never runs) the
+  cheapest paired-run ladder that resolves a named architecture
+  decision: scores both arms at target scale, computes the paired
+  sigma, and proposes scaled-down paired runs priced by AC's own
+  throughput model. Emits `plan.md`, `plan.json`, and a
+  measurement-template JSONL that feeds straight back into
+  `ac-auto-calibrate fit`.
+
+    ```bash
+    ac-auto-calibrate plan-ladder --arm-a dense --arm-b moe \
+      --params 13 --tokens 2 --context 8192 --out out/plan
+    ```
 
 ---
 
@@ -662,7 +722,7 @@ components.
 | Target | Peak BF16 / FP8 / FP4 (TF) | HBM | Interconnect | Tile path |
 |---|---|---:|---|---|
 | **NVIDIA H100 SXM** | 990 / 1980 / — | 80 GB | NVLink 4 (900 GB/s) | wmma 16×16 |
-| **NVIDIA B200** | 2 250 / 4 500 / 4 500 (MXFP4) | 192 GB | NVLink 5 (1.8 TB/s) | wmma + MX |
+| **NVIDIA B200** | 2 250 / 4 500 / 9 000 (MXFP4) | 192 GB | NVLink 5 (1.8 TB/s) | wmma + MX |
 | **TPU v5p** | 459 BF16 / — / — | 95 GB | ICI mesh | MXU 128×128 |
 | **TPU v5e** | 197 BF16 / — / — | 16 GB | ICI mesh | MXU 128×128 |
 | **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128 |
@@ -765,6 +825,7 @@ FP4/MX modes are available on B200 and Trainium 3.
 | `swap_attention_to_gqa` | n_kv_heads ← n_heads / group_size | `group_size` |
 | `swap_attention_to_mla` | full → MLA at `latent_dim` | `latent_dim` |
 | `swap_attention_to_swa` | full → sliding window | `window_size` |
+| `interleave_local_attention` | local:global interleave | `ratio`, `window` |
 | `add_state_layers` | replace fraction of attention with a state mixer | `ratio`, `state_type` |
 | `densify_first_k` | first K MoE layers → dense | `k` |
 | `change_moe_topology` | reshape an MoE block | `n_experts`, `top_k` |
@@ -795,6 +856,10 @@ GPT-OSS-120B   MAI-Base-1
 │   ├── cli_compile.py               greenfield + modifier point
 │   ├── cli_delta_eval.py            delta influence entry point
 │   ├── cli_stress.py                stress / quality / transition inspection
+│   ├── cli_recipe.py                --recipe / --override / --print-recipe /
+│   │                                --help-group / `config show` / `init`
+│   ├── cli_matrix18b.py             budget-matched matrix + scenario Pareto
+│   ├── cli_trust_audit.py           public-model anchors + trust audit
 │   │
 │   ├── lattice_engine.py            tile-aligned architecture lattice + KNOWN_ARCHITECTURES
 │   ├── throughput_model.py          roofline throughput + MoE all-to-all + state-hybrid + MLA
@@ -838,10 +903,14 @@ GPT-OSS-120B   MAI-Base-1
 │   ├── calibration/                 h100, b200, tpu_v5p calibration jsons
 │   └── quality_defaults.yaml        modular scaling-law constants
 │
-└── configs/                         reference base-model configs
+└── configs/                         reference base-model configs + shipped recipes
     ├── mistral_7b.json              dense + GQA
     ├── gpt_oss_120b.json            MoE 128 × top-4
-    └── mai_thinking_1.json          MoE + MLA + MTP + LongRoPE
+    ├── mai_thinking_1.json          MoE + MLA + MTP + LongRoPE
+    └── recipes/                     shipped --recipe bundles
+        ├── h100_dense_7b.yaml
+        ├── b200_moe_mla_long_ctx.yaml
+        └── delta_mistral_gqa_long_ctx.yaml
 ```
 
 ---

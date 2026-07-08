@@ -14,25 +14,52 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace as dc_replace
 from typing import Any, Dict, List, Optional, Tuple
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
+try:
+    from .throughput_model import ArchConfig as TArchConfig
+    from .quality_model import TrainingConfig
+    from .stress import StressVector, Workload, compute_throughput_stress
+    from .quality_stress import compute_quality_stress
+    from .transition import Transition
+    from .deltas import REGISTRY, get as get_transformation
+    from .deltas.base import Transformation
+except ImportError:
+    from throughput_model import ArchConfig as TArchConfig
+    from quality_model import TrainingConfig
+    from stress import StressVector, Workload, compute_throughput_stress
+    from quality_stress import compute_quality_stress
+    from transition import Transition
+    from deltas import REGISTRY, get as get_transformation
+    from deltas.base import Transformation
 
-from throughput_model import ArchConfig as TArchConfig  # noqa: E402
-from quality_model import (  # noqa: E402
-    TrainingConfig,
-)
 
-from stress import StressVector, Workload, compute_throughput_stress  # noqa: E402
-from quality_stress import compute_quality_stress  # noqa: E402
-from transition import Transition  # noqa: E402
-from deltas import REGISTRY, get as get_transformation  # noqa: E402
-from deltas.base import Transformation  # noqa: E402
+_KV_PRECISION_TO_BITS = {
+    "bf16": 16, "fp16": 16, "fp32": 32, "tf32": 32,
+    "fp8": 8, "int8": 8, "fp4": 4, "int4": 4,
+    "mxfp4": 4, "mxfp6": 6,
+}
+
+
+def _training_for_arch(training: TrainingConfig, arch: TArchConfig) -> TrainingConfig:
+    """Wave 18h: thread the arch's KV-cache precision into the quality-side
+    TrainingConfig.
+
+    The KV-quantization quality penalty lives on
+    `TrainingConfig.kv_quantization_bits`, not on the quality ArchConfig —
+    so before this fix, baseline and candidate quality vectors were both
+    computed with the CALLER's TrainingConfig and a KV-precision delta
+    (change_precision_per_component:kv=int4) was invisible to the residual
+    decomposition: the summary said "Quality cost: negligible" while the
+    evaluator's metric table showed +1.2% predicted loss for the same swap.
+    """
+    bits = _KV_PRECISION_TO_BITS.get(
+        str(getattr(arch, "kv_precision", "bf16")).lower(), 16
+    )
+    if bits == int(getattr(training, "kv_quantization_bits", 16)):
+        return training
+    return dc_replace(training, kv_quantization_bits=bits)
 
 
 def _arch_hash(arch: TArchConfig) -> str:
@@ -42,12 +69,16 @@ def _arch_hash(arch: TArchConfig) -> str:
     return hashlib.sha1(blob).hexdigest()[:12]
 
 
-def _parallelism_for(arch: TArchConfig, defaults: Tuple[int, int, int]) -> Tuple[int, int, int]:
+def _parallelism_for(
+    arch: TArchConfig,
+    defaults: Tuple[int, int, int, int],
+) -> Tuple[int, int, int, int]:
     """Read parallelism overrides set by ChangeParallelism, fall back to defaults."""
     tp = getattr(arch, "_tp_override", defaults[0])
     pp = getattr(arch, "_pp_override", defaults[1])
     ep = getattr(arch, "_ep_override", defaults[2])
-    return tp, pp, ep
+    dp = getattr(arch, "_dp_override", defaults[3])
+    return tp, pp, ep, dp
 
 
 def apply_transition(
@@ -60,6 +91,7 @@ def apply_transition(
     tp_degree: int = 1,
     pp_degree: int = 1,
     ep_degree: int = 1,
+    dp_degree: int = 1,
     training: Optional[TrainingConfig] = None,
     baseline_name: str = "",
     _baseline_stress: Optional[StressVector] = None,
@@ -76,7 +108,7 @@ def apply_transition(
         decode_kv_len=baseline.seq_len,
         phase="decode",
     )
-    training = training or TrainingConfig(training_tokens=2_000_000_000_000)
+    training = training or TrainingConfig(training_tokens=20_000_000_000_000)
 
     # --- precondition ---
     ok, reason = transformation.precondition(baseline)
@@ -106,13 +138,16 @@ def apply_transition(
         )
 
     # --- read parallelism overrides from the candidate ---
-    c_tp, c_pp, c_ep = _parallelism_for(candidate, (tp_degree, pp_degree, ep_degree))
+    c_tp, c_pp, c_ep, c_dp = _parallelism_for(
+        candidate, (tp_degree, pp_degree, ep_degree, dp_degree)
+    )
 
     # --- stress vectors ---
     if _baseline_stress is None:
         b_stress = compute_throughput_stress(
             baseline, hardware, workload,
             tp_degree=tp_degree, pp_degree=pp_degree, ep_degree=ep_degree,
+            dp_degree=dp_degree,
             arch_name=baseline_name or "baseline",
         )
     else:
@@ -121,6 +156,7 @@ def apply_transition(
         c_stress = compute_throughput_stress(
             candidate, hardware, workload,
             tp_degree=c_tp, pp_degree=c_pp, ep_degree=c_ep,
+            dp_degree=c_dp,
             arch_name=f"{baseline_name or 'baseline'}+{transformation.name}",
         )
     except Exception as e:
@@ -140,14 +176,14 @@ def apply_transition(
     b_q = c_q = None
     try:
         b_qarch = transformation.to_quality_arch(baseline)
-        b_q = compute_quality_stress(b_qarch, training,
+        b_q = compute_quality_stress(b_qarch, _training_for_arch(training, baseline),
                                       workload_spec={"context_length": workload.decode_kv_len},
                                       arch_name=baseline_name or "baseline")
     except Exception:
         pass
     try:
         c_qarch = transformation.to_quality_arch(candidate)
-        c_q = compute_quality_stress(c_qarch, training,
+        c_q = compute_quality_stress(c_qarch, _training_for_arch(training, candidate),
                                       workload_spec={"context_length": workload.decode_kv_len},
                                       arch_name=f"{baseline_name or 'baseline'}+{transformation.name}")
     except Exception:
@@ -179,6 +215,7 @@ def apply_transitions(
     tp_degree: int = 1,
     pp_degree: int = 1,
     ep_degree: int = 1,
+    dp_degree: int = 1,
     training: Optional[TrainingConfig] = None,
     baseline_name: str = "",
 ) -> List[Transition]:
@@ -193,6 +230,7 @@ def apply_transitions(
     b_stress = compute_throughput_stress(
         baseline, hardware, workload,
         tp_degree=tp_degree, pp_degree=pp_degree, ep_degree=ep_degree,
+        dp_degree=dp_degree,
         arch_name=baseline_name or "baseline",
     )
     out: List[Transition] = []
@@ -214,6 +252,7 @@ def apply_transitions(
             baseline, xf, params or {},
             hardware=hardware, workload=workload,
             tp_degree=tp_degree, pp_degree=pp_degree, ep_degree=ep_degree,
+            dp_degree=dp_degree,
             training=training, baseline_name=baseline_name,
             _baseline_stress=b_stress,
         )

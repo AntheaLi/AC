@@ -12,13 +12,14 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from lattice_engine import estimate_params
-from optimizer import CandidateArch
-from schema import load_config
+try:
+    from .lattice_engine import estimate_params
+    from .optimizer import CandidateArch
+    from .schema import load_config
+except ImportError:
+    from lattice_engine import estimate_params
+    from optimizer import CandidateArch
+    from schema import load_config
 
 
 class BaselineUnsupportedError(ValueError):
@@ -90,8 +91,40 @@ def load_baseline_model(path: str) -> BaselineModel:
     n_layers = int(arch["n_layers"])
     warnings: List[str] = []
 
+    # Wave 18g: per-layer attention heterogeneity. Bands whose attention is
+    # sliding-window (type == "swa", or a positive window_size) are LOCAL
+    # bands; the rest are GLOBAL. A GPT-OSS / Gemma-2-style alternating
+    # stack is expressed as two bands. The local layer count feeds
+    # n_local_attn_layers; shape fields come from the dominant GLOBAL band
+    # (published interleaves share head geometry across bands).
+    def _band_is_local(band: Dict[str, Any]) -> bool:
+        att = band.get("attention") or {}
+        if str(att.get("type", "full")).lower() == "swa":
+            return True
+        return int(att.get("window_size", 0) or 0) > 0
+
+    local_bands = [b for b in layer_configs if _band_is_local(b)]
+    global_bands = [b for b in layer_configs if not _band_is_local(b)]
+    n_local_attn_layers = sum(len(b.get("layer_idx") or []) for b in local_bands)
+    local_window = 0
+    for b in local_bands:
+        att = b.get("attention") or {}
+        w = int(att.get("window_size", 0) or 0)
+        if w <= 0:
+            raise BaselineUnsupportedError(
+                "SWA band requires a positive attention.window_size.")
+        local_window = max(local_window, w)
+    if len({int((b.get("attention") or {}).get("window_size", 0) or 0)
+            for b in local_bands}) > 1:
+        warnings.append(
+            "Multiple SWA window sizes across bands; using the largest "
+            "(conservative for KV memory).")
+
     # v1-fix: support multi-entry layer_configs by picking the dominant entry
     # (largest layer_idx coverage). This lets first-K-dense MoE baselines load.
+    # Wave 18g: when local bands exist, the dominant entry is chosen among
+    # GLOBAL bands.
+    _selectable = global_bands if (local_bands and global_bands) else layer_configs
     if len(layer_configs) == 1:
         lc = layer_configs[0]
         expected_layers = list(range(n_layers))
@@ -100,12 +133,23 @@ def load_baseline_model(path: str) -> BaselineModel:
                 "Single layer_config must cover all layers."
             )
     else:
-        lc = max(layer_configs, key=lambda c: len(c.get("layer_idx") or []))
-        warnings.append(
-            f"Baseline has {len(layer_configs)} layer_configs; using the "
-            f"dominant entry ({len(lc.get('layer_idx') or [])} of {n_layers} "
-            f"layers). First-K-dense prefix surfaced as metadata only."
-        )
+        lc = max(_selectable, key=lambda c: len(c.get("layer_idx") or []))
+        if local_bands and global_bands:
+            warnings.append(
+                f"Local:global interleave baseline: {n_local_attn_layers} of "
+                f"{n_layers} layers are sliding-window (window={local_window}); "
+                f"shape read from the dominant global band."
+            )
+        else:
+            warnings.append(
+                f"Baseline has {len(layer_configs)} layer_configs; using the "
+                f"dominant entry ({len(lc.get('layer_idx') or [])} of {n_layers} "
+                f"layers). First-K-dense prefix surfaced as metadata only."
+            )
+    if local_bands and not global_bands:
+        # Whole-model SWA: legacy semantics (swa_window set, n_local == 0),
+        # and the dominant (local) band supplies the shape.
+        n_local_attn_layers = 0
 
     if lc.get("state") is not None:
         raise BaselineUnsupportedError(
@@ -122,10 +166,13 @@ def load_baseline_model(path: str) -> BaselineModel:
     ffn = lc.get("ffn") or {}
 
     attn_type = attention.get("type", "full")
+    if attn_type == "swa":
+        # Wave 18g: whole-model SWA baseline — GQA projection with a window.
+        attn_type = "full"
     if attn_type not in ("full", "mla"):
         raise BaselineUnsupportedError(
             f"Attention type {attn_type!r} not yet supported for baseline "
-            f"loading (supported: full, mla)."
+            f"loading (supported: full, mla, swa)."
         )
 
     ffn_type = ffn.get("type", "swiglu")
@@ -225,6 +272,14 @@ def load_baseline_model(path: str) -> BaselineModel:
     ep_degree = int(parallelism.get("expert_parallel", 1) or 1)
     cp_degree = int(parallelism.get("context_parallel", 1) or 1)
     cp_method = str(parallelism.get("cp_method", "ring"))
+    # Bug fix (Jul 2026): TP and PP from the config's parallelism block were
+    # silently dropped — the candidate kept CandidateArch's default and the
+    # throughput model evaluated every baseline at TP=1/PP=1 regardless of
+    # the declared parallelism (wrong TTFT, no TP all-reduce / cross-node
+    # comm in TBT, and per-GPU memory unsharded by TP/PP). 0 = "not
+    # declared" → evaluate_candidate falls back to DeploymentConstraints.
+    tp_degree = int(parallelism.get("tensor_parallel", 0) or 0)
+    pp_degree = int(parallelism.get("pipeline_parallel", 0) or 0)
 
     candidate = CandidateArch(
         d_model=d_model,
@@ -247,14 +302,74 @@ def load_baseline_model(path: str) -> BaselineModel:
         moe_style=("fine" if moe_block else "dense"),
         cp_degree=cp_degree,
         cp_method=cp_method,
+        tp_degree=tp_degree,
+        pp_degree=pp_degree,
+        # Wave 18g: local:global interleave (or whole-model SWA when
+        # n_local_attn_layers == 0 and local_window > 0).
+        swa_window=int(local_window or 0),
+        n_local_attn_layers=int(n_local_attn_layers or 0),
         **mla_kwargs,
     )
+
+    # Wave 20 (loop finding): recompute the param counts through the
+    # canonical `architecture.parameter_ledger` now that the candidate
+    # carries every relevant field (MLA latents, state config, MoE block).
+    # The inline estimate above is MLA-blind — it counted full-MHA QKVO for
+    # MLA baselines (mai_thinking_1: 55.46B "active" vs the ledger's
+    # 35.27B) — and the consistency gate below was validating metadata
+    # against that same blind formula, so mutually-wrong numbers passed.
+    try:
+        try:
+            from ac.architecture import parameter_ledger as _ledger_fn
+        except ImportError:
+            from architecture import parameter_ledger as _ledger_fn
+        _led = _ledger_fn(candidate)
+        total_params = int(_led.total_params)
+        active_params = int(_led.active_params)
+        candidate.total_params = total_params
+        candidate.active_params = active_params
+        candidate.total_params_b = round(total_params / 1e9, 2)
+        candidate.active_params_b = round(active_params / 1e9, 2)
+    except Exception:
+        pass  # keep the inline estimate if the ledger cannot read the arch
 
     name = (
         config.get("metadata", {}).get("model_name")
         or config.get("metadata", {}).get("name")
         or os.path.splitext(os.path.basename(path))[0]
     )
+
+    # Wave 18h: ledger-vs-metadata consistency gate. A reference config whose
+    # declared parameter counts disagree with what its own architecture block
+    # computes poisons every delta-eval / modifier run against it (the
+    # gpt_oss_120b fixture shipped for weeks declaring 120B while its
+    # architecture block computed 655B). Warn loudly at >2% relative error;
+    # the shipped-config CI test (tests/test_reference_config_ledger.py)
+    # blocks release on the same threshold.
+    declared = (config.get("metadata", {}) or {}).get("params", {}) or {}
+    for decl_key, computed in (
+        ("total_b", total_params / 1e9),
+        ("active_b", active_params / 1e9),
+    ):
+        decl = declared.get(decl_key)
+        if decl is None:
+            continue
+        try:
+            decl_f = float(decl)
+        except (TypeError, ValueError):
+            continue
+        if decl_f <= 0:
+            continue
+        rel_err = abs(computed - decl_f) / decl_f
+        if rel_err > 0.02:
+            msg = (
+                f"LEDGER MISMATCH: metadata.params.{decl_key}={decl_f:g}B but "
+                f"the architecture block computes {computed:.2f}B "
+                f"({rel_err * 100:.1f}% off). The computed ledger is used for "
+                "all predictions; fix the config metadata or the architecture."
+            )
+            warnings.append(msg)
+            print(f"WARNING: [{name}] {msg}", file=sys.stderr)
 
     return BaselineModel(
         path=path,

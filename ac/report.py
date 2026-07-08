@@ -11,7 +11,7 @@ import csv
 import io
 import json
 import math
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from evaluator import DeltaEvaluation, MetricDelta
 from stress import STRESS_AXES
@@ -27,8 +27,16 @@ _METRIC_PRETTY = {
     "prefill_time_ms":   "Prefill / TTFT (ms)",
     "training_tps":      "Training TPS (tok/s)",
     "memory_per_gpu_gb": "Memory / GPU (GB)",
-    "kv_cache_gb":       "KV cache (GB)",
+    # Wave 18h: this figure is computed for ONE concurrent request (batch=1)
+    # per GPU. Label it as such — an unlabeled "KV cache (GB)" was being
+    # read as the steady-state serving footprint and understated batch-N
+    # capacity plans by N×.
+    "kv_cache_gb":       "KV cache / GPU, per request (GB)",
     "total_params_b":    "Total params (B)",
+    # Wave 20 (feedback #4): active params + the scaling-law loss component
+    # so param-count moves can't masquerade as architecture-quality wins.
+    "active_params_b":   "Active non-embedding params used by scaling spine (B)",
+    "scaling_law_loss":  "Scaling-law loss (predicted − residual terms)",
 }
 
 _STRESS_AXIS_PRETTY = {
@@ -98,7 +106,15 @@ def _fmt_pct_md(md) -> str:
     # Quality residuals sometimes sit at ~1e-7. Surface the *signed move*
     # (e.g. "(no baseline, +0.021)") rather than a bare "n/a" so the reader
     # sees direction and magnitude even when a ratio is undefined.
-    near_zero_baseline = abs(base) < 1e-6
+    #
+    # Wave 23 fix: the near-zero threshold is 5e-6 (not 1e-6) so that any
+    # baseline that displays as 0.00000 in the Δ table's `.5f` cells falls
+    # into the "(no baseline, ...)" branch instead of surfacing a ratio
+    # ("6.5e+02× larger") next to a visible zero. Anything smaller than
+    # 5e-6 rounds to 0.00000 at 5-decimal display, so a multiplicative
+    # ratio is arithmetically correct but visually indistinguishable from
+    # dividing by zero.
+    near_zero_baseline = abs(base) < 5e-6
     blown_up = delta > 0 and abs(base) > 0 and abs(base) < 0.05 * delta
     if near_zero_baseline:
         if delta < 1e-9:
@@ -123,12 +139,19 @@ def render_metric_table(metrics: Dict[str, MetricDelta],
     """Render the canonical metric panel as a Markdown table."""
     keys = keys or [
         "predicted_loss",
+        # Wave 25: scaling_law_loss was added to the metric set in Wave 20
+        # ("the delta panel adds scaling-spine active params +
+        # scaling_law_loss") but never made it into the default key list,
+        # so the rendered table showed the spine-param row without the
+        # spine-loss row it exists to explain.
+        "scaling_law_loss",
         "serving_tbt_ms",
         "prefill_time_ms",
         "training_tps",
         "memory_per_gpu_gb",
         "kv_cache_gb",
         "total_params_b",
+        "active_params_b",
     ]
     lines = ["| Metric | Baseline | Candidate | Δ | Δ% | Direction |",
              "|---|---:|---:|---:|---:|---|"]
@@ -300,6 +323,80 @@ def render_topology_notes(ev: DeltaEvaluation) -> str:
             "use `state_fraction=...` if the CLI's `state:attention` ratio "
             "convention is unfamiliar."
         )
+        # Wave 19 (loop finding L3): a favorable LOSS delta for a high-state
+        # hybrid must not be read as a green light. The documented failure
+        # mode of state-heavy stacks — retrieval/recall and in-context-copy
+        # collapse — hides on pretraining loss and only shows on
+        # recall-class evals, which AC does not predict pre-calibration.
+        if sf >= 0.5:
+            notes.append(
+                "CAUTION: predicted-loss parity or improvement at "
+                f"{sf*100:.0f}% state layers does NOT establish recall-class "
+                "eval parity (NIAH / multi-hop retrieval / in-context copy). "
+                "Those failure modes are invisible to pretraining loss and "
+                "AC's eval surface is uncalibrated out of the box. Treat "
+                "this delta as throughput/memory evidence plus a "
+                "loss-parity hypothesis to be tested with a recall suite."
+            )
+        # Wave 20 (feedback #4): quantitative floor for cross-mixer loss
+        # deltas — the published-pair fit shows the model over-predicts
+        # hybrid benefit by ~2.8% at ratio-parity operating points, so a
+        # small favorable loss delta is inside known model bias.
+        try:
+            try:
+                from .quality_model import load_quality_constants
+            except ImportError:
+                from quality_model import load_quality_constants
+            _floor = float(load_quality_constants()
+                           .get("state_residual", {})
+                           .get("cross_mixer_bias_floor_pct", 2.8))
+            _pl = ev.metrics.get("predicted_loss")
+            if _pl is not None and abs(_pl.pct_change) < _floor:
+                notes.append(
+                    f"Loss-delta floor: |Δloss| = {abs(_pl.pct_change):.2f}% "
+                    "is below the attention↔state cross-mixer bias floor "
+                    f"({_floor:.1f}%, from the fit-pairs coverage audit — "
+                    "the one published ratio-parity pair misses by 2.76% "
+                    "in the hybrid-favoring direction). Treat the sign of "
+                    "this loss delta as model bias, not signal; published "
+                    "hybrid results at these ratios are parity-at-best. "
+                    "Use `ac-compile plan-ladder` to price a real paired "
+                    "run."
+                )
+        except Exception:
+            pass
+
+    # Wave 20 (feedback #4) / Wave 25 relocation: if the delta moved ACTIVE
+    # params, part of the loss delta is capacity, not architecture —
+    # attribute it explicitly. Wave 25: this block used to live inside the
+    # `state_fraction` branch above, so it only ever fired for state-mixer
+    # swaps. Attention swaps move spine params too (swap_attention_to_mla
+    # on Mistral-7B drops active non-embedding params −13% and the summary
+    # then under-reported the quality cost by the entire spine share), as
+    # do vocab/FFN edits. Fire for ANY delta with a material spine shift.
+    _ap = ev.metrics.get("active_params_b")
+    _sl = ev.metrics.get("scaling_law_loss")
+    if _ap is not None and abs(_ap.pct_change) > 0.5:
+        _sl_txt = ""
+        if _sl is not None and ev.metrics.get("predicted_loss") is not None:
+            _pl2 = ev.metrics["predicted_loss"]
+            _resid = _pl2.delta - _sl.delta
+            _sl_txt = (
+                f" Attribution: of the {_pl2.delta:+.4f} predicted-loss "
+                f"move, {_sl.delta:+.4f} is the scaling-law baseline "
+                "responding to the spine-param change and "
+                f"~{_resid:+.4f} is residual-term/interaction effects."
+            )
+        notes.append(
+            f"ACTIVE-PARAM SHIFT: this delta changes the scaling-spine "
+            f"active params {_ap.baseline:.2f}B → {_ap.candidate:.2f}B "
+            f"({_ap.pct_change:+.1f}%)."
+            f"{_sl_txt} The scaling-law share is a capacity effect "
+            "(more parameters active per token), not an "
+            "architecture-quality effect — do not read it as 'this "
+            "mixer is better'. Size the new mixer dims to hold active "
+            "params constant to isolate the architecture question."
+        )
 
     # Filter to *substantive* field changes: ignore sidecar parallelism
     # echoes (tp/pp/cp moved from <int> to None) and the always-present
@@ -460,6 +557,194 @@ def render_topology_notes(ev: DeltaEvaluation) -> str:
     return "\n".join(f"- {note}" for note in notes)
 
 
+# =============================================================================
+# Family comparison renderer (Wave 2b Step 2b.1, Jun 2026)
+# =============================================================================
+#
+# Schema: see plan/redesign/schema-v2.md.
+# Consumes a `families` list — loss-sorted per-architecture-family winners
+# at a single (hw, params_B, ctx) cell. Renders a compact comparison table
+# that surfaces the loss-vs-serving trade-off the v1 categorical regimes
+# erased. Pure function with no DeltaEvaluation dependency, so it's easy
+# to snapshot-test with canned data.
+
+_ARCH_PRETTY = {
+    "dense":      "dense",
+    "hybrid":     "hybrid",
+    "moe":        "MoE",
+    "moe_hybrid": "MoE-hybrid",
+}
+
+
+def _pretty_arch(arch_mode: str, state_type: object = None) -> str:
+    """`("moe_hybrid", "mamba2") → "MoE-hybrid"`. State type intentionally
+    not surfaced in the name to keep the table compact — it's available in
+    the per-family detail view if needed."""
+    return _ARCH_PRETTY.get(arch_mode, arch_mode)
+
+
+def _fmt_ctx(ctx: int) -> str:
+    """`8192 → "8k"`, `131072 → "128k"`, `4194304 → "4M"`."""
+    if ctx >= 1024 * 1024:
+        v = ctx / (1024 * 1024)
+        return f"{v:g}M"
+    if ctx >= 1024:
+        v = ctx / 1024
+        return f"{v:g}k"
+    return str(ctx)
+
+
+def _fmt_ms(ms: float) -> str:
+    """Right-aligned ms in 3 sig-figs minimum."""
+    if ms >= 1000:
+        return f"{ms:>6.0f} ms"
+    if ms >= 100:
+        return f"{ms:>6.0f} ms"
+    if ms >= 10:
+        return f"{ms:>6.1f} ms"
+    return f"{ms:>6.2f} ms"
+
+
+def _fmt_tbt_delta(tbt_pct: float) -> str:
+    """Render the TBT delta as "N% slower/faster" for small moves and
+    "N× slower/faster" for large moves. `tbt_pct > 0` means slower than
+    the family-0 winner.
+
+    Threshold: switch to × notation once the move would render as 2× or
+    bigger. So -50% → "2.0× faster", -75% → "4.0× faster", -92% → "12.5×
+    faster"; meanwhile -40% stays as "40% faster" for legibility."""
+    if abs(tbt_pct) < 1:
+        return "≈same decode"
+    if tbt_pct > 0:
+        if tbt_pct >= 100:
+            factor = 1 + tbt_pct / 100
+            return f"{factor:.1f}× slower decode"
+        return f"{tbt_pct:.0f}% slower decode"
+    # faster: tbt_pct ∈ (-100, 0)
+    if tbt_pct <= -50:
+        factor = 1.0 / max(1e-9, 1 + tbt_pct / 100)
+        return f"{factor:.1f}× faster decode"
+    return f"{abs(tbt_pct):.0f}% faster decode"
+
+
+def render_family_comparison(
+    families: List[Dict[str, Any]],
+    params_B: float,
+    ctx: int,
+) -> str:
+    """Render a per-family comparison table for one (params, ctx) cell.
+
+    Example output:
+
+        13B @ 8k        loss     TBT       TTFT     mem
+          MoE-hybrid   1.8192   142 ms     309 ms    39 GB
+          MoE          1.8465   194 ms     132 ms    34 GB   (+1.5% loss, 37% slower decode)
+          dense        1.9304    11 ms     164 ms    42 GB   (+6.1% loss, 14.0× faster decode)
+          hybrid       1.9639    12 ms     578 ms    55 GB   (+7.9% loss, 12.6× faster decode)
+
+    Rows with `spill_tier != "fits"` are annotated with `[spill]`.
+
+    Returns "" if families is empty. Does not raise on missing fields —
+    falls back to 0 / "?" so the renderer is robust to schema drift.
+    """
+    if not families:
+        return ""
+    header = f"\n{params_B:g}B @ {_fmt_ctx(ctx)}      loss        TBT         TTFT       mem\n"
+    rows = []
+    any_selected = any(f.get("is_selected") for f in families)
+
+    # Wave 20 (feedback #1): cross-family decode-speed claims must respect
+    # the anchor-measured serving bias floor. Map the table's arch_mode
+    # labels onto the bias table's family keys; `moe_hybrid` leans on the
+    # MoE serving path, so it inherits the MoE floor.
+    def _bias_family(mode: Optional[str]) -> str:
+        return {"moe": "moe", "moe_hybrid": "moe",
+                "hybrid": "hybrid"}.get(mode or "dense", "dense")
+
+    def _tbt_floor_pct(mode_a: Optional[str], mode_b: Optional[str]) -> float:
+        try:
+            try:
+                from .decision import cross_family_bias_bar_by_name
+            except ImportError:
+                from decision import cross_family_bias_bar_by_name
+            bar, _ = cross_family_bias_bar_by_name(
+                _bias_family(mode_a), _bias_family(mode_b), metric="tbt_ms")
+            return bar
+        except Exception:
+            return 0.0
+
+    ref_mode = families[0].get("arch_mode")
+    any_tbt_floored = False
+    for i, f in enumerate(families):
+        # Wave 26 fix #2: prefer `family_label` (the picked config's real
+        # arch family) over the internal `arch_mode` sentinel. Before the
+        # fix a picked row that fell in the SAME family as the best-loss
+        # row rendered as an anonymous "picked" line — readers could not
+        # tell whether the pick was a dense variant of the row above or a
+        # different family altogether.
+        _family_label = f.get("family_label")
+        if _family_label and _family_label != "picked":
+            name = _pretty_arch(_family_label, f.get("state_type"))
+        elif f.get("arch_mode") == "picked":
+            name = "picked"
+        else:
+            name = _pretty_arch(f.get("arch_mode", "?"), f.get("state_type"))
+        loss = float(f.get("loss", 0.0))
+        tbt = float(f.get("tbt_ms", 0.0))
+        ttft = float(f.get("ttft_ms", 0.0))
+        mem = float(f.get("mem_gb", 0.0))
+        spill_tier = f.get("spill_tier", "fits")
+        spill_tag = "" if spill_tier == "fits" else f"  [{spill_tier} spill]"
+        if i == 0:
+            delta = ""
+        else:
+            loss_pct = float(f.get("loss_delta_pct", 0.0))
+            tbt_pct = float(f.get("tbt_delta_pct", 0.0))
+            tbt_txt = _fmt_tbt_delta(tbt_pct)
+            floor = _tbt_floor_pct(ref_mode, f.get("arch_mode"))
+            # Wave 21: compare claim vs floor in LOG-RATIO space. TBT
+            # deltas are multiplicative; in percent space a speedup
+            # saturates at −100%, so any floor above 100% (which the
+            # anchor-measured MoE scatter can produce) would swallow
+            # EVERY speedup claim — a 13× decode advantage rendered as
+            # "inside bias floor". |ln(1+Δ)| vs ln(1+floor) reduces to
+            # the old percent comparison for small deltas and stays
+            # meaningful for large ones.
+            _claim_lr = math.log(max(1e-9, 1.0 + tbt_pct / 100.0))
+            _floor_lr = math.log(1.0 + max(0.0, floor) / 100.0)
+            if floor > 0.0 and abs(_claim_lr) < _floor_lr:
+                tbt_txt = (f"decode Δ inside family TBT bias floor "
+                           f"(±{floor:.0f}%)")
+                any_tbt_floored = True
+            elif floor > 0.0:
+                tbt_txt += "†"
+                any_tbt_floored = True
+            delta = f"   (+{loss_pct:.1f}% loss, {tbt_txt})"
+        # Wave 18h: mark the picked config so the family table's per-family
+        # best-loss numbers can't be silently conflated with the `Optimal:`
+        # line's numbers (they are usually different candidates).
+        picked_tag = "  ←picked" if f.get("is_selected") else ""
+        rows.append(
+            f"  {name:<12} {loss:>6.4f}  {_fmt_ms(tbt)}   {_fmt_ms(ttft)}   "
+            f"{mem:>4.0f} GB{spill_tag}{delta}{picked_tag}"
+        )
+    footnote = ""
+    if any_selected:
+        footnote = ("  (rows are per-family best-loss candidates; "
+                    "←picked marks the selected config)\n")
+    if any_tbt_floored:
+        # Wave 21: no hard-coded bias numbers here — they went stale the
+        # first time family_bias_v1.json was regenerated. The per-row
+        # floor already carries the current magnitude.
+        footnote += (
+            "  † cross-family decode/TTFT deltas are pre-calibration "
+            "estimates under anchor-measured serving bias (see "
+            "family_bias_v1.json for current per-family numbers); treat "
+            "magnitudes, not just sub-floor deltas, with caution until a "
+            "serving pack is fitted.\n")
+    return header + "\n".join(rows) + "\n" + footnote
+
+
 def render_markdown(ev: DeltaEvaluation) -> str:
     """Render a single-page Markdown report for one DeltaEvaluation."""
     args_str = ", ".join(f"{k}={v}" for k, v in ev.delta_args.items()) or "(no args)"
@@ -482,7 +767,10 @@ def render_markdown(ev: DeltaEvaluation) -> str:
             f"- preset: `{rw.get('workload_preset', '?')}`  ",
             f"- serving_batch: {rw.get('serving_batch')}  ",
             f"- prompt_len: {rw.get('prompt_len')}  context_length: {rw.get('context_length')}  ",
-            f"- TP / PP / DP: {rw.get('tp')} / {rw.get('pp')} / {rw.get('dp')}  ",
+            f"- TP / PP / DP: {rw.get('tp')} / {rw.get('pp')} / {rw.get('dp')}"
+            + (f"  EP: {rw.get('ep')}" if int(rw.get('ep') or 1) > 1 else "")
+            + (f"  CP: {rw.get('cp')}" if int(rw.get('cp') or 1) > 1 else "")
+            + "  ",
             f"- TBT budget: {rw.get('serving_tbt_ms_budget')} ms",
             "",
         ])
@@ -495,10 +783,34 @@ def render_markdown(ev: DeltaEvaluation) -> str:
             ev.justification or "",
         ])
 
+    # Wave 25: the "Quality cost: …" sentence in the justification counts
+    # only RESIDUAL-term changes; when the delta also moves scaling-spine
+    # active params (MLA/GQA swaps, vocab edits, …) the spine share of the
+    # loss move is invisible there and the summary under-states the real
+    # quality cost. Append an explicit spine-shift pointer so the summary
+    # can't contradict the metrics table.
+    _summary_txt = ev.justification or "_No narrative available._"
+    _ap = ev.metrics.get("active_params_b")
+    _pl = ev.metrics.get("predicted_loss")
+    if (_ap is not None and _pl is not None and abs(_ap.pct_change) > 0.5
+            and abs(_pl.delta) > 1e-4):
+        _sl = ev.metrics.get("scaling_law_loss")
+        _spine_txt = (
+            f" ({_sl.delta:+.4f} of it scaling-spine)" if _sl is not None
+            else ""
+        )
+        _summary_txt += (
+            f" NOTE: the residual figures above exclude the capacity "
+            f"effect — this delta moves scaling-spine active params by "
+            f"{_ap.pct_change:+.1f}%, and the full predicted-loss move is "
+            f"{_pl.delta:+.4f}{_spine_txt}; see the ACTIVE-PARAM SHIFT "
+            "note under Topology notes."
+        )
+
     sections = [
         "## Summary",
         "",
-        ev.justification or "_No narrative available._",
+        _summary_txt,
         "",
         "## Field-level changes",
         "",
@@ -507,6 +819,10 @@ def render_markdown(ev: DeltaEvaluation) -> str:
         "## Evaluation metrics",
         "",
         render_metric_table(ev.metrics),
+        "",
+        ("_KV-cache figures above are per concurrent request; multiply by "
+         "the resolved workload's `serving_batch` for the steady-state "
+         "batch total._"),
         "",
         "## Topology notes",
         "",

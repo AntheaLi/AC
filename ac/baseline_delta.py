@@ -88,7 +88,19 @@ def generate_baseline_delta_report(result: ModifierResult, top_n: int = 8) -> st
     if result.allow_quality_spending:
         lines.append(f"**Selection mode**: quality-spending allowed up to +{result.quality_risk_budget_pct:.2f}% relative loss proxy")
     else:
-        lines.append("**Selection mode**: same-quality / model-preserving moves only")
+        # Wave 29: the old label ("same-quality / model-preserving moves
+        # only") contradicted the selection logic — tier-1 "free wins"
+        # (topology changes that dominate the baseline at <=0.05%
+        # predicted-loss drift) are selectable without
+        # --allow-quality-spending, and they are NOT model-preserving:
+        # they require retraining. Say what the picker actually does.
+        lines.append(
+            "**Selection mode**: same-quality — no predicted-loss "
+            "spending. Model-preserving deployment edits are preferred; "
+            "a topology-changing \"free win\" (dominates the baseline "
+            "within <=0.05% predicted-loss drift) may be selected and "
+            "requires retraining."
+        )
     lines.append("")
 
     # Fix #5: surface the modifier's limitations at the *top* of the report
@@ -122,7 +134,20 @@ def generate_baseline_delta_report(result: ModifierResult, top_n: int = 8) -> st
     else:
         lines.append(f"Selected change: **{selected.change_summary}**")
         lines.append(f"Move class: **{selected.move_class}**")
-        lines.append(f"Quality-preserving: **{selected.quality_preserving}**")
+        # Wave 29: this field means "deployment-only edit, no retraining"
+        # (the record's quality_preserving tracks whether the changed
+        # fields leave the learned model untouched, e.g. TP placement).
+        # The old label "Quality-preserving: False" next to a
+        # same-quality-mode header read as a contradiction.
+        lines.append(
+            f"Model-preserving (deployment-only, no retraining): "
+            f"**{selected.quality_preserving}**")
+        if not selected.quality_preserving and not result.allow_quality_spending:
+            lines.append(
+                "Selected as a same-quality \"free win\": it dominates "
+                "the baseline on the modeled performance axes within "
+                "<=0.05% predicted-loss drift. It changes the "
+                "architecture, so it requires retraining.")
         lines.append(f"Risk: **{selected.risk_label}** (score {selected.risk_score})")
         lines.extend(_metrics_block("Selected", selected, baseline))
     lines.append("")
@@ -299,13 +324,13 @@ def _metrics_block(title: str, rec: ModifierRecord, baseline: ModifierRecord) ->
         f"- {title} TBT: {ev.serving_tbt_ms:.2f} ms ({_pct_delta_lower_is_better(ev.serving_tbt_ms, baseline.evaluated.serving_tbt_ms):+.1f}% faster)",
         f"- {title} TTFT: {ev.throughput.prefill_time_ms:.2f} ms ({_pct_delta_lower_is_better(ev.throughput.prefill_time_ms, baseline.evaluated.throughput.prefill_time_ms):+.1f}% faster)",
         f"- {title} memory/GPU: {ev.memory_per_gpu_gb:.2f} GB ({_pct_delta_lower_is_better(ev.memory_per_gpu_gb, baseline.evaluated.memory_per_gpu_gb):+.1f}% lower)",
-        f"- {title} modeled KV cache/GPU: {rec.kv_cache_gb:.3f} GB ({_pct_delta_lower_is_better(rec.kv_cache_gb, baseline.kv_cache_gb):+.1f}% lower)",
+        f"- {title} modeled KV cache/GPU (per request): {rec.kv_cache_gb:.3f} GB ({_pct_delta_lower_is_better(rec.kv_cache_gb, baseline.kv_cache_gb):+.1f}% lower)",
     ]
 
 
 def _candidate_table(records: Iterable[ModifierRecord], baseline: ModifierRecord) -> List[str]:
     lines = [
-        "| Change | Risk | Loss Risk | TBT Improvement | Train TPS Improvement | Mem Improvement | Modeled KV Improvement | Reason |",
+        "| Change | Risk | Loss Risk | TBT Improvement | Train TPS Improvement | Mem Improvement | Modeled KV (per request) Improvement | Reason |",
         "|---|---:|---:|---:|---:|---:|---:|---|",
     ]
     for rec in records:

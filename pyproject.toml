@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ac-architecture-compiler"
-version = "0.3.1"
+version = "0.3.0"
 description = "Hardware-aware Transformer-architecture compiler. Maps (hardware, workload, quality budget) to recommended architecture (dense, MoE, hybrid state-attention)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,8 @@ ac-compile     = "ac.cli_compile:main"
 ac-delta-eval  = "ac.cli_delta_eval:main"
 ac-stress      = "ac.cli_stress:main"
 ac-auto-calibrate = "ac.auto_calibrate:main"
+ac-matrix-18b  = "ac.cli_matrix18b:main"
+ac-trust-audit = "ac.cli_trust_audit:main"
 
 [project.urls]
 Homepage = "https://github.com/your-org/ac"

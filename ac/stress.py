@@ -31,34 +31,31 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
-import sys
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
-# --- repo path bootstrap so we can import sibling v0 modules -----------------
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from throughput_model import (  # noqa: E402
-    ArchConfig,
-    HardwareConfig,
-    LayerBreakdown,
-    ThroughputResult,
-    compute_layer_time,
-    compute_heterogeneous_layer_times,
-    estimate_memory_per_gpu,
-    estimate_memory_per_gpu_hybrid,
-    load_calibration,
-    load_hardware,
-    throughput,
-)
-from lattice_engine import (  # noqa: E402
-    HARDWARE as LATTICE_HARDWARE,
-    estimate_params,
-    matmul_tile_utilization,
-)
+try:
+    from .throughput_model import (
+        ArchConfig, HardwareConfig, LayerBreakdown, ThroughputResult,
+        compute_layer_time, compute_heterogeneous_layer_times,
+        estimate_memory_per_gpu, estimate_memory_per_gpu_hybrid,
+        load_calibration, load_hardware, throughput,
+    )
+    from .lattice_engine import (
+        HARDWARE as LATTICE_HARDWARE, matmul_tile_utilization,
+    )
+    from .architecture import parameter_ledger
+except ImportError:
+    from throughput_model import (
+        ArchConfig, HardwareConfig, LayerBreakdown, ThroughputResult,
+        compute_layer_time, compute_heterogeneous_layer_times,
+        estimate_memory_per_gpu, estimate_memory_per_gpu_hybrid,
+        load_calibration, load_hardware, throughput,
+    )
+    from lattice_engine import (
+        HARDWARE as LATTICE_HARDWARE, matmul_tile_utilization,
+    )
+    from architecture import parameter_ledger
 
 
 def _lattice_hw_for(hw_name: str):
@@ -297,14 +294,39 @@ def _kv_cache_bytes_total(arch: ArchConfig, kv_len: int, tp_degree: int = 1) -> 
     summed across layers, sharded by TP.
 
     For hybrid models, only attention layers contribute KV. State layers add 0.
+
+    Wave 18h (MLA): the compressed latent (c_kv + d_rope) is shared across
+    all query heads and is NOT sharded by TP (mirrors
+    throughput_model.compute_layer_time and estimate_memory_per_gpu). The
+    previous GQA-only formula silently priced MLA candidates with the
+    baseline's GQA KV bytes — which is why the delta-eval stress panel
+    could claim HBM-BW-decode "relief" on an MLA swap whose per-GPU KV had
+    actually grown.
     """
     kv_bpe = _bpe(arch.kv_precision)
-    n_attn_layers = arch.n_layers
-    if arch.layer_type_list:
-        n_attn_layers = sum(1 for lt in arch.layer_type_list if lt == "attention")
+    layer_types = arch.layer_type_list or (["attention"] * arch.n_layers)
+    n_global = sum(1 for lt in layer_types if lt == "attention")
+    n_local = sum(1 for lt in layer_types if lt == "local_attention")
+    local_len = (
+        arch.local_kv_len(kv_len)
+        if n_local > 0 else kv_len
+    )
+    if (getattr(arch, "attention_type", "full") == "mla"
+            and int(getattr(arch, "mla_kv_latent_dim", 0) or 0) > 0):
+        # Canonical per-token bytes from the model itself; unsharded.
+        bytes_per_token = arch.kv_bytes_per_token_per_layer(kv_len)
+        return (
+            bytes_per_token
+            * arch.batch_size
+            * (n_global * kv_len + n_local * local_len)
+        )
     kv_heads_per_gpu = max(1, math.ceil(arch.n_kv_heads / max(1, tp_degree)))
-    per_layer = 2 * kv_heads_per_gpu * arch.d_head * kv_len * arch.batch_size * kv_bpe
-    return per_layer * n_attn_layers
+    bytes_per_position = (
+        2 * kv_heads_per_gpu * arch.d_head * arch.batch_size * kv_bpe
+    )
+    return bytes_per_position * (
+        n_global * kv_len + n_local * local_len
+    )
 
 
 def _kv_load_bytes_per_decode_step(arch: ArchConfig, kv_len: int,
@@ -349,6 +371,48 @@ def _weight_bytes_per_gpu(arch: ArchConfig, tp_degree: int = 1,
     return max(with_kv - act_bytes, 0.0)
 
 
+def _decode_weight_traffic_bytes(arch: ArchConfig, resident_weight_bytes: float,
+                                 tp_degree: int, ep_degree: int) -> float:
+    """Per-rank weight bytes actually STREAMED by one decode step.
+
+    Dense/hybrid: identical to the resident weights (every matrix is hit
+    every step). MoE: only the distinct experts the batch routes to are
+    streamed — min(B*top_k, n_experts)/ep per rank plus the always-on
+    shared expert — mirroring the distinct-experts bound the throughput
+    model uses (Wave 19). Resident-but-untouched experts cost HBM
+    *capacity*, not decode *bandwidth*.
+    """
+    if not arch.moe_config:
+        return resident_weight_bytes
+    moe = arch.moe_config
+    n_experts = max(1, int(moe.get("n_experts", 1) or 1))
+    top_k = max(1, int(moe.get("top_k", 1) or 1))
+    expert_dim = int(moe.get("expert_dim", arch.ffn_dim) or arch.ffn_dim)
+    exp_prec = (moe.get("expert_precision")
+                or getattr(arch, "ffn_precision", None)
+                or arch.precision)
+    bpe_exp = _bpe(exp_prec)
+    tp = max(1, int(tp_degree))
+    ep = max(1, int(ep_degree))
+    bytes_per_expert_rank = 3 * arch.d_model * max(1, expert_dim // tp) * bpe_exp
+    resident_experts_per_rank = max(1, n_experts // ep)
+    B = max(1, int(arch.batch_size))
+    distinct_experts_per_rank = max(1, min(B * top_k, n_experts) // ep)
+    n_moe_layers = max(
+        0, arch.n_layers - int(getattr(arch, "n_dense_ffn_layers", 0) or 0)
+    )
+    resident_expert_bytes = (resident_experts_per_rank
+                             * bytes_per_expert_rank * n_moe_layers)
+    touched_expert_bytes = (distinct_experts_per_rank
+                            * bytes_per_expert_rank * n_moe_layers)
+    # Only ROUTED experts are swapped for their touched subset. The shared
+    # expert (always-on) plus attention/norm/embedding weights stay in the
+    # base term — they are streamed every step and are not part of
+    # resident_expert_bytes.
+    return max(resident_weight_bytes - resident_expert_bytes, 0.0) \
+        + touched_expert_bytes
+
+
 def _activation_bytes(arch: ArchConfig) -> float:
     """Activation memory (matches throughput_model line 925).
 
@@ -384,6 +448,42 @@ def _state_load_bytes_per_decode_step(arch: ArchConfig, tp_degree: int = 1) -> f
     return (in_proj_bytes + ssm_bytes + out_proj_bytes) * n_state_layers
 
 
+def _qkv_flops_for(arch: ArchConfig, M: int, heads_per_gpu: int,
+                   kv_heads_per_gpu: int, tp_degree: int,
+                   phase: str) -> float:
+    """QKV-projection FLOPs for one step, MLA-aware (Wave 18h).
+
+    Mirrors throughput_model.compute_layer_time:
+      - non-MLA: fused (d -> (nh + 2·nkv)·dh) projection.
+      - MLA: Q down (d -> c_q) + Q up (c_q -> nh·dh, TP-sharded) + shared
+        KV down (d -> c_kv + d_rope, NOT TP-sharded). Decode absorbs the
+        KV up-projection into the attention dot; prefill pays it
+        explicitly (c_kv -> nh·(dh - d_rope)).
+    """
+    d = arch.d_model
+    dh = arch.d_head
+    is_mla = (getattr(arch, "attention_type", "full") == "mla"
+              and int(getattr(arch, "mla_kv_latent_dim", 0) or 0) > 0)
+    if not is_mla:
+        qkv_N = (heads_per_gpu + 2 * kv_heads_per_gpu) * dh
+        return 2 * M * qkv_N * d
+    c_q = int(getattr(arch, "mla_q_latent_dim", 0) or 0)
+    c_kv = int(getattr(arch, "mla_kv_latent_dim", 0) or 0)
+    d_rope = int(getattr(arch, "mla_rope_head_dim", 0) or 0)
+    if c_q > 0:
+        q_flops = 2 * M * c_q * d + 2 * M * (heads_per_gpu * dh) * c_q
+    else:
+        q_flops = 2 * M * (heads_per_gpu * dh) * d
+    # Shared latent: replicated (not sharded) across TP ranks.
+    kv_down_flops = 2 * M * (c_kv + d_rope) * d
+    flops = q_flops + kv_down_flops
+    if phase != "decode":
+        kv_up_N = heads_per_gpu * max(0, dh - d_rope)
+        if kv_up_N > 0:
+            flops += 2 * M * kv_up_N * c_kv
+    return flops
+
+
 def _decode_flops_useful(arch: ArchConfig, kv_len: int, tp_degree: int = 1) -> float:
     """Total useful FLOPs in one decode step.
 
@@ -404,15 +504,25 @@ def _decode_flops_useful(arch: ArchConfig, kv_len: int, tp_degree: int = 1) -> f
     heads_per_gpu = nh // max(1, tp_degree)
     kv_heads_per_gpu = max(1, math.ceil(nkv / max(1, tp_degree)))
     ffn_per_gpu = ffn // max(1, tp_degree)
-    n_attn_layers = arch.n_layers
-    if arch.layer_type_list:
-        n_attn_layers = sum(1 for lt in arch.layer_type_list if lt == "attention")
+    layer_types = arch.layer_type_list or (["attention"] * arch.n_layers)
+    n_global = sum(1 for lt in layer_types if lt == "attention")
+    n_local = sum(1 for lt in layer_types if lt == "local_attention")
+    n_attn_layers = n_global + n_local
 
-    # QKV
-    qkv_N = (heads_per_gpu + 2 * kv_heads_per_gpu) * dh
-    qkv_flops = 2 * M * qkv_N * d
-    # Attention
-    attn_flops = 2 * B * heads_per_gpu * 1 * kv_len * dh * 2
+    # QKV — Wave 18h: MLA candidates pay the factorized projection path
+    # (Q down + Q up + shared KV down; the KV up-projection is absorbed
+    # into the attention dot at decode), mirroring
+    # throughput_model.compute_layer_time. Previously this helper priced
+    # MLA with the fused GQA projection, so tc_util_decode and
+    # hbm_bw_decode disagreed with the throughput model's timings.
+    qkv_flops = _qkv_flops_for(arch, M, heads_per_gpu, kv_heads_per_gpu,
+                               tp_degree, phase="decode")
+    # Attention differs between global and local layers; projection/FFN work
+    # is identical. The old stress numerator simply dropped local layers.
+    attn_flops_global = 2 * B * heads_per_gpu * kv_len * dh * 2
+    attn_flops_local = (
+        2 * B * heads_per_gpu * arch.local_kv_len(kv_len) * dh * 2
+    )
     # Output proj
     out_flops = 2 * M * d * (heads_per_gpu * dh)
     # FFN (SwiGLU = up+gate+down)
@@ -420,8 +530,12 @@ def _decode_flops_useful(arch: ArchConfig, kv_len: int, tp_degree: int = 1) -> f
         ffn_flops = 2 * (2 * M * ffn_per_gpu * d) + 2 * M * d * ffn_per_gpu
     else:
         ffn_flops = 2 * M * ffn_per_gpu * d + 2 * M * d * ffn_per_gpu
-    per_attn_layer = qkv_flops + attn_flops + out_flops + ffn_flops
-    return per_attn_layer * n_attn_layers
+    fixed_per_layer = qkv_flops + out_flops + ffn_flops
+    return (
+        fixed_per_layer * n_attn_layers
+        + attn_flops_global * n_global
+        + attn_flops_local * n_local
+    )
 
 
 def _prefill_flops_useful(arch: ArchConfig, tp_degree: int = 1) -> float:
@@ -441,21 +555,30 @@ def _prefill_flops_useful(arch: ArchConfig, tp_degree: int = 1) -> float:
     heads_per_gpu = nh // max(1, tp_degree)
     kv_heads_per_gpu = max(1, math.ceil(nkv / max(1, tp_degree)))
     ffn_per_gpu = ffn // max(1, tp_degree)
-    n_attn_layers = arch.n_layers
-    if arch.layer_type_list:
-        n_attn_layers = sum(1 for lt in arch.layer_type_list if lt == "attention")
+    layer_types = arch.layer_type_list or (["attention"] * arch.n_layers)
+    n_global = sum(1 for lt in layer_types if lt == "attention")
+    n_local = sum(1 for lt in layer_types if lt == "local_attention")
+    n_attn_layers = n_global + n_local
 
-    qkv_N = (heads_per_gpu + 2 * kv_heads_per_gpu) * dh
-    qkv_flops = 2 * M * qkv_N * d
-    # _attention_cost line 414: 2 × B × heads_per_gpu × S × S × d_head × 2
-    attn_flops = 2 * B * heads_per_gpu * S * S * dh * 2
+    # Wave 18h: MLA-aware projection FLOPs (see _qkv_flops_for).
+    qkv_flops = _qkv_flops_for(arch, M, heads_per_gpu, kv_heads_per_gpu,
+                               tp_degree, phase="prefill")
+    # _attention_cost: global is S², local is S×min(S, window).
+    attn_flops_global = 2 * B * heads_per_gpu * S * S * dh * 2
+    attn_flops_local = (
+        2 * B * heads_per_gpu * S * arch.local_kv_len(S) * dh * 2
+    )
     out_flops = 2 * M * d * (heads_per_gpu * dh)
     if arch.ffn_type == "swiglu":
         ffn_flops = 2 * (2 * M * ffn_per_gpu * d) + 2 * M * d * ffn_per_gpu
     else:
         ffn_flops = 2 * M * ffn_per_gpu * d + 2 * M * d * ffn_per_gpu
-    per_attn_layer = qkv_flops + attn_flops + out_flops + ffn_flops
-    return per_attn_layer * n_attn_layers
+    fixed_per_layer = qkv_flops + out_flops + ffn_flops
+    return (
+        fixed_per_layer * n_attn_layers
+        + attn_flops_global * n_global
+        + attn_flops_local * n_local
+    )
 
 
 def _all_reduce_bytes_per_layer(arch: ArchConfig, tp_degree: int,
@@ -610,6 +733,7 @@ def compute_throughput_stress(
     tp_degree: int = 1,
     pp_degree: int = 1,
     ep_degree: int = 1,
+    dp_degree: int = 1,
     arch_name: str = "",
     _throughput_result: Optional[ThroughputResult] = None,
 ) -> StressVector:
@@ -645,7 +769,16 @@ def compute_throughput_stress(
     )
     effective_decode_kv = workload.decode_kv_len
     effective_prefill_seq = workload.prefill_seq_len
-    if swa_window > 0:
+    n_local_layers = int(
+        getattr(arch, "n_local_attn_layers", 0) or 0
+    )
+    # Cap the whole workload only for whole-model SWA. Interleaves retain the
+    # full workload for global layers; per-layer helpers apply the local cap.
+    whole_model_swa = (
+        swa_window > 0
+        and (n_local_layers <= 0 or n_local_layers >= arch.n_layers)
+    )
+    if whole_model_swa:
         if effective_decode_kv:
             effective_decode_kv = min(effective_decode_kv, swa_window)
         if effective_prefill_seq:
@@ -669,6 +802,7 @@ def compute_throughput_stress(
         tput = throughput(
             arch, hardware,
             tp_degree=tp_degree, pp_degree=pp_degree,
+            dp_degree=dp_degree,
             decode_kv_len=effective_decode_kv,
             prefill_seq_len=effective_prefill_seq,
             ep_degree=ep_degree,
@@ -707,19 +841,35 @@ def compute_throughput_stress(
     link_bw_ep = _link_bw_bytes_s(hw, ep_degree)
 
     # --- Training memory (weights + grads + opt state + activations × ckpt factor) ---
-    # AdamW: optimizer_bytes_per_param ≈ 12. Grads ≈ 1 × weights (in bf16).
+    # AdamW: optimizer_bytes_per_param ≈ 12. Training-owned tensors use the
+    # same canonical dense/MoE/state ledger as the throughput model, then
+    # shard over TP×PP×EP and FSDP/ZeRO-3 DP.
     opt_bpe = hw.calibration.get("optimizer_bytes_per_param", 12)
-    total_params = estimate_params(
-        arch.d_model, arch.n_heads, arch.d_head, arch.ffn_dim,
-        arch.n_layers, arch.n_kv_heads, arch.vocab_size,
+    local_params = parameter_ledger(arch).local_total_params(
+        tp=tp_degree, pp=pp_degree, ep=ep_degree,
     )
-    params_per_gpu = total_params / max(1, tp_degree) / max(1, pp_degree)
+    params_per_gpu = local_params / max(1, dp_degree)
+    train_weight_bytes = params_per_gpu * _bpe(arch.precision)
     grad_bytes = params_per_gpu * _bpe(arch.precision)
     opt_bytes = params_per_gpu * opt_bpe
     train_act_bytes = act_bytes * 4  # checkpointed activation factor
 
     # --- Compute the 10 ratios ---
-    decode_traffic = kv_bytes + weight_bytes + state_bytes_decode
+    # Wave 21: decode weight traffic is ACTIVATION-aware for MoE. A decode
+    # step only streams the experts its batch actually routes to
+    # (distinct experts <= min(B*top_k, n_experts), mirroring the Wave-19
+    # fix in throughput_model), not every resident expert. Charging all
+    # resident expert bytes made the stress panel report
+    # `hbm_bw_decode violated` (2.11x on gpt-oss-120b at b=1) while the
+    # TBT panel — computed from the activation-aware model — said the
+    # same step was fine: the panel-contradiction class Wave 18h
+    # eliminated elsewhere. hbm_capacity below still uses full resident
+    # weights (correct: they occupy HBM whether or not this step touches
+    # them).
+    decode_weight_bytes = _decode_weight_traffic_bytes(
+        arch, weight_bytes, tp_degree, ep_degree,
+    )
+    decode_traffic = kv_bytes + decode_weight_bytes + state_bytes_decode
     prefill_traffic = weight_bytes + act_bytes  # prefill streams weights once + activations
     sv = StressVector(
         arch_name=arch_name,
@@ -737,13 +887,21 @@ def compute_throughput_stress(
                     if tp_degree > 1 else 0.0,
         all_to_all=(a2a_per_layer / max(link_bw_ep * decode_layers, 1.0))
                     if (arch.moe_config and ep_degree > 1) else 0.0,
-        training_mem=(weight_bytes + grad_bytes + opt_bytes + train_act_bytes)
+        training_mem=(
+            train_weight_bytes + grad_bytes + opt_bytes + train_act_bytes
+        )
                       / max(hbm_cap, 1.0),
     )
 
     sv.intermediates = {
         "kv_bytes": kv_bytes,
         "weight_bytes": weight_bytes,
+        # Wave 21: bytes actually streamed by one decode step (MoE:
+        # touched-experts only; dense: == weight_bytes).
+        "decode_weight_bytes": decode_weight_bytes,
+        "training_weight_bytes": train_weight_bytes,
+        "training_grad_bytes": grad_bytes,
+        "training_optimizer_bytes": opt_bytes,
         "state_bytes_decode": state_bytes_decode,
         "act_bytes": act_bytes,
         "decode_flops": decode_flops,

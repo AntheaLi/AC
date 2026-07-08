@@ -11,6 +11,31 @@ from optimizer import OptimizationResult, EvaluatedCandidate
 from shadow_prices import ShadowPriceReport
 
 
+# Wave 28: human-readable names for the state-mixer families. The
+# justification used to hard-code "Mamba-2 structured SSM" for every
+# hybrid pick, so a --state-type gated_deltanet run emitted a config
+# whose layer_configs said `"type": "gated_deltanet"` while the
+# markdown told the reader they had picked Mamba-2.
+_STATE_FAMILY_DISPLAY = {
+    "mamba2": "Mamba-2 structured SSM",
+    "mamba": "Mamba-1 selective SSM",
+    "gla": "Gated Linear Attention (GLA)",
+    "kda": "Kimi Delta Attention (KDA)",
+    "gated_deltanet": "Gated DeltaNet",
+    "deltanet": "DeltaNet",
+    "rwkv7": "RWKV-7",
+    "retnet": "RetNet",
+    "swa": "sliding-window attention",
+    "sliding_window": "sliding-window attention",
+    "linear_attention": "linear attention",
+}
+
+
+def _state_family_display(state_config) -> str:
+    stype = str((state_config or {}).get("state_type", "mamba2") or "mamba2")
+    return _STATE_FAMILY_DISPLAY.get(stype, stype)
+
+
 def generate_justification(
     result: OptimizationResult,
     shadow_report: Optional[ShadowPriceReport] = None,
@@ -76,7 +101,11 @@ def generate_justification(
     if con.serving_ttft_ms is not None:
         budget_parts.append(f"TTFT <= {con.serving_ttft_ms}ms")
     if budget_parts:
-        lines.append(f"Serving {', '.join(budget_parts)}, batch={con.serving_batch}.")
+        lines.append(
+            f"Serving soft budget(s): {', '.join(budget_parts)}, "
+            f"batch={con.serving_batch}. These are warning/selection signals, "
+            "not hard feasibility cuts."
+        )
     lines.append("")
 
     # Predicted performance
@@ -100,10 +129,25 @@ def generate_justification(
         f"{agg_tps:,.0f} tokens/sec"
     )
     lines.append(f"- **Serving TBT**: {opt.serving_tbt_ms:.1f}ms{tbt_suffix}"
-                 + (f" ({_pct_under(opt.serving_tbt_ms, con.serving_tbt_ms)} under budget)"
+                 + (f" ({_pct_under(opt.serving_tbt_ms, con.serving_tbt_ms)} under soft budget)"
                     if con.serving_tbt_ms else ""))
+    # Wave 19 (P0-2): always state the prompt length the TTFT was computed
+    # for — an unqualified TTFT next to a long --context invited reading it
+    # as full-context prefill when a shorter prompt was assumed.
+    _ttft_prompt = int(getattr(con, "prompt_len", 0) or
+                       getattr(con, "context_length", 0) or 0)
+    # Wave 29: attribute the serving-stack floor so the TTFT is not read
+    # as pure compute (and the excluded queueing term is named).
+    _ttft_ovh = float(getattr(t, "ttft_serving_overhead_ms", 0.0) or 0.0)
+    _ttft_ovh_txt = (
+        f"; includes {_ttft_ovh:.1f}ms serving-stack floor "
+        f"(tokenize/schedule/detokenize — excludes load-dependent queueing)"
+        if _ttft_ovh > 0 else ""
+    )
     lines.append(f"- **Serving TTFT**: {t.prefill_time_ms:.1f}ms{pre_suffix}"
-                 + (f" ({_pct_under(t.prefill_time_ms, con.serving_ttft_ms)} under budget)"
+                 f" (cold prefill of a {_ttft_prompt:,}-token prompt"
+                 f"{_ttft_ovh_txt})"
+                 + (f" ({_pct_under(t.prefill_time_ms, con.serving_ttft_ms)} under soft budget)"
                     if con.serving_ttft_ms else ""))
     lines.append(f"- **Memory per GPU**: {opt.memory_per_gpu_gb:.1f} GB")
     lines.append(f"- **Predicted loss**: {opt.predicted_loss:.4f} "
@@ -114,12 +158,17 @@ def generate_justification(
 
     if getattr(q, "terms", None):
         lines.append("## Quality Proxy Backbone\n")
-        lines.append("The quality proxy is a modular compiler scaling-law backbone: a spine over active non-embedding parameters and training tokens, plus residuals for width/depth, MLP-attention allocation, coupled attention-head variables, precision, MoE, state/memory hooks, risk, and data-quality hooks.")
+        if getattr(q, "quality_model_version", "") == "effective_capacity_v2":
+            lines.append("The quality proxy uses a scaling-law spine over effective sparse capacity and effective training data. Serving-context effects are a separate task-utility delta relative to the pretraining context; the legacy active-parameter residual model remains selectable.")
+        else:
+            lines.append("The selected legacy quality proxy uses a scaling-law spine over active non-embedding parameters and training tokens, plus additive architecture residuals.")
         lines.append("The compiler treats query heads as a weak, saturating architecture prior derived from width, not as a monotonic quality law. KV heads are treated as a direct memory/latency tradeoff with uncertain GQA-sharing quality risk.")
         lines.append(f"- **Model version**: {getattr(q, 'quality_model_version', 'quality_v0')}")
         lines.append(f"- **Spine active proxy**: {getattr(q, 'spine_active_params', 0)/1e9:.3f}B active non-embedding params")
+        lines.append(f"- **Spine effective proxy**: {getattr(q, 'spine_effective_params', 0)/1e9:.3f}B effective non-embedding params")
+        lines.append(f"- **Pretraining loss proxy**: {getattr(q, 'pretraining_loss_proxy', q.predicted_loss):.4f}")
         lines.append(f"- **Total uncertainty**: ±{getattr(q, 'uncertainty_total', 0.0) * 100:.2f}%")
-        for name in ("architecture_residual", "precision_residual", "moe_residual", "state_residual", "risk_residual", "data_quality"):
+        for name in ("effective_capacity", "effective_data", "architecture_residual", "precision_residual", "moe_residual", "state_residual", "context_utility", "risk_residual", "data_quality"):
             term = q.terms.get(name)
             if not term or (term.confidence == "not_applicable" and abs(term.value) == 0):
                 continue
@@ -179,6 +228,23 @@ def generate_justification(
                 f"(uncertain low-rank attention prior)."
             )
         lines.append("")
+    elif attn_type == "nsa":
+        # Wave 28: NSA runs used to fall into the GQA branch below and
+        # render "### n_kv_heads = 8 (GQA-4)" as the only attention
+        # decision — the justification never mentioned that every layer
+        # attends through NSA's compressed/selected/window branches.
+        lines.append("### Attention: NSA (Native Sparse Attention)\n")
+        lines.append(
+            f"NSA selected: compress_block={getattr(c, 'nsa_compress_block_size', 0)} "
+            f"(stride {getattr(c, 'nsa_compress_block_stride', 0)}), "
+            f"select_block={getattr(c, 'nsa_select_block_size', 0)} × "
+            f"top-{getattr(c, 'nsa_select_top_k', 0)}, "
+            f"local window={getattr(c, 'nsa_window_size', 0)}; "
+            f"n_heads={c.n_heads}, n_kv_heads={c.n_kv_heads}, d_head={c.d_head}. "
+            "Prefill/decode attention cost scales with the compressed + "
+            "selected + window token set rather than full context."
+        )
+        lines.append("")
     else:
         gqa_ratio = c.n_heads // c.n_kv_heads if c.n_kv_heads > 0 else 1
         if c.n_kv_heads == c.n_heads:
@@ -231,7 +297,7 @@ def generate_justification(
     if c.n_state_layers > 0:
         lines.append(f"### Hybrid architecture: {c.n_attention_layers} attention + "
                      f"{c.n_state_layers} state layers\n")
-        lines.append(f"State mechanism: Mamba-2 structured SSM with "
+        lines.append(f"State mechanism: {_state_family_display(c.state_config)} with "
                      f"d_state={c.derived_d_state} (SRAM-derived).")
         lines.append(f"Placement strategy: {c.placement_strategy}.")
         lines.append(f"Hybrid ratio: {c.hybrid_ratio} "
@@ -252,6 +318,40 @@ def generate_justification(
                          f"(confidence: {state_pen.confidence}).")
         lines.append("")
 
+    # YOCO KV sharing (Wave 28: a --yoco pick emitted architecture.yoco
+    # in the config — and halved the KV budget — without the
+    # justification mentioning YOCO once).
+    _yoco_k = int(getattr(c, "yoco_n_self_attn_layers", 0) or 0)
+    if _yoco_k > 0:
+        _yoco_pat = str(getattr(c, "yoco_share_pattern", "single_source"))
+        lines.append(f"### YOCO KV sharing: {_yoco_k} self-attention "
+                     f"KV-producer layer(s), pattern={_yoco_pat}\n")
+        lines.append(
+            "YOCO (You Only Cache Once): the remaining layers cross-attend "
+            "to the shared KV cache produced by the "
+            f"{'first layer' if _yoco_k == 1 else f'first {_yoco_k} layers'}, "
+            "so the KV footprint is that of "
+            f"{_yoco_k} layer(s) instead of {c.n_layers}. The quality cost "
+            "is carried in the architecture residual (yoco_sharing "
+            "subterm); treat it as a low-confidence prior — published "
+            "YOCO ablations are thin above 3B."
+        )
+        lines.append("")
+
+    # Multi-token prediction (Wave 28: mtp=2 picks were invisible here.)
+    _mtp_k = int(getattr(c, "mtp_n_predict_depths", 0) or 0)
+    if _mtp_k > 0:
+        lines.append(f"### Multi-token prediction: depth {_mtp_k}\n")
+        lines.append(
+            f"MTP head predicts {_mtp_k} future token(s) per position "
+            f"({int(getattr(c, 'mtp_depth_n_layers', 1) or 1)} extra "
+            f"layer(s) per depth, train loss weight "
+            f"{float(getattr(c, 'mtp_train_loss_weight', 0.0) or 0.0):g}). "
+            "Training-time auxiliary loss; the serving numbers here do "
+            "NOT assume speculative-decoding acceptance gains."
+        )
+        lines.append("")
+
     # Search stats
     lines.append("## Search Statistics\n")
     lines.append(f"- Candidates generated: {result.candidates_generated:,}")
@@ -266,36 +366,43 @@ def generate_justification(
     # the *axes* along which they vary so a pretrain lead can see what's
     # actually being chosen between, instead of treating a single picked
     # config as deterministic.
+    #
+    # Wave 27: route through `compute_contending_family_full` so this
+    # markdown table, the CLI `WARNING: N contending candidate(s)`
+    # count, the emitted config's
+    # `confidence_envelope.contending_candidates`, and the
+    # `<config>_contending_family.json` sidecar all agree. Pre-Wave-27
+    # this section re-derived contenders with the naïve `_loss_interval`
+    # overlap rule (counting shared model error against the pick),
+    # which on a default H100 7B run reported 34 markdown contenders vs
+    # 9 in the CLI warning — a 3.8x inflation a researcher reads as
+    # "the pick is fragile" even when the paired-sigma count says
+    # otherwise.
     try:
-        from optimizer import _contending_family, _loss_interval  # type: ignore
-        opt_low, opt_high = _loss_interval(opt)
-        contenders = [ev for ev in result.all_evaluated
-                       if ev is not opt and ev.meets_constraints
-                       and _loss_interval(ev)[0] <= opt_high
-                       and ev.predicted_loss <= opt_high]
-        # Cap the markdown table at 8 rows for readability; the JSON dump
-        # carries up to 32 for programmatic consumers.
-        family = _contending_family(opt, contenders, top_n=8)
+        try:
+            from optimizer import compute_contending_family_full  # type: ignore
+        except Exception:  # pragma: no cover - package layout fallback
+            from ac.optimizer import compute_contending_family_full  # type: ignore
+        # Cap the markdown table at 8 rows for readability; the sidecar
+        # JSON carries up to 32 for programmatic consumers.
+        family = compute_contending_family_full(result, opt, top_n=8)
     except Exception:
         family = {"row_count": 0, "members": [], "varying_axes": []}
     if family.get("row_count", 0) > 0:
         lines.append("## Contending Family\n")
-        # Round-2 fix: clarify scope. The markdown family-count counted only
-        # quality-band contenders, while JSON
-        # `metadata.predicted.confidence_envelope.contending_family.row_count`
-        # also includes throughput-band ties (within ±1σ on TPS/TBT/prefill).
-        # Without this note, the two numbers looked inconsistent — they're
-        # not, they're different slices of the same idea, and a reader of
-        # the markdown needed to know which one they were seeing.
+        # Wave 27: unified scope across CLI warning, config, sidecar and
+        # this markdown table. The count includes candidates within
+        # paired-sigma of the pick on loss OR within ±1σ on any
+        # throughput metric (subject to a paired-sigma loss gate so
+        # slower-and-losier candidates aren't counted).
         lines.append(
             f"The selected configuration is statistically indistinguishable "
             f"from **{family['row_count']} other feasible candidate(s)** "
-            f"within the *quality* uncertainty band. Treat the \"selected\" "
-            f"pick as one element of this family, not a deterministic answer. "
-            f"(The companion JSON exposes a larger family that also includes "
-            f"candidates within ±1σ on training/serving throughput; see "
-            f"`metadata.predicted.confidence_envelope.contending_family` for "
-            f"that union.)\n"
+            f"inside the paired quality-model uncertainty band (loss, or "
+            f"within ±1σ on throughput). Treat the \"selected\" pick as one "
+            f"element of this family, not a deterministic answer. (The "
+            f"companion sidecar `<config>_contending_family.json` carries "
+            f"up to the top 32 members with the same scope.)\n"
         )
         axes = family.get("varying_axes") or []
         if axes:
@@ -317,32 +424,37 @@ def generate_justification(
             sel_key = (sel_row.get("d_model"), sel_row.get("n_layers"),
                        sel_row.get("n_kv_heads"), sel_row.get("ffn_precision"),
                        sel_row.get("kv_cache_bits"))
+
+            # Wave 29: uniform numeric formatting. The raw dict values
+            # carried whatever rounding their producer used (2.04154 in
+            # one row, 2.041368 in the next), which reads as false
+            # precision differences inside one table.
+            def _fmt(v, nd):
+                try:
+                    return f"{float(v):.{nd}f}"
+                except (TypeError, ValueError):
+                    return str(v)
+
+            def _family_row(tag, r):
+                return (
+                    f"| {tag} | {r.get('d_model')} | "
+                    f"{r.get('n_layers')} | {r.get('n_kv_heads')} | "
+                    f"{r.get('ffn_precision')} | "
+                    f"{r.get('kv_cache_bits')} | "
+                    f"{_fmt(r.get('active_params_b'), 2)} | "
+                    f"{_fmt(r.get('predicted_loss'), 5)} | "
+                    f"{_fmt(r.get('serving_tbt_ms'), 2)} | "
+                    f"{_fmt(r.get('memory_per_gpu_gb'), 2)} |"
+                )
+
             # Selected row first
-            lines.append(
-                f"| **selected** | {sel_row.get('d_model')} | "
-                f"{sel_row.get('n_layers')} | {sel_row.get('n_kv_heads')} | "
-                f"{sel_row.get('ffn_precision')} | "
-                f"{sel_row.get('kv_cache_bits')} | "
-                f"{sel_row.get('active_params_b')} | "
-                f"{sel_row.get('predicted_loss')} | "
-                f"{sel_row.get('serving_tbt_ms')} | "
-                f"{sel_row.get('memory_per_gpu_gb')} |"
-            )
+            lines.append(_family_row("**selected**", sel_row))
             for r in members:
                 key = (r.get("d_model"), r.get("n_layers"), r.get("n_kv_heads"),
                        r.get("ffn_precision"), r.get("kv_cache_bits"))
                 if key == sel_key:
                     continue
-                lines.append(
-                    f"| contender | {r.get('d_model')} | "
-                    f"{r.get('n_layers')} | {r.get('n_kv_heads')} | "
-                    f"{r.get('ffn_precision')} | "
-                    f"{r.get('kv_cache_bits')} | "
-                    f"{r.get('active_params_b')} | "
-                    f"{r.get('predicted_loss')} | "
-                    f"{r.get('serving_tbt_ms')} | "
-                    f"{r.get('memory_per_gpu_gb')} |"
-                )
+                lines.append(_family_row("contender", r))
             lines.append("")
     else:
         lines.append("## Contending Family\n")
@@ -429,31 +541,31 @@ def generate_assumptions() -> str:
 
 ## Quality Proxy
 
-- No training sweeps were performed. The quality proxy is based on a scaling-law spine over active non-embedding parameters (Hoffmann et al. 2022 defaults) plus modular residuals for architecture, precision, MoE, state/memory hooks, risk, and data quality.
+- No training sweeps were performed. The default `effective_capacity_v2` proxy uses effective sparse capacity and discounted effective data in the scaling-law spine. `legacy_residual_v1` preserves the previous active-parameter spine and fractional capacity bonus.
 - The quality proxy predicts relative expected loss among nearby architecture candidates; it is not an absolute perplexity predictor.
 - Architecture residuals couple width/depth, MLP-to-attention allocation, d_head, query heads, KV heads, and GQA sharing. Query heads are a weak width-derived prior, not a monotonic quality law; KV heads carry the direct memory/latency tradeoff and GQA-sharing uncertainty.
 - Precision residuals use a configurable per-component sensitivity table plus hardware feasibility checks from the legacy penalty table.
-- MoE and state/hybrid residuals are explicit high-uncertainty hooks. Dense v0 search does not enumerate those families yet.
+- MoE routing/stability and state/hybrid residuals are explicit high-uncertainty hooks. Sparse capacity itself is represented by `N_effective` in v2.
 - Residual composition is additive. In practice, residuals interact (e.g., GQA + FP4 KV may be worse than the sum). The coupling matrix is deferred to a later calibrated model.
 - State/hybrid residuals (v2) model two penalties: compression (effective memory horizon vs context) and composition (state fraction × d_state ratio × context scaling). Recall-intensive tasks incur a 3x compression penalty multiplier. Quality saturation caps d_state at 256 regardless of hardware capacity.
 - Uncertainty intervals are approximate. They capture residual confidence levels, scaling-law regime uncertainty, and placeholder uncertainty for uncalibrated hooks; data distribution effects are disabled by default.
 
-## MoE Quality Residual (v1)
+## MoE Quality Residual and Effective Capacity
 
 - The MoE residual is calibrated against Krajewski et al. (2024) plus published Mixtral 8×7B and DeepSeek-V2/V3 priors. It is not fit against measured loss deltas from training runs the compiler can run itself.
-- Capacity bonus: `-0.05 × min(log(N_total/N_active), log(4))`. The `log(4)` cap is deliberate so that highly sparse top_k=1 configs are not over-rewarded purely by their `N_total/N_active` ratio.
+- In `effective_capacity_v2`, inactive expert capacity enters through `N_effective`; the legacy percentage capacity bonus is disabled. The old `-0.05 × log(N_total/N_active)` behavior is retained only by `legacy_residual_v1`.
 - Granularity bonus: `-0.005 × log(max(G/8, 1))` where `G = N_total / top_k`. Applied above the Krajewski reference granularity of 8.
 - Shared-expert adjust: `-0.005 × shared_ratio` (DeepSeek-V2 shared-expert ablation).
 - Top-k=1 (Switch) penalty: `+0.015` — Switch vs ≥top_k=2 ablations in the Mixture-of-Experts literature.
 - Router-fp8 penalty: `+0.005` when router precision is fp8 (DeepSeekMoE router-stability ablation).
 - Routing-imbalance penalty: `+0.10 × max(0, 1 - load_balance)`. **Defaults to zero** because v1 assumes balanced routing under a load-balance loss. Production deployments with degraded balance (e.g., LB loss removed, no dropless routing) should set `load_balance` explicitly.
 - The MoE residual is currently a smooth function of (`n_experts`, `top_k`, `expert_dim`, `shared_dim`). It does NOT model expert collapse, dropless-vs-dropping scheduler tradeoffs, or token-choice vs expert-choice routing. These are out of scope for v1.
-- First-K-dense FFN pattern (v1-fix Part B) attenuates the capacity bonus linearly by `n_moe_layers / n_layers` and adds a small stability bonus (`-0.003` per dense prefix layer, up to 3 layers). Source: DeepSeek-V3 / Qwen3-MoE conventions.
+- First-K-dense FFN patterns change active/total parameter ledgers directly and retain a small stability residual (`-0.003` per dense prefix layer, up to 3 layers).
 
 ## State / Hybrid Quality Residual (v2)
 
 - Only **Mamba-2** has a measured-empirical reference implementation in `ac-base/` (PyTorch and JAX). Other state families (Mamba-1, Gated DeltaNet, KDA, GLA, RWKV-7, sliding-window, generic linear attention) are validated by the schema and routed to the correct family in the quality residual, but their reference models are research-stub: shapes are correct and `verify_forward()` round-trips, but they are not production-tuned and should not be used to benchmark wall-clock throughput.
-- The 5-term family-specific decomposition (`f_hybrid_ratio`, `f_state_capacity`, `f_kv_cost`, `f_recall_risk`, `f_family_uncertainty`) uses the band-pass priors in `configs/quality/quality_v1_defaults.yaml:state_residual.families`. Bands and recall minima are anchored on Jamba / Nemotron-H / Zamba / DeepSeek-V3 ablations; they should be re-fit when more sweeps land.
+- The family-specific decomposition (`f_hybrid_ratio`, `f_state_capacity`, `f_kv_cost`, `f_recall_risk`, `f_family_uncertainty`) uses the band-pass priors in `quality_defaults.yaml:state_residual.families`. DeepSeek-V3 is treated as MLA+MoE, not as a state-space hybrid. These priors should be re-fit when matched sweeps land.
 - Family resolution rules (`_resolve_hybrid_family`):
   - `mamba_sequential` — Mamba-1/2, S4/S5/S6.
   - `gated_delta_or_kda_linear` — DeltaNet, Gated DeltaNet, Kimi Delta Attention (KDA), GLA (when used with gated linear attention).

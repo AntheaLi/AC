@@ -302,7 +302,17 @@ def compute_lattice(
             out_k_aligned = (out_k % tile.cta_k == 0)
 
             # FFN dim (SwiGLU: 8/3 ratio)
-            ffn_stride = lcm(tile.cta_n, tp)
+            # Wave 18h: the stride must make the PER-GPU shard tile-aligned,
+            # i.e. (ffn_dim / tp) % cta_n == 0 and % cta_k == 0, so
+            # ffn_dim must be a multiple of lcm(cta_n, cta_k) * tp. The old
+            # stride lcm(cta_n, tp) only aligned the global dim; the
+            # alignment check below then rejected every d_model whose
+            # rounded 8/3 FFN didn't happen to land on a multiple of
+            # lcm(cta_n,cta_k)*tp — on H100/TP8 that silently collapsed the
+            # width grid to multiples of 1536 (no 2048, 2560, ... at all),
+            # which is why 1B searches could only choose pathological
+            # wide-shallow shapes.
+            ffn_stride = lcm(lcm(tile.cta_n, tile.cta_k), 1) * tp
             ffn_raw_swiglu = int(d_model * 8 / 3)
             ffn_dim_swiglu = round_nearest_to(ffn_raw_swiglu, ffn_stride)
             if ffn_dim_swiglu < ffn_stride:
@@ -407,7 +417,10 @@ def compute_gqa_configs(
                 continue
             kv_heads_per_gpu = n_kv_heads // tp
         else:
-            # n_kv_heads < TP: each GPU gets a replicated copy (valid in some frameworks)
+            # n_kv_heads < TP: replicate each KV head across an equal-size
+            # subgroup of TP ranks.
+            if tp % n_kv_heads != 0:
+                continue
             kv_heads_per_gpu = 1
 
         # KV projection dim per GPU: 2 * d_head * kv_heads_per_gpu
@@ -456,10 +469,18 @@ NVLINK_DOMAIN = {
 }
 
 
-def default_ep_options(hw_name: str) -> List[int]:
-    """Powers of 2 up to the hardware's NVLink/axis domain size."""
+def default_ep_options(hw_name: str, for_moe: bool = False) -> List[int]:
+    """Powers of 2 up to the hardware's NVLink/axis domain size.
+
+    When `for_moe=True`, EP=1 is excluded because a MoE candidate with EP=1
+    forces every rank to hold the full set of experts — at any reasonable
+    MoE size this is multiple-× HBM and gets silently caught downstream
+    via the memory→INFEASIBLE side-channel. Excluding EP=1 from the MoE
+    enumeration makes the bug unreachable by construction. Callers from
+    the MoE / hybrid generators must pass `for_moe=True`.
+    """
     cap = NVLINK_DOMAIN.get(hw_name, 8)
-    opts = [1]
+    opts = [] if for_moe else [1]
     e = 2
     while e <= cap:
         opts.append(e)
@@ -1020,10 +1041,14 @@ def estimate_mla_per_layer_params(
     W_kr  = d_model * d_rope
     W_uk  = c_kv * n_heads * d_nope
     W_uv  = c_kv * n_heads * d_nope
-    W_dq  = d_model * c_q
-    W_uq  = c_q * n_heads * (d_nope + d_rope)
+    # Wave 22: c_q == 0 means NO Q compression (DeepSeek-V2-Lite style) —
+    # charge the full uncompressed W_Q rather than dropping Q entirely.
+    if c_q > 0:
+        W_q = d_model * c_q + c_q * n_heads * (d_nope + d_rope)
+    else:
+        W_q = d_model * n_heads * (d_nope + d_rope)
     W_o   = n_heads * d_nope * d_model
-    attn_params = W_dkv + W_kr + W_uk + W_uv + W_dq + W_uq + W_o
+    attn_params = W_dkv + W_kr + W_uk + W_uv + W_q + W_o
     ffn_params = 3 * d_model * ffn_dim     # SwiGLU up + gate + down
     norm_params = 2 * d_model              # two RMSNorms per block
     return attn_params + ffn_params + norm_params

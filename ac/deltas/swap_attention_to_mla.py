@@ -14,7 +14,10 @@ from .base import (
     _record_applied,
     _attention_already_swapped,
 )
-from quality_model import ArchConfig as QArchConfig
+try:
+    from ..quality_model import ArchConfig as QArchConfig
+except ImportError:
+    from quality_model import ArchConfig as QArchConfig
 
 
 class SwapAttentionToMLA(Transformation):
@@ -48,6 +51,13 @@ class SwapAttentionToMLA(Transformation):
         out.attention_type = "mla"
         out.mla_kv_latent_dim = int(latent_dim)
         out.mla_rope_head_dim = int(d_rope)
+        # Wave 22: stamp d_nope explicitly (split-head convention: keep the
+        # baseline's per-head dim, carve d_rope out of it). Leaving it 0 made
+        # the parameter ledger drop the K/V up-projections and W_O, so an
+        # MLA swap on a 7B shed ~1.3B phantom params (and the quality model
+        # priced attention as nearly free).
+        _dh = int(getattr(arch, "d_head", 128) or 128)
+        out.mla_nope_head_dim = _dh - int(d_rope) if _dh > int(d_rope) else _dh
         # n_kv_heads is no longer the storage axis under MLA, but we leave
         # the value at 1 so any code path that still reads it falls back to
         # a single compressed latent. The MLA throughput branch ignores it.

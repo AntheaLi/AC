@@ -103,6 +103,19 @@ class AttentionConfig:
     nsa_select_top_k: Optional[int] = None          # default 16 blocks
     nsa_window_size: Optional[int] = None           # default 512
 
+    # Wave 9 (Jun 2026): compressed-attention variants. See
+    # plan/redesign/09-compressed-attention-coverage.md. Each variant's
+    # fields are only meaningful when type == "csa" | "indexshare" | "msa".
+    csa_block_size: Optional[int] = None
+    csa_top_k_blocks: Optional[int] = None
+    csa_compression_dim: Optional[int] = None
+    indexshare_num_buckets: Optional[int] = None
+    indexshare_top_k_buckets: Optional[int] = None
+    indexshare_index_dim: Optional[int] = None
+    msa_window_size: Optional[int] = None
+    msa_dilated_top_k: Optional[int] = None
+    msa_global_top_k: Optional[int] = None
+
     def __post_init__(self):
         if self.precision is None:
             self.precision = {"qk": "bf16", "v": "bf16", "output": "bf16"}
@@ -325,6 +338,15 @@ def build_config(
     # Shape: {n_predict_depths: int, depth_n_layers: int, share_embeddings:
     # bool, train_loss_weight: float}.
     mtp: Optional[Dict[str, Any]] = None,
+    # Wave 19 (loop finding L1): local:global attention interleave.
+    # Shape: {"n_local_layers": int, "window_size": int}. Emits the local
+    # layers as attention.type="swa" bands (window_size set) and keeps the
+    # global layers on the base attention block (full/GQA or MLA), matching
+    # the multi-band form the baseline loader already assembles back into
+    # an interleave. Without this, greenfield picks that selected an
+    # interleave were EMITTED as pure full attention — the config a user
+    # would train did not match the candidate the search evaluated.
+    local_global: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """Build a complete, validated architecture config dict.
 
@@ -453,6 +475,53 @@ def build_config(
             "state": None,
         }
         layer_configs = [layer_config]
+
+    # Wave 19 (L1): split bands into SWA-local and global layers.
+    if local_global is not None:
+        n_local = max(0, min(int(local_global.get("n_local_layers", 0)),
+                             n_layers))
+        lg_window = int(local_global.get("window_size", 0) or 0)
+        if 0 < n_local < n_layers and lg_window > 0:
+            n_global = n_layers - n_local
+            # Evenly spaced global layers, always keeping the LAST layer
+            # global (recall convention: final layer sees full context).
+            if n_global == 1:
+                global_idx = {n_layers - 1}
+            else:
+                global_idx = {
+                    int(round(i * (n_layers - 1) / (n_global - 1)))
+                    for i in range(n_global)
+                }
+                # Collisions from rounding: fill from the end.
+                j = n_layers - 1
+                while len(global_idx) < n_global and j >= 0:
+                    global_idx.add(j)
+                    j -= 1
+            local_attention_block = {
+                "type": "swa",
+                "n_heads": n_heads,
+                "n_kv_heads": n_kv_heads,
+                "d_head": d_head,
+                "rope": True,
+                "kv_cache_bits": kv_cache_bits,
+                "precision": attn_precision,
+                "window_size": lg_window,
+            }
+            new_bands = []
+            for band in layer_configs:
+                idx = band["layer_idx"]
+                g = sorted(i for i in idx if i in global_idx)
+                l = sorted(i for i in idx if i not in global_idx)
+                if g:
+                    b = dict(band)
+                    b["layer_idx"] = g
+                    new_bands.append(b)
+                if l:
+                    b = dict(band)
+                    b["layer_idx"] = l
+                    b["attention"] = local_attention_block
+                    new_bands.append(b)
+            layer_configs = new_bands
 
     config = {
         "schema_version": SCHEMA_VERSION,
@@ -658,10 +727,20 @@ def validate_config(config: dict) -> List[str]:
                         elif attn_type == "nsa":
                             # v1-fix NSA: Native Sparse Attention (DeepSeek 2025)
                             errors.extend(_validate_nsa_attention(attn, pfx))
+                        elif attn_type == "swa":
+                            # Wave 18g: sliding-window attention band (local
+                            # layers of a local:global interleave, or a
+                            # whole-model SWA stack). GQA projection shape +
+                            # a positive window.
+                            w = attn.get("window_size", None)
+                            if not isinstance(w, int) or w <= 0:
+                                errors.append(
+                                    f"{pfx}.attention (swa): window_size must "
+                                    f"be a positive integer")
                         elif attn_type not in ("full", "gqa", "mqa", "mha"):
                             errors.append(
                                 f"{pfx}.attention.type={attn_type!r} not recognized "
-                                f"(expected one of full | mha | gqa | mqa | mla | nsa)"
+                                f"(expected one of full | mha | gqa | mqa | mla | nsa | swa)"
                             )
 
                     if "ffn" not in lc or lc["ffn"] is None:
@@ -701,8 +780,10 @@ def validate_config(config: dict) -> List[str]:
                     if missing:
                         errors.append(f"layer_configs does not cover layers: {sorted(missing)[:5]}...")
 
-    # If expert_parallel > 1 there must be at least one MoE layer; otherwise
-    # EP is meaningless.
+    # EP=1 is a legal TP-sharded MoE serving/training plan: every expert is
+    # resident across the TP group and dispatch is local. EP>1 additionally
+    # shards the expert set. If EP>1 there must be an MoE layer; otherwise
+    # the axis is meaningless.
     ep = par.get("expert_parallel", 1)
     if ep > 1 and not any_moe_layer:
         errors.append(
@@ -724,12 +805,30 @@ def validate_config(config: dict) -> List[str]:
                 # _validate_mla_attention above.
                 if attn.get("type") == "mla":
                     break
+                # v1-fix Wave 18f (Jul 2026): d_model == n_heads x d_head is no
+                # longer a hard invariant. Real frontier models decouple the
+                # attention inner width from the residual width: GPT-OSS-120B
+                # (d_model=2880, 64 heads x 64 = 4096), Gemma-2-9B (3584 vs
+                # 16 x 256 = 4096), Qwen3-32B (5120 vs 64 x 128 = 8192). The
+                # parameter ledger and throughput model already compute QKVO
+                # projections from n_heads*d_head with d_model on the residual
+                # side, so decoupled widths evaluate correctly — the old hard
+                # error made faithful configs for these models unrepresentable
+                # (and pushed the shipped gpt_oss_120b.json into a 5.6x
+                # total-param fabrication to satisfy the check). We keep a
+                # bounds check to still catch unit typos: attention width more
+                # than 4x away from d_model in either direction is almost
+                # certainly a mistake, not a design.
                 if "n_heads" in attn and "d_head" in attn:
-                    expected_d = attn["n_heads"] * attn["d_head"]
-                    if expected_d != arch["d_model"]:
+                    attn_width = attn["n_heads"] * attn["d_head"]
+                    d_model = arch["d_model"]
+                    if not (0.25 * d_model <= attn_width <= 4.0 * d_model):
                         errors.append(
-                            f"d_model ({arch['d_model']}) != n_heads ({attn['n_heads']}) x "
-                            f"d_head ({attn['d_head']}) = {expected_d}"
+                            f"attention width n_heads ({attn['n_heads']}) x "
+                            f"d_head ({attn['d_head']}) = {attn_width} is more "
+                            f"than 4x away from d_model ({d_model}) — likely a "
+                            f"typo. Decoupled attention width is supported "
+                            f"within [0.25x, 4x] of d_model."
                         )
                 break  # Only check first transformer_block
 
@@ -1074,6 +1173,8 @@ def build_hybrid_config(
     weight_precision: str = "bf16",
     # MoE override (if not None, used as FFN for all layers)
     moe: Optional[Dict[str, Any]] = None,
+    nsa: Optional[Dict[str, Any]] = None,
+    yoco: Optional[Dict[str, Any]] = None,
     # Parallelism
     tp: int = 1,
     pp: int = 1,
@@ -1143,10 +1244,33 @@ def build_hybrid_config(
 
     # Attention layer config
     if attention_layer_indices:
-        attn_lc = {
-            "layer_idx": sorted(attention_layer_indices),
-            "type": "transformer_block",
-            "attention": {
+        if nsa is not None:
+            attention_block = {
+                "type": "nsa",
+                "n_heads": n_heads,
+                "n_kv_heads": n_kv_heads,
+                "d_head": d_head,
+                "rope": True,
+                "kv_cache_bits": kv_cache_bits,
+                "precision": attn_precision,
+                "nsa_compress_block_size": int(
+                    nsa.get("compress_block_size", NSA_DEFAULTS["compress_block_size"])
+                ),
+                "nsa_compress_block_stride": int(
+                    nsa.get("compress_block_stride", NSA_DEFAULTS["compress_block_stride"])
+                ),
+                "nsa_select_block_size": int(
+                    nsa.get("select_block_size", NSA_DEFAULTS["select_block_size"])
+                ),
+                "nsa_select_top_k": int(
+                    nsa.get("select_top_k", NSA_DEFAULTS["select_top_k"])
+                ),
+                "nsa_window_size": int(
+                    nsa.get("window_size", NSA_DEFAULTS["window_size"])
+                ),
+            }
+        else:
+            attention_block = {
                 "type": "full",
                 "n_heads": n_heads,
                 "n_kv_heads": n_kv_heads,
@@ -1154,7 +1278,11 @@ def build_hybrid_config(
                 "rope": True,
                 "kv_cache_bits": kv_cache_bits,
                 "precision": attn_precision,
-            },
+            }
+        attn_lc = {
+            "layer_idx": sorted(attention_layer_indices),
+            "type": "transformer_block",
+            "attention": attention_block,
             "ffn": dict(ffn_block),
             "normalization": {
                 "type": "rmsnorm",
@@ -1225,6 +1353,7 @@ def build_hybrid_config(
                 } if rope_scaling_method != "none" else None),
             },
             "layer_configs": layer_configs,
+            **({"yoco": dict(yoco)} if yoco else {}),
         },
     }
 

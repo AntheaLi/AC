@@ -1,3 +1,10 @@
+# Explicit override template only. AC's canonical no-file defaults live in
+# quality_model.DEFAULT_QUALITY_CONSTANTS. This file is never auto-loaded;
+# opt in with AC_QUALITY_DEFAULTS=/path/to/override.yaml.
+model:
+  version: "effective_capacity_v2"
+  legacy_version: "legacy_residual_v1"
+
 spine:
   enabled: true
   form: "power_law_M_D"
@@ -9,6 +16,47 @@ spine:
   uncertainty_in_regime: 0.03
   uncertainty_out_of_regime: 0.08
   source: "Hoffmann_et_al_2022_placeholder_defaults"
+
+effective_capacity:
+  enabled: true
+  capacity_elasticity: 0.25
+  tokens_per_total_param_half_saturation: 20.0
+  # Wave 18h: exponent is signed around this parity utilization; below it
+  # (fewer than ~half_saturation tokens per TOTAL param) sparse capacity is
+  # under-trained and N_eff < N_active (MoE loses to equal-active dense).
+  data_utilization_parity: 0.5
+  capacity_multiplier: 1.0
+  uncertainty: 0.50
+  source: "uncalibrated_effective_sparse_capacity_prior"
+
+# Wave 18h: one-sided undersized-vocabulary structural prior (see
+# quality_model.DEFAULT_QUALITY_CONSTANTS["vocab_residual"] for rationale).
+vocab_residual:
+  enabled: true
+  weight: 0.004
+  cap: 0.015
+  v_opt_ref: 128256
+  n_ref: 7.0e9
+  v_opt_exponent: 0.30
+  v_opt_min: 32000
+  v_opt_max: 512000
+  uncertainty: 0.60
+  source: "tao_2024_vocab_scaling_plus_frontier_practice_prior"
+
+effective_data:
+  enabled: true
+  repeat_half_life_epochs: 4.0
+  data_multiplier: 1.0
+  overfit_penalty_weight: 0.0
+  overfit_repetition_exponent: 1.0
+  overfit_capacity_exponent: 1.0
+  uncertainty: 0.40
+  source: "muennighoff_effective_data_uncalibrated_prior"
+
+context_utility:
+  enabled: true
+  uncertainty: 0.50
+  source: "task_context_delta_relative_to_pretrain_context"
 
 architecture_residual:
   enabled: true
@@ -166,16 +214,26 @@ state_residual:
       p_recall_min_general: 0.10
       p_recall_min_recall: 0.20
       confidence: "medium-low"
-  w_under: 0.08
-  w_over: 0.04
-  w_recall: 0.06
+  # Wave 18f (Jul 2026): w_under / w_recall raised so the quadratic
+  # under-band and recall penalties can counterbalance the long-context
+  # state benefit at p_attn -> 0 (pure SSM). See quality_model.py
+  # DEFAULT_QUALITY_CONSTANTS for the full rationale.
+  w_under: 0.35
+  w_over: 0.03
+  w_recall: 0.30
   w_capacity: 0.02
   w_kv_cost: 0.01
   compression_scale: 0.02
   composition_scale: 0.01
   d_state_reference: 192
   refresh_factor_weight: 0.5
-  min_delta: -0.05
+  # Wave 5 long-context state benefit (kept in sync with code defaults).
+  state_long_context_weight: 0.030
+  state_long_context_ref_ctx: 8192
+  state_long_context_sigmoid_scale: 5.0
+  # Wave 18f: benefit is gated on attention presence; zero at p_attn=0.
+  state_benefit_min_p_attn: 0.07
+  min_delta: -0.10
   max_delta: 0.30
   uncertainty: 0.40
   uncertainty_outside_band: 0.55

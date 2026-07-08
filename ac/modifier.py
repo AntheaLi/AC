@@ -10,27 +10,26 @@ import copy
 import csv
 import io
 import math
-import os
-import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from lattice_engine import HARDWARE as LATTICE_HW, estimate_params
-from optimizer import (
-    CandidateArch,
-    DeploymentConstraints,
-    EvaluatedCandidate,
-    evaluate_candidate,
-    get_precision_configs_for_hardware,
-)
-from schema import build_config
-
-from baseline import BaselineModel
+try:
+    from .lattice_engine import HARDWARE as LATTICE_HW, estimate_params
+    from .optimizer import (
+        CandidateArch, DeploymentConstraints, EvaluatedCandidate,
+        evaluate_candidate, get_precision_configs_for_hardware,
+    )
+    from .schema import build_config
+    from .baseline import BaselineModel
+except ImportError:
+    from lattice_engine import HARDWARE as LATTICE_HW, estimate_params
+    from optimizer import (
+        CandidateArch, DeploymentConstraints, EvaluatedCandidate,
+        evaluate_candidate, get_precision_configs_for_hardware,
+    )
+    from schema import build_config
+    from baseline import BaselineModel
 
 
 @dataclass
@@ -199,7 +198,23 @@ def _generate_local_candidates(
     constraints: DeploymentConstraints,
     tp_options: List[int],
 ) -> List[Tuple[CandidateArch, int]]:
-    """Generate product of v0.5 local mutation options around the baseline."""
+    """Generate product of v0.5 local mutation options around the baseline.
+
+    Wave 7a.3 audit note. The optimizer's `_filter_lattice_to_budget`
+    (added in Wave 5) bounds `generate_candidates()` to the N points
+    closest to the Chinchilla-anchor shape in (d_model, d_head) log-space.
+    The modifier does NOT pass through that filter — it constructs
+    CandidateArch instances directly from `base.d_model`, `base.d_head`,
+    `base.n_heads` (mutating only n_layers, n_kv_heads, kv_bits,
+    ffn_precision, ffn_dim) and evaluates them via the throughput/quality
+    models directly. Consequence: a baseline whose (d_model, d_head)
+    sits outside the lattice-filter neighborhood is still freely
+    explored by the modifier; the filter cannot exclude its proposals.
+    No code change needed for Wave 7. (Note for future work: if we ever
+    re-route modifier candidates through `generate_candidates()` or
+    `optimize()`, we'd need to either widen the lattice filter for that
+    call or have the modifier pin a per-call anchor at the baseline's
+    own shape; both are out of scope today.)"""
 
     candidates = []
     kv_options = constraints.kv_bits_options or [16, 8, 4]
@@ -215,34 +230,106 @@ def _generate_local_candidates(
     if "ffn_fp8" in requested and "ffn_fp8" in hw_prec:
         ffn_precision_options.append("fp8")
 
+    # Wave 19 (loop finding L4): carry the baseline's architecture-family
+    # fields into every variant. The old constructor dropped moe / ep /
+    # MLA / local:global entirely, so an MoE baseline produced dense-ified
+    # 100B+ variants that all failed validation — modifier mode silently
+    # evaluated exactly ONE candidate (the baseline) for every MoE config.
+    def _family_kwargs() -> dict:
+        kw: dict = {}
+        if getattr(base, "moe", None):
+            kw["moe"] = copy.deepcopy(base.moe)
+            kw["ep_degree"] = int(getattr(base, "ep_degree", 2) or 2)
+            kw["moe_style"] = getattr(base, "moe_style", "fine")
+            kw["n_dense_ffn_layers"] = int(
+                getattr(base, "n_dense_ffn_layers", 0) or 0)
+        if getattr(base, "attention_type", "full") != "full":
+            kw["attention_type"] = base.attention_type
+            for f in ("mla_kv_latent_dim", "mla_q_latent_dim",
+                      "mla_rope_head_dim", "mla_nope_head_dim"):
+                if getattr(base, f, None) is not None:
+                    kw[f] = getattr(base, f)
+        for f in ("swa_window", "n_local_attn_layers", "cp_degree",
+                  "cp_method"):
+            v = getattr(base, f, None)
+            if v:
+                kw[f] = v
+        return kw
+
+    def _params_for(cand: CandidateArch) -> int:
+        """MoE-aware total params (estimate_params is dense-only; using it
+        on an MoE variant books expert_dim as a dense FFN width)."""
+        dense_total = estimate_params(
+            cand.d_model, cand.n_heads, cand.d_head,
+            cand.ffn_dim, cand.n_layers, cand.n_kv_heads, cand.vocab_size,
+        )
+        moe = getattr(cand, "moe", None)
+        if not moe:
+            return dense_total
+        # Replace the dense-FFN mass with the expert + shared mass.
+        per_dense_ffn = 3 * cand.d_model * cand.ffn_dim
+        n_experts = int(moe.get("n_experts", 1))
+        expert_dim = int(moe.get("expert_dim", cand.ffn_dim))
+        shared = moe.get("shared_expert")
+        shared_dim = int(shared.get("ffn_dim", 0)) if isinstance(shared, dict) else 0
+        per_moe_ffn = 3 * cand.d_model * (n_experts * expert_dim + shared_dim)
+        return dense_total + (per_moe_ffn - per_dense_ffn) * cand.n_layers
+
+    def _active_for(cand: CandidateArch) -> int:
+        moe = getattr(cand, "moe", None)
+        dense_total = estimate_params(
+            cand.d_model, cand.n_heads, cand.d_head,
+            cand.ffn_dim, cand.n_layers, cand.n_kv_heads, cand.vocab_size,
+        )
+        if not moe:
+            return dense_total
+        per_dense_ffn = 3 * cand.d_model * cand.ffn_dim
+        top_k = int(moe.get("top_k", 1))
+        expert_dim = int(moe.get("expert_dim", cand.ffn_dim))
+        shared = moe.get("shared_expert")
+        shared_dim = int(shared.get("ffn_dim", 0)) if isinstance(shared, dict) else 0
+        per_active_ffn = 3 * cand.d_model * (top_k * expert_dim + shared_dim)
+        return dense_total + (per_active_ffn - per_dense_ffn) * cand.n_layers
+
+    base_is_moe = bool(getattr(base, "moe", None))
     for tp in tp_options:
-        ffn_options = _nearby_ffn_dims(base.ffn_dim, hw_name, tp)
+        # For MoE baselines the local FFN knob is the EXPERT width.
+        _base_width = (int(base.moe.get("expert_dim", base.ffn_dim))
+                       if base_is_moe else base.ffn_dim)
+        ffn_options = _nearby_ffn_dims(_base_width, hw_name, tp)
         for n_kv in n_kv_options:
             for kv_bits in kv_options:
                 for ffn_precision in ffn_precision_options:
                     for ffn_dim in ffn_options:
                         for n_layers in layer_options:
+                            fam_kw = _family_kwargs()
+                            if base_is_moe:
+                                fam_kw["moe"] = dict(fam_kw["moe"])
+                                fam_kw["moe"]["expert_dim"] = int(ffn_dim)
                             cand = CandidateArch(
                                 d_model=base.d_model,
                                 n_layers=n_layers,
                                 n_heads=base.n_heads,
                                 d_head=base.d_head,
                                 n_kv_heads=n_kv,
-                                ffn_dim=ffn_dim,
+                                ffn_dim=(base.ffn_dim if base_is_moe
+                                         else ffn_dim),
                                 vocab_size=base.vocab_size,
                                 weight_precision=base.weight_precision,
                                 ffn_precision=ffn_precision,
                                 attn_precision=copy.deepcopy(base.attn_precision),
                                 kv_cache_bits=int(kv_bits),
+                                **fam_kw,
                             )
-                            if not _candidate_valid(cand, hw_name, constraints, tp):
-                                continue
-                            cand.total_params = estimate_params(
-                                cand.d_model, cand.n_heads, cand.d_head,
-                                cand.ffn_dim, cand.n_layers, cand.n_kv_heads,
-                                cand.vocab_size,
-                            )
+                            cand.total_params = _params_for(cand)
                             cand.total_params_b = round(cand.total_params / 1e9, 2)
+                            if not _candidate_valid(cand, hw_name, constraints,
+                                                    tp, base=base):
+                                continue
+                            if base_is_moe:
+                                cand.active_params = _active_for(cand)
+                                cand.active_params_b = round(
+                                    cand.active_params / 1e9, 2)
                             candidates.append((cand, tp))
 
     return candidates
@@ -253,24 +340,42 @@ def _candidate_valid(
     hw_name: str,
     constraints: DeploymentConstraints,
     tp: int,
+    base: Optional[CandidateArch] = None,
 ) -> bool:
     """Cheap structural checks before expensive evaluation."""
 
-    if cand.d_model != cand.n_heads * cand.d_head:
-        return False
+    # Wave 19 (loop finding L4): the hard `d_model == n_heads * d_head`
+    # check silently rejected EVERY variant of a baseline with decoupled
+    # attention width (GPT-OSS: d_model 2880, 64 heads x 64 = 4096) — the
+    # same invariant Wave 18g already relaxed in the schema loader. When
+    # the BASELINE itself is decoupled, variants inherit its geometry and
+    # only the schema's ±4x typo bound applies.
+    attn_width = cand.n_heads * cand.d_head
+    if base is not None and base.d_model == base.n_heads * base.d_head:
+        if cand.d_model != attn_width:
+            return False
+    else:
+        if not (0.25 * cand.d_model <= attn_width <= 4.0 * cand.d_model):
+            return False
     if cand.n_heads % cand.n_kv_heads != 0:
         return False
-    if cand.n_kv_heads < tp and cand.n_kv_heads != 1:
+    if cand.n_kv_heads < tp and tp % cand.n_kv_heads != 0:
         return False
     if cand.d_model % tp != 0 or cand.n_heads % tp != 0 or cand.ffn_dim % tp != 0:
         return False
     if constraints.pp > 1 and cand.n_layers % constraints.pp != 0:
         return False
 
-    total = estimate_params(
-        cand.d_model, cand.n_heads, cand.d_head, cand.ffn_dim,
-        cand.n_layers, cand.n_kv_heads, cand.vocab_size,
-    )
+    # Wave 19 (L4): the param-band check must use the candidate's own
+    # (family-aware) ledger, not the dense estimate — for an MoE variant
+    # the dense formula books only the per-expert width and lands ~40x
+    # under the target band, rejecting everything.
+    total = float(getattr(cand, "total_params", 0) or 0)
+    if total <= 0:
+        total = estimate_params(
+            cand.d_model, cand.n_heads, cand.d_head, cand.ffn_dim,
+            cand.n_layers, cand.n_kv_heads, cand.vocab_size,
+        )
     target = constraints.target_params_b * 1e9
     lo = target * (1 - constraints.param_tolerance)
     hi = target * (1 + constraints.param_tolerance)
