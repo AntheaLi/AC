@@ -1,6 +1,12 @@
 # 算模 AC — Architecture Compiler 
 
-[![CI](https://github.com/AntheaLi/AC/actions/workflows/ci.yml/badge.svg)](https://github.com/AntheaLi/AC/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://github.com/AntheaLi/AC/actions/workflows/ci.yml"><img src="https://github.com/AntheaLi/AC/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/archc/"><img src="https://img.shields.io/pypi/v/archc.svg" alt="PyPI"></a>
+  <a href="https://github.com/AntheaLi/AC/blob/main/LICENSE"><img src="https://img.shields.io/github/license/AntheaLi/AC.svg" alt="License"></a>
+  <a href="https://pypi.org/project/archc/"><img src="https://img.shields.io/pypi/status/archc.svg" alt="Status"></a>
+  <a href="https://antheali.github.io/ac-demo/"><img src="https://img.shields.io/badge/demo-live-6f42c1" alt="Live Demo"></a>
+</p>
 
 ![算模AC - ArchCalc](assets/image.png)
 
@@ -12,7 +18,7 @@ It serves as a quantitative **pre-flight** check, it does NOT replace training.
 
 Check out demo here: [ac-demo](https://antheali.github.io/ac-demo/)
 
-> **TL;DR (60s)** — Give AC a hardware target + budget (`ac-compile --hardware h100 --params 7 --tokens 2 …`); get back a Pareto-optimal architecture, the binding constraint that decided it, and the price of relaxing it. Why trust it: an [anchor validation study](validation/anchor_report.md) pre-registered predictions before comparing them to the public record — decision retrodiction **4 hit + 1 partial of 5** (DeepSeek-V3 MLA, Llama-3 GQA-8, Mistral SWA, first-K-dense, EP=72-on-NVL72), ranking fidelity **Kendall τ = 1.0**, with every miss published in an error taxonomy instead of deleted. Absolute numbers are priors until you calibrate — [read the 3 lines below](#calibration-vs-ordinal-use). Run it in 30s: `pip install archc && ac-compile --hardware h100 --params 7 --tokens 2 --context 8192 --serving-tbt 50 --serving-batch 32 --tp 8 --pp 1 --dp 8`
+> **TL;DR (60s)** — Give AC a hardware target + budget (`ac-compile --hardware h100 --params 7 --tokens 2 …`); get back a Pareto-optimal architecture, the binding constraint that decided it, and the price of relaxing it. Why trust it: an [anchor validation study](asset/anchor_report.md) pre-registered predictions before comparing them to the public record — decision retrodiction **4 hit + 1 partial of 5** (DeepSeek-V3 MLA, Llama-3 GQA-8, Mistral SWA, first-K-dense, EP=72-on-NVL72), ranking fidelity **Kendall τ = 1.0**, with every miss published in an error taxonomy instead of deleted. Absolute numbers are priors until you calibrate — [read the 3 lines below](#calibration-vs-ordinal-use). Run it in 30s: `pip install archc && ac-compile --hardware h100 --params 7 --tokens 2 --context 8192 --serving-tbt 50 --serving-batch 32 --tp 8 --pp 1 --dp 8`
 
 Three composable use cases, one shared config format:
 
