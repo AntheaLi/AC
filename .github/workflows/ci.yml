@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Full test suite
+        run: python -m pytest tests/ -q
+      - name: Physics invariant audit (134 checks)
+        run: python scripts/probe_invariants.py
+
+  golden-matrix:
+    name: golden decision-matrix regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: 32-cell golden matrix (release-gate protocol)
+        run: AC_RUN_GOLDEN_MATRIX=1 python -m pytest tests/test_golden_matrix.py -q
+
+  golden-snapshot:
+    name: quickstart snapshot determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      - name: Snapshot run A
+        run: scripts/golden_snapshot.sh out/golden_a
+      - name: Snapshot run B
+        run: scripts/golden_snapshot.sh out/golden_b
+      - name: Byte-diff A vs B (must be identical)
+        run: diff -r out/golden_a out/golden_b
+
+  lint:
+    name: ruff (report-only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ruff (non-blocking during Gate-1)
+        run: |
+          pip install ruff
+          ruff check . --statistics || true

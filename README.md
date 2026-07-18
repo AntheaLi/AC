@@ -1,6 +1,6 @@
 # 算模 AC — Architecture Compiler - v0
 
-![CI](https://github.com/AntheaLi/AC/actions/workflows/ci.yml/badge.svg)](https://github.com/AntheaLi/AC/actions/workflows/ci.yml)
+[![CI](https://github.com/AntheaLi/AC/actions/workflows/ci.yml/badge.svg)](https://github.com/AntheaLi/AC/actions/workflows/ci.yml)
 
 ![算模AC - ArchCalc](assets/image.png)
 
