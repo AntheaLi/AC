@@ -1,0 +1,115 @@
+{
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "ac 0.4.0",
+    "generated_at": "2026-07-17T00:00:00+00:00",
+    "input_hardware": null,
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent": "gate2-wave1",
+    "task": "A-E3 preregistration",
+    "model_name": "mha-7b-n1",
+    "source_note": "Mistral-7B shape (arXiv:2310.06825 Table 1) counterfactual pure-MHA variant (32 KV heads); wave-2 stress at 32k context.",
+    "params": {
+      "total_b": 8.047,
+      "active_b": 8.05,
+      "embed_b": 0.13,
+      "unembed_b": 0.13
+    },
+    "input_constraints": {
+      "workload": "pretraining",
+      "slo": {}
+    },
+    "predicted": {},
+    "search_stats": {}
+  },
+  "parallelism": {
+    "tensor_parallel": 1,
+    "pipeline_parallel": 1,
+    "data_parallel": 1,
+    "expert_parallel": 1,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 4096,
+    "n_layers": 32,
+    "vocab_size": 32000,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 10000,
+      "scaling": {
+        "method": "none",
+        "factor": 1.0,
+        "original_max_position": 32768
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31
+        ],
+        "type": "transformer_block",
+        "attention": {
+          "type": "full",
+          "n_heads": 32,
+          "n_kv_heads": 32,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {
+            "qk": "bf16",
+            "v": "bf16",
+            "output": "bf16"
+          }
+        },
+        "ffn": {
+          "type": "swiglu",
+          "ffn_dim": 14336,
+          "precision": "bf16"
+        },
+        "normalization": {
+          "type": "rmsnorm",
+          "eps": 1e-06,
+          "precision": "bf16"
+        },
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ]
+  }
+}

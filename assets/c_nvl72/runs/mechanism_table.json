@@ -1,0 +1,257 @@
+{
+ "ac_version": "0.4.0",
+ "quality_model_version": "effective_capacity_v2",
+ "git_commit": "c170cda",
+ "experiment_date": "2026-07-17",
+ "agent_wave": "gate2-wave1",
+ "part": "M_mechanism_table",
+ "arch": {
+  "d_model": 7168,
+  "n_layers": 61,
+  "n_experts": 288,
+  "top_k": 8,
+  "expert_dim": 2816,
+  "shared_dim": 2048,
+  "attention": "gqa-8",
+  "weight_precision": "fp8",
+  "kv_precision": "int8",
+  "total_params_b": 1080,
+  "active_params_b": 45.7
+ },
+ "ep_sweep": [
+  {
+   "hardware": "h100",
+   "ep": 8,
+   "batch": 32,
+   "decode_tbt_ms": 207.69248199680598,
+   "train_tps": 1761.6386693641284,
+   "mem_per_gpu_gb": 148.1844042107208,
+   "spill_tier": "nvlink",
+   "decode_a2a_share": 0.0008496121437021433
+  },
+  {
+   "hardware": "h100",
+   "ep": 16,
+   "batch": 32,
+   "decode_tbt_ms": 71.48935424370461,
+   "train_tps": 1554.974243908465,
+   "mem_per_gpu_gb": 86.26106436697079,
+   "spill_tier": "nvlink",
+   "decode_a2a_share": 0.003455707877972761
+  },
+  {
+   "hardware": "h100",
+   "ep": 32,
+   "batch": 32,
+   "decode_tbt_ms": 43.29206860665619,
+   "train_tps": 1446.3528152755416,
+   "mem_per_gpu_gb": 55.29939444509579,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0036648596000219834
+  },
+  {
+   "hardware": "h100",
+   "ep": 72,
+   "batch": 32,
+   "decode_tbt_ms": 32.9873339521037,
+   "train_tps": 1392.3198477867686,
+   "mem_per_gpu_gb": 38.09846671072079,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0026078166662887588
+  },
+  {
+   "hardware": "gb200_nvl72",
+   "ep": 8,
+   "batch": 32,
+   "decode_tbt_ms": 40.42462441766222,
+   "train_tps": 3747.4625635267093,
+   "mem_per_gpu_gb": 148.1844042107208,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.001003197780140986
+  },
+  {
+   "hardware": "gb200_nvl72",
+   "ep": 16,
+   "batch": 32,
+   "decode_tbt_ms": 26.71944962672802,
+   "train_tps": 3914.9985044445543,
+   "mem_per_gpu_gb": 86.26106436697079,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0008470049548570172
+  },
+  {
+   "hardware": "gb200_nvl72",
+   "ep": 32,
+   "batch": 32,
+   "decode_tbt_ms": 19.86546776768137,
+   "train_tps": 4100.339036901269,
+   "mem_per_gpu_gb": 55.29939444509579,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0006146858897272032
+  },
+  {
+   "hardware": "gb200_nvl72",
+   "ep": 72,
+   "batch": 32,
+   "decode_tbt_ms": 15.582263506686045,
+   "train_tps": 4098.391779139022,
+   "mem_per_gpu_gb": 38.09846671072079,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0003722059062127714
+  },
+  {
+   "hardware": "h100",
+   "ep": 8,
+   "batch": 64,
+   "decode_tbt_ms": 244.4493634670622,
+   "train_tps": 1761.6386693641284,
+   "mem_per_gpu_gb": 154.58039632732536,
+   "spill_tier": "nvlink",
+   "decode_a2a_share": 0.0014753066727370837
+  },
+  {
+   "hardware": "h100",
+   "ep": 16,
+   "batch": 64,
+   "decode_tbt_ms": 94.98672412363072,
+   "train_tps": 1554.974243908465,
+   "mem_per_gpu_gb": 92.65705648357537,
+   "spill_tier": "nvlink",
+   "decode_a2a_share": 0.005911220933767508
+  },
+  {
+   "hardware": "h100",
+   "ep": 32,
+   "batch": 64,
+   "decode_tbt_ms": 50.72810699841604,
+   "train_tps": 1446.3528152755416,
+   "mem_per_gpu_gb": 61.695386561700374,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.006177934938684337
+  },
+  {
+   "hardware": "h100",
+   "ep": 72,
+   "batch": 64,
+   "decode_tbt_ms": 40.328342233257985,
+   "train_tps": 1392.3198477867686,
+   "mem_per_gpu_gb": 44.494458827325374,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.004174149190488815
+  },
+  {
+   "hardware": "gb200_nvl72",
+   "ep": 8,
+   "batch": 64,
+   "decode_tbt_ms": 47.695285155719525,
+   "train_tps": 3747.4625635267093,
+   "mem_per_gpu_gb": 154.58039632732536,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0016809945632189768
+  },
+  {
+   "hardware": "gb200_nvl72",
+   "ep": 16,
+   "batch": 64,
+   "decode_tbt_ms": 32.255814151628876,
+   "train_tps": 3914.9985044445543,
+   "mem_per_gpu_gb": 92.65705648357537,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0013745208436048003
+  },
+  {
+   "hardware": "gb200_nvl72",
+   "ep": 32,
+   "batch": 64,
+   "decode_tbt_ms": 24.533289722424467,
+   "train_tps": 4100.339036901269,
+   "mem_per_gpu_gb": 61.695386561700374,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0009639078324130632
+  },
+  {
+   "hardware": "gb200_nvl72",
+   "ep": 72,
+   "batch": 64,
+   "decode_tbt_ms": 20.24219497821159,
+   "train_tps": 4098.391779139022,
+   "mem_per_gpu_gb": 44.494458827325374,
+   "spill_tier": "fits",
+   "decode_a2a_share": 0.0005440968021185187
+  }
+ ],
+ "stress_axes": [
+  {
+   "phase": "decode",
+   "hardware": "h100",
+   "ep": 8,
+   "all_to_all": 0.006032798155049278,
+   "all_reduce": 0.0,
+   "hbm_capacity": 3.051553574497369,
+   "hbm_bw_decode": 0.9007902162035892
+  },
+  {
+   "phase": "decode",
+   "hardware": "h100",
+   "ep": 72,
+   "all_to_all": 0.2394839300854172,
+   "all_reduce": 0.0,
+   "hbm_capacity": 1.675479355747369,
+   "hbm_bw_decode": 0.8058220195101884
+  },
+  {
+   "phase": "decode",
+   "hardware": "gb200_nvl72",
+   "ep": 8,
+   "all_to_all": 0.006949247864784326,
+   "all_reduce": 0.0,
+   "hbm_capacity": 1.2714806560405705,
+   "hbm_bw_decode": 0.8690154216606186
+  },
+  {
+   "phase": "decode",
+   "hardware": "gb200_nvl72",
+   "ep": 72,
+   "all_to_all": 0.014857760861612154,
+   "all_reduce": 0.0,
+   "hbm_capacity": 0.6981163982280704,
+   "hbm_bw_decode": 0.7536564820608159
+  },
+  {
+   "phase": "training",
+   "hardware": "h100",
+   "ep": 8,
+   "all_to_all": 0.006032798155049278,
+   "all_reduce": 0.0,
+   "hbm_capacity": 3.051553574497369,
+   "hbm_bw_decode": 0.9007902162035892
+  },
+  {
+   "phase": "training",
+   "hardware": "h100",
+   "ep": 72,
+   "all_to_all": 0.2394839300854172,
+   "all_reduce": 0.0,
+   "hbm_capacity": 1.675479355747369,
+   "hbm_bw_decode": 0.8058220195101884
+  },
+  {
+   "phase": "training",
+   "hardware": "gb200_nvl72",
+   "ep": 8,
+   "all_to_all": 0.006949247864784326,
+   "all_reduce": 0.0,
+   "hbm_capacity": 1.2714806560405705,
+   "hbm_bw_decode": 0.8690154216606186
+  },
+  {
+   "phase": "training",
+   "hardware": "gb200_nvl72",
+   "ep": 72,
+   "all_to_all": 0.014857760861612154,
+   "all_reduce": 0.0,
+   "hbm_capacity": 0.6981163982280704,
+   "hbm_bw_decode": 0.7536564820608159
+  }
+ ]
+}

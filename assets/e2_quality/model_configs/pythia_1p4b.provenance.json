@@ -1,0 +1,60 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1"
+  },
+  "anchor_id": "e2_pythia_1p4b",
+  "model": "EleutherAI/pythia-1.4b (non-deduplicated suite)",
+  "facts": {
+    "architecture": {
+      "d_model": 2048,
+      "n_layers": 24,
+      "n_heads": 16,
+      "n_kv_heads": 16,
+      "d_head": 128,
+      "ffn_dim": 8192,
+      "ffn_type": "GELU MLP (2-matrix; hidden_act gelu)",
+      "vocab_size": 50304,
+      "tied_embeddings": false,
+      "rope_theta": 10000,
+      "rotary_pct": 0.25,
+      "max_position_embeddings": 2048,
+      "normalization": "layernorm, eps 1e-5",
+      "total_params_published": 1414647808,
+      "non_embedding_params_published": 1208602624,
+      "source_url": "https://huggingface.co/EleutherAI/pythia-1.4b/raw/main/config.json",
+      "architecture_table_url": "https://huggingface.co/EleutherAI/pythia-1.4b",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    },
+    "training_tokens": {
+      "value": 299892736000,
+      "as_published": "299,892,736,000 tokens = 143,000 steps x 2,097,152-token batch; 'just under 1 epoch' on the (non-deduplicated) Pile",
+      "source_url": "https://huggingface.co/EleutherAI/pythia-1.4b",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    },
+    "pretraining_context_length": {
+      "value": 2048,
+      "source_url": "https://huggingface.co/EleutherAI/pythia-1.4b/raw/main/config.json",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    }
+  },
+  "ac_config_adaptations": [
+    "GELU MLP -> SwiGLU encoding: AC's dense FFN schema/loader accepts only swiglu (a 3-matrix FFN, 3*d*ffn params). Pythia's true FFN is a 2-matrix GELU MLP (2*d*8192 params). Encoding it verbatim as swiglu ffn_dim=8192 would inflate AC's parameter ledger ~28% (1.82B vs the published 1.415B) and bias the Chinchilla spine N. We therefore encode the param-equivalent width ffn_dim = round(2/3 * 8192) = 5461, so 3*2048*5461 = 33,552,384 ~ 2*2048*8192 = 33,554,432. AC ledger total: 1,414,053,888 vs published 1,414,647,808 (-0.04%). The architecture_residual MLP/attn-ratio term has weight 0.0 in stock constants, so the narrower ffn_dim does not move shape penalties.",
+    "rotary_pct 0.25 (Pythia rotates only 25% of head dims) is not representable in AC's schema; config records rope with base 10000. No AC quality term reads rotary_pct.",
+    "parallelism.tensor_parallel = 1: the param-equivalent ffn_dim 5461 = 43x127 has no power-of-2 divisor, and AC requires TP | ffn_dim. TP affects only throughput metrics; the quality prediction (this study's target) is TP-invariant.",
+    "metadata.params declares AC-ledger-consistent values (1.41B); published counts recorded above."
+  ],
+  "prediction_inputs": {
+    "training_tokens": 299892736000,
+    "unique_training_tokens": null,
+    "pretraining_context_length": 2048,
+    "evaluation_context_length": 2048,
+    "note": "'Just under 1 epoch' -> repetition ~0, unique tokens left null (D_eff = D). Evaluation context == pretraining context so context_utility is identically zero."
+  }
+}

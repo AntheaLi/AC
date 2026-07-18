@@ -1,0 +1,37 @@
+{
+ "ac_version": "0.4.0",
+ "quality_model_version": "effective_capacity_v2",
+ "git_commit": "c170cda",
+ "experiment_date": "2026-07-17",
+ "agent_wave": "gate2-wave1",
+ "part": "V2b_k2_384_experts",
+ "hardware": "gb200_nvl72",
+ "evaluated_eps": [
+  8,
+  16,
+  32
+ ],
+ "frontier_eps": [
+  8,
+  16,
+  32
+ ],
+ "ep72_present": false,
+ "best_feasible_tbt_by_ep": {
+  "8": {
+   "tbt_ms": 39.83732445669993,
+   "loss": 2.1365807186072554,
+   "total_b": 705.304461312
+  },
+  "16": {
+   "tbt_ms": 20.283802700455368,
+   "loss": 2.668043446189312,
+   "total_b": 829.2968448
+  },
+  "32": {
+   "tbt_ms": 10.801584485076146,
+   "loss": 2.4624086849739393,
+   "total_b": 837.554937856
+  }
+ }
+}

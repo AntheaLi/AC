@@ -1,0 +1,144 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "b32064c",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave2",
+    "file_role": "E2 anchors fragment (plan section 1.3 schema + ci_covered) for the orchestrator's anchors.json assembly: 3 observed T2 training-loss anchors + 1 dropped (no official observation)"
+  },
+  "experiment": "E2",
+  "n_records": 4,
+  "n_observed_t2": 3,
+  "n_dropped": 1,
+  "records": [
+    {
+      "anchor_id": "e2_olmo2_7b",
+      "experiment": "E2",
+      "model": "allenai/OLMo-2-1124-7B",
+      "hardware": "h100",
+      "metric": "final_training_loss",
+      "predicted": 2.001578,
+      "observed": 2.23052,
+      "abs_rel_err_pct": 10.26,
+      "provenance": {
+        "tier": "T2",
+        "source": "Ai2 official WandB project ai2-llm/OLMo-2-1124-7B, run uwjy7cji (OLMo-2-1124-7B-stage-1-run-11): train/CrossEntropyLoss at final step 928646 (= 3.895e12 tokens at GBS 1024 x 4096). Reached via the OLMo-2 paper (arXiv:2501.00656) 'WandB Logs' footnote https://api.wandb.ai/links/ai2-llm/fjn0v0ec. https://wandb.ai/ai2-llm/OLMo-2-1124-7B/runs/uwjy7cji",
+        "date": "2026-07-17"
+      },
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "status": "observed_t2",
+      "ci_covered": false,
+      "predicted_loss_ci": [1.941531, 2.061625],
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e2_quality/model_configs/olmo2_7b.json --hardware h100 --training-tokens 4000000000000 --pretraining-context-length 4096 --context-length 4096 --apply scale_n_layers:delta=0 --no-pareto --json",
+        "ac_raw_output": "validation/e2_quality/runs/e2_olmo2_7b__stock",
+        "config_path": "validation/e2_quality/model_configs/olmo2_7b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": {
+        "measurement": "last logged train/CrossEntropyLoss of the final stage-1 segment; Z-loss logged separately (weight 1e-5, final 2.6e-4, not included)",
+        "endpoint_noise": "1647 logged points over steps 927000-928646: mean 2.22496, sd 0.01141, range [2.18883, 2.25795]; last-20 mean 2.22886 sd 0.01077",
+        "token_basis_caveat": "anchor tokens 4.0e12 (model card '4 Trillion'); paper: 3.9T stage-1 + 3x50B stage-2 on Dolmino mix with final soup. Observation taken at stage-1 endpoint 3.895e12 (same training distribution); stage-2/soup not a single training-distribution loss",
+        "figure_trap": "paper Figure 2 shows OLMo 2 curve only to ~2.5e12 tokens (x-axis aligned with OLMo-0424); not the endpoint",
+        "evidence": "validation/e2_quality/observed/wandb_evidence.json"
+      }
+    },
+    {
+      "anchor_id": "e2_pythia_1p4b",
+      "experiment": "E2",
+      "model": "EleutherAI/pythia-1.4b",
+      "hardware": "h100",
+      "metric": "final_training_loss",
+      "predicted": 2.301203,
+      "observed": 1.977952,
+      "abs_rel_err_pct": 16.34,
+      "provenance": {
+        "tier": "T2",
+        "source": "EleutherAI official WandB project eleutherai/pythia (linked from EleutherAI/pythia README line 73), run vd5ogsc6: train/lm_loss of final checkpoint (step 143000 = 299,892,736,000 tokens, /fsx/pile standard, bs1024). https://wandb.ai/eleutherai/pythia/runs/vd5ogsc6",
+        "date": "2026-07-17"
+      },
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "status": "observed_t2",
+      "ci_covered": false,
+      "predicted_loss_ci": [2.231941, 2.370465],
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e2_quality/model_configs/pythia_1p4b.json --hardware h100 --training-tokens 299892736000 --pretraining-context-length 2048 --context-length 2048 --apply scale_n_layers:delta=0 --no-pareto --json",
+        "ac_raw_output": "validation/e2_quality/runs/e2_pythia_1p4b__stock",
+        "config_path": "validation/e2_quality/model_configs/pythia_1p4b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": {
+        "measurement": "official eval run on final checkpoint; train/valid/test trio 1.977952 / 1.960450 / 1.966468",
+        "corroboration": "run 3bj0rp1k (bs512 replication, 286000 steps x 512 x 2048 = same 299.9B tokens): train/lm_loss 1.965073; spread vs primary 0.013",
+        "anti_cherry_pick": "selected from a full 42-run scan of the project carrying final loss trios; deduped (2.039912), non-1024-batch and early-stop variants excluded; scan at validation/e2_quality/observed/pythia_eval_sweep_scan.json",
+        "evidence": "validation/e2_quality/observed/wandb_evidence.json"
+      }
+    },
+    {
+      "anchor_id": "e2_pythia_12b",
+      "experiment": "E2",
+      "model": "EleutherAI/pythia-12b",
+      "hardware": "h100",
+      "metric": "final_training_loss",
+      "predicted": 2.150205,
+      "observed": 1.757044,
+      "abs_rel_err_pct": 22.38,
+      "provenance": {
+        "tier": "T2",
+        "source": "EleutherAI official WandB project eleutherai/pythia, run kg5ni1dl: train/lm_loss of final checkpoint (step 143000 = 299,892,736,000 tokens, /fsx/pile standard, bs1024). https://wandb.ai/eleutherai/pythia/runs/kg5ni1dl",
+        "date": "2026-07-17"
+      },
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "status": "observed_t2",
+      "ci_covered": false,
+      "predicted_loss_ci": [2.085698, 2.214711],
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e2_quality/model_configs/pythia_12b.json --hardware h100 --training-tokens 299892736000 --pretraining-context-length 2048 --context-length 2048 --apply scale_n_layers:delta=0 --no-pareto --json",
+        "ac_raw_output": "validation/e2_quality/runs/e2_pythia_12b__stock",
+        "config_path": "validation/e2_quality/model_configs/pythia_12b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": {
+        "measurement": "official eval run on final checkpoint; train/valid/test trio 1.757044 / 1.741183 / 1.741121",
+        "corroboration": "independent eval run 3hssg7up: train/lm_loss 1.757780 (spread 7e-4); mid-run training segments (steps 1.24e5-1.26e5) show 1.73-1.78, consistent trajectory",
+        "anti_cherry_pick": "same 42-run scan as e2_pythia_1p4b",
+        "evidence": "validation/e2_quality/observed/wandb_evidence.json"
+      }
+    },
+    {
+      "anchor_id": "e2_smollm3_3b",
+      "experiment": "E2",
+      "model": "HuggingFaceTB/SmolLM3-3B",
+      "hardware": "h100",
+      "metric": "final_training_loss",
+      "predicted": 2.095947,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "status": "dropped_no_official_observation",
+      "ci_covered": null,
+      "predicted_loss_ci": [1.927055, 2.264839],
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e2_quality/model_configs/smollm3_3b.json --hardware h100 --training-tokens 11200000000000 --pretraining-context-length 65536 --context-length 65536 --apply scale_n_layers:delta=0 --no-pareto --json",
+        "ac_raw_output": "validation/e2_quality/runs/e2_smollm3_3b__stock",
+        "config_path": "validation/e2_quality/model_configs/smollm3_3b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": {
+        "drop_reason": "no official final training loss number and no official full-run (11.2e12-token) loss curve published as of 2026-07-17; checked: HF blog smollm3 (no loss figure/number; promises future logs), model cards SmolLM3-3B/-3B-Base, SmolLM3-3B-checkpoints (weights only), huggingface/smollm repo (configs only), Smol Training Playbook + public chart data (ablation curves <= 1.0e11 tokens only), WandB public probes (none), HF dataset search (no logs released)",
+        "partial_reference": "official main-run curve for first 7.24e11 tokens only (run elie-48n-1004-part1, GBS 2.36M matches SmolLM3): end-of-segment lm_loss ~2.24-2.28, trajectory reference only, not an anchor observation; saved at validation/e2_quality/observed/smollm3_mainrun_first_724B_tokens_loss.csv",
+        "blocker": "training logs announced but not released as of 2026-07-17; re-check on release"
+      }
+    }
+  ]
+}

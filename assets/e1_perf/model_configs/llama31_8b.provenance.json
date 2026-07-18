@@ -1,0 +1,58 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1",
+    "file_role": "provenance sidecar for llama31_8b.json (E1 anchor fleet)"
+  },
+  "model": "meta-llama/Llama-3.1-8B",
+  "ac_config": "llama31_8b.json",
+  "date_accessed": "2026-07-17",
+  "sources": {
+    "S1": {
+      "name": "meta-llama/llama-models (official Meta GitHub), models/sku_list.py, llama3_1_8b arch_args",
+      "url": "https://raw.githubusercontent.com/meta-llama/llama-models/main/models/sku_list.py",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    },
+    "S2": {
+      "name": "meta-llama/llama-models, models/llama3/model.py (official FFN hidden-dim derivation)",
+      "url": "https://raw.githubusercontent.com/meta-llama/llama-models/main/models/llama3/model.py",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    },
+    "S3": {
+      "name": "The Llama 3 Herd of Models, arXiv:2407.21783v3, Table 3 (architecture hyperparameters) + Section 3 text (128K vocab, RoPE base 500,000, GQA 8 KV heads)",
+      "url": "https://arxiv.org/abs/2407.21783",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    },
+    "S4": {
+      "name": "meta-llama/llama-models, models/llama3_1/MODEL_CARD.md (release date, 128k context, GQA, 15T+ tokens)",
+      "url": "https://raw.githubusercontent.com/meta-llama/llama-models/main/models/llama3_1/MODEL_CARD.md",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    }
+  },
+  "fields": {
+    "d_model": {"value": 4096, "source": "S1 (dim), S3 (Model Dimension 4,096)", "tier": "T2"},
+    "n_layers": {"value": 32, "source": "S1 (n_layers), S3 (Layers 32)", "tier": "T2"},
+    "n_heads": {"value": 32, "source": "S1 (n_heads), S3 (Attention Heads 32)", "tier": "T2"},
+    "n_kv_heads": {"value": 8, "source": "S1 (n_kv_heads), S3 (Key/Value Heads 8)", "tier": "T2"},
+    "d_head": {"value": 128, "source": "derived: d_model/n_heads = 4096/32 (S1)", "tier": "T2"},
+    "ffn_dim": {"value": 14336, "source": "S2 official formula: int(2*(4*4096)/3)=10922; int(1.3*10922)=14198; round up to multiple 1024 -> 14336; cross-check S3 Table 3 (FFN Dimension 14,336)", "tier": "T2"},
+    "vocab_size": {"value": 128256, "source": "S1 (LLAMA3_VOCAB_SIZE = 128256 constant), S3 text (vocabulary with 128K tokens)", "tier": "T2"},
+    "rope_base": {"value": 500000, "source": "S1 (rope_theta 500000.0), S3 text (RoPE base frequency 500,000)", "tier": "T2"},
+    "rope_scaling": {"value": "llama3-type, factor 8, 8192 -> 131072; NOT representable in AC schema 0.3, encoded as method none + original_max_position 8192", "source": "S1 (use_scaled_rope true), S4 (context length 128k)", "tier": "T2"},
+    "rms_norm_eps": {"value": 1e-05, "source": "S1 (norm_eps)", "tier": "T2"},
+    "tied_embeddings": {"value": false, "source": "S1/S2 (Llama 3 reference implementation uses separate tok_embeddings and output projections)", "tier": "T2"},
+    "pretrain_context": {"value": 8192, "source": "S1 (use_scaled_rope with original 8k), S3 (8k pretraining context extended to 128K)", "tier": "T2"},
+    "total_params_b": {"value": 8.030257152, "source": "computed with AC parameter ledger from S1/S3 dims; consistent with S4 model class (8B)", "tier": "T2"}
+  },
+  "notes": [
+    "meta-llama/Llama-3.1-8B on Hugging Face is license-gated (HTTP 401 on raw config.json without an accepted-license token), so the gated config.json was NOT used; every field above comes from Meta's official GitHub repository and the arXiv paper, both public.",
+    "Serving anchor will use HF repo meta-llama/Llama-3.1-8B (base); requires HF_TOKEN with accepted Llama 3.1 Community License on the rented node."
+  ]
+}

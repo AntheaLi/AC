@@ -1,0 +1,9 @@
+SYNTHETIC PARSER SELF-TEST FIXTURE — NOT A MEASUREMENT.
+
+ac_version: 0.4.0 | quality_model_version: effective_capacity_v2
+git_commit: c170cda | experiment_date: 2026-07-17 | agent_wave: gate2-wave1
+
+The numbers in raw_logs/ here were hand-fabricated on 2026-07-17 to prove that
+parse_logs.py fills observed/abs_rel_err_pct/provenance correctly. They carry
+no empirical content and must never be cited as T1 data. The real benchmark
+output of run_benchmarks.sh goes to validation/e1_perf/raw_logs/ (wave 2).

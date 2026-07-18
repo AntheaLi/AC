@@ -1,0 +1,161 @@
+{
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "ac 0.4.0",
+    "generated_at": "2026-07-17T00:00:00+00:00",
+    "input_hardware": null,
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent": "gate2-wave1",
+    "task": "A-E3 preregistration",
+    "model_name": "deepseek-v3-mla-moe-k0",
+    "source_note": "DeepSeek-V3 (arXiv:2412.19437) flattened to all-MoE single band (first_k_dense_replace=0 counterfactual); wave-2 applies densify_first_k k=3 (actual V3) / k=1 (K2 choice).",
+    "params": {
+      "total_b": 703.686,
+      "active_b": 37.45,
+      "embed_b": 0.9,
+      "unembed_b": 0.9
+    },
+    "input_constraints": {
+      "workload": "pretraining",
+      "slo": {}
+    },
+    "predicted": {},
+    "search_stats": {}
+  },
+  "parallelism": {
+    "tensor_parallel": 8,
+    "pipeline_parallel": 1,
+    "data_parallel": 8,
+    "expert_parallel": 8,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 7168,
+    "n_layers": 61,
+    "vocab_size": 129280,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 10000,
+      "scaling": {
+        "method": "yarn",
+        "factor": 40,
+        "original_max_position": 4096
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60
+        ],
+        "type": "transformer_block",
+        "attention": {
+          "type": "mla",
+          "n_heads": 128,
+          "n_kv_heads": 128,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {
+            "qk": "bf16",
+            "v": "bf16",
+            "output": "bf16"
+          },
+          "kv_latent_dim": 512,
+          "q_latent_dim": 1536,
+          "rope_head_dim": 64,
+          "nope_head_dim": 128
+        },
+        "ffn": {
+          "type": "moe",
+          "n_experts": 256,
+          "top_k": 8,
+          "expert_dim": 2048,
+          "shared_expert": {
+            "ffn_dim": 2048,
+            "precision": "bf16"
+          },
+          "router": {
+            "type": "topk_softmax",
+            "aux_loss_coef": 0.001,
+            "z_loss_coef": 0.0
+          },
+          "capacity_factor": 1.25,
+          "precision": "bf16"
+        },
+        "normalization": {
+          "type": "rmsnorm",
+          "eps": 1e-06,
+          "precision": "bf16"
+        },
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ],
+    "n_dense_ffn_layers": 0
+  }
+}

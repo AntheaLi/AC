@@ -1,0 +1,201 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1"
+  },
+  "cutoff": "2024-01-01",
+  "pairs_total": 11,
+  "pairs_kept_n": 4,
+  "pairs_dropped_n": 7,
+  "kept": [
+    {
+      "id": "ainslie2023_gqa8_vs_mha",
+      "publication_date": "2023-05-22",
+      "term": "architecture_residual"
+    },
+    {
+      "id": "ainslie2023_mqa_vs_mha",
+      "publication_date": "2023-05-22",
+      "term": "architecture_residual"
+    },
+    {
+      "id": "mistral2023_swa_ppl_hit",
+      "publication_date": "2023-10-10",
+      "term": "attention_locality"
+    },
+    {
+      "id": "peng2024_yarn_vs_pi",
+      "publication_date": "2023-08-31",
+      "term": "context_utility"
+    }
+  ],
+  "dropped": [
+    {
+      "id": "waleffe2024_pure_mamba_vs_hybrid_8b",
+      "publication_date": "2024-06-12",
+      "term": "state_residual"
+    },
+    {
+      "id": "waleffe2024_hybrid_vs_transformer_8b",
+      "publication_date": "2024-06-12",
+      "term": "state_residual"
+    },
+    {
+      "id": "jamba2024_ratio_parity_256k",
+      "publication_date": "2024-03-28",
+      "term": "state_residual"
+    },
+    {
+      "id": "deepseek2024_mla_vs_mha",
+      "publication_date": "2024-05-07",
+      "term": "architecture_residual"
+    },
+    {
+      "id": "gemma2_2024_local_global_parity",
+      "publication_date": "2024-07-31",
+      "term": "attention_locality"
+    },
+    {
+      "id": "deepseekmoe2024_capacity",
+      "publication_date": "2024-01-11",
+      "term": "effective_capacity"
+    },
+    {
+      "id": "deepseekv3_2024_mtp",
+      "publication_date": "2024-12-27",
+      "term": "mtp_residual"
+    }
+  ],
+  "term_pair_counts": {
+    "state_residual": {
+      "full": 3,
+      "pre2024": 0
+    },
+    "architecture_residual": {
+      "full": 3,
+      "pre2024": 2
+    },
+    "attention_locality": {
+      "full": 2,
+      "pre2024": 1
+    },
+    "effective_capacity": {
+      "full": 1,
+      "pre2024": 0
+    },
+    "moe_residual": {
+      "full": 0,
+      "pre2024": 0
+    },
+    "mtp_residual": {
+      "full": 1,
+      "pre2024": 0
+    },
+    "context_utility": {
+      "full": 1,
+      "pre2024": 1
+    },
+    "precision_residual": {
+      "full": 0,
+      "pre2024": 0
+    },
+    "large_shape_stability_prior": {
+      "full": 0,
+      "pre2024": 0
+    },
+    "risk_residual": {
+      "full": 0,
+      "pre2024": 0
+    }
+  },
+  "deanchored_terms": [
+    "effective_capacity",
+    "mtp_residual",
+    "state_residual"
+  ],
+  "fitted_scales_diagnostic": {
+    "state_residual": {
+      "full": [
+        1.652,
+        0.965,
+        1.635
+      ],
+      "pre2024": [
+        null,
+        0.0,
+        0.0
+      ]
+    },
+    "architecture_residual": {
+      "full": [
+        0.218,
+        -1.013,
+        1.241
+      ],
+      "pre2024": [
+        0.222,
+        -0.814,
+        1.145
+      ]
+    },
+    "attention_locality": {
+      "full": [
+        1.032,
+        0.002,
+        0.016
+      ],
+      "pre2024": [
+        1.032,
+        0.018,
+        0.018
+      ]
+    },
+    "effective_capacity": {
+      "full": [
+        3.833,
+        -2.389,
+        2.389
+      ],
+      "pre2024": [
+        null,
+        0.0,
+        0.0
+      ]
+    },
+    "mtp_residual": {
+      "full": [
+        null,
+        -0.508,
+        0.508
+      ],
+      "pre2024": [
+        null,
+        0.0,
+        0.0
+      ]
+    },
+    "context_utility": {
+      "full": [
+        1.847,
+        -0.141,
+        0.141
+      ],
+      "pre2024": [
+        1.847,
+        -0.141,
+        0.141
+      ]
+    }
+  },
+  "artifacts_sha256": {
+    "corpus_full": "70a6bd5837342db410c8858f52dbc30ae845cd46f7521086003bcc5c80e15aa6",
+    "corpus_pre2024": "1459327688906494b4c3df80dfb2bbf37b3cbfe3a70d37dca33e20aa49b137f2",
+    "priors_pre2024_yaml": "e59cbdee29a5658a2ba5dac44589a64d645c29de43a9639803c7e8341e06e2a0",
+    "pair_fit_full_json": "bd441f8ddda645abb37d66b7df42ad6a3954bb95db8ea96c4965ad9e56c11fee",
+    "pair_fit_pre2024_json": "2dafe2721a762c8f11569d73c881d555bea819984c09dd9b8cde1d97b9af7f1f"
+  },
+  "priors_path": "validation/e2_quality/priors_pre2024.yaml"
+}

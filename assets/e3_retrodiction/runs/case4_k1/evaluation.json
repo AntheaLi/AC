@@ -1,0 +1,410 @@
+{
+  "baseline_name": "deepseek-v3-mla-moe-k0",
+  "binding_axes_baseline": [],
+  "binding_axes_introduced": [],
+  "binding_axes_relieved": [],
+  "delta_args": {
+    "k": 1
+  },
+  "delta_name": "densify_first_k",
+  "delta_summary": {},
+  "feasible": true,
+  "field_changes": [
+    {
+      "baseline": 703.685745,
+      "candidate": 692.411455,
+      "field": "total_params_b"
+    },
+    {
+      "baseline": 0,
+      "candidate": 1,
+      "field": "n_dense_ffn_layers"
+    },
+    {
+      "baseline": null,
+      "candidate": [
+        "densify_first_k"
+      ],
+      "field": "applied_deltas"
+    }
+  ],
+  "hardware": "h100",
+  "justification": "Baseline has no binding stresses; transformation is exploratory. Applying first-K dense FFN lowers training-memory by 0.03; no binding axis was relieved. Quality gain: -0.0030 MoE, +0.0001 shape-law (-0.0029 total residual change).",
+  "metrics": {
+    "active_params_b": {
+      "baseline": 35.592361984,
+      "candidate": 35.240040448,
+      "delta": -0.35232153599999805,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "active_params_b",
+      "pct_change": -0.9898796156275855
+    },
+    "kv_cache_gb": {
+      "baseline": 2.14453125,
+      "candidate": 2.14453125,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "kv_cache_gb",
+      "pct_change": 0.0
+    },
+    "memory_per_gpu_gb": {
+      "baseline": 46.053464087792904,
+      "candidate": 45.725339087792904,
+      "delta": -0.328125,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "memory_per_gpu_gb",
+      "pct_change": -0.7124871201316949
+    },
+    "predicted_loss": {
+      "baseline": 1.8617988948862076,
+      "candidate": 1.8564242347788218,
+      "delta": -0.0053746601073858535,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "predicted_loss",
+      "pct_change": -0.28868102361368897
+    },
+    "prefill_time_ms": {
+      "baseline": 1795.2490489100835,
+      "candidate": 1794.0970190566456,
+      "delta": -1.1520298534378526,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "prefill_time_ms",
+      "pct_change": -0.06417103265629151
+    },
+    "quality_architecture_residual": {
+      "baseline": 0.002343346209109037,
+      "candidate": 0.0023993050162977995,
+      "delta": 5.5958807188762495e-05,
+      "direction": "worsens",
+      "lower_is_better": true,
+      "name": "quality_architecture_residual",
+      "pct_change": 2.387987185642474
+    },
+    "quality_context_utility": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_context_utility",
+      "pct_change": 0.0
+    },
+    "quality_data_quality": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_data_quality",
+      "pct_change": 0.0
+    },
+    "quality_effective_capacity": {
+      "baseline": -0.0012320290133671099,
+      "candidate": -0.0012879456129702227,
+      "delta": -5.591659960311286e-05,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "quality_effective_capacity",
+      "pct_change": -4.538578150062713
+    },
+    "quality_effective_data": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_effective_data",
+      "pct_change": 0.0
+    },
+    "quality_feasibility": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_feasibility",
+      "pct_change": 0.0
+    },
+    "quality_large_shape_stability_prior": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_large_shape_stability_prior",
+      "pct_change": 0.0
+    },
+    "quality_moe_residual": {
+      "baseline": -0.011931471805599454,
+      "candidate": -0.014931471805599453,
+      "delta": -0.002999999999999999,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "quality_moe_residual",
+      "pct_change": -25.143587051784305
+    },
+    "quality_precision_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_precision_residual",
+      "pct_change": 0.0
+    },
+    "quality_risk_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_risk_residual",
+      "pct_change": 0.0
+    },
+    "quality_spine": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_spine",
+      "pct_change": 0.0
+    },
+    "quality_state_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_state_residual",
+      "pct_change": 0.0
+    },
+    "quality_vocab_residual": {
+      "baseline": 0.005066982707528095,
+      "candidate": 0.00500415870189893,
+      "delta": -6.282400562916506e-05,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "quality_vocab_residual",
+      "pct_change": -1.239870140780754
+    },
+    "scaling_law_loss": {
+      "baseline": 1.8702545830951174,
+      "candidate": 1.870505414667973,
+      "delta": 0.0002508315728555477,
+      "direction": "worsens",
+      "lower_is_better": true,
+      "name": "scaling_law_loss",
+      "pct_change": 0.01341162722566048
+    },
+    "serving_tbt_ms": {
+      "baseline": 22.415374045398273,
+      "candidate": 22.36287269888466,
+      "delta": -0.052501346513611935,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "serving_tbt_ms",
+      "pct_change": -0.23422025618345688
+    },
+    "total_params_b": {
+      "baseline": 703.685745,
+      "candidate": 692.411455,
+      "delta": -11.27428999999995,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "total_params_b",
+      "pct_change": -1.6021768353428774
+    },
+    "training_memory_per_gpu_gb": {
+      "baseline": 165.13135091288603,
+      "candidate": 162.50635091288603,
+      "delta": -2.625,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "training_memory_per_gpu_gb",
+      "pct_change": -1.5896436294430858
+    },
+    "training_tps": {
+      "baseline": 4608.887073530899,
+      "candidate": 4647.947709508905,
+      "delta": 39.06063597800585,
+      "direction": "improves",
+      "lower_is_better": false,
+      "name": "training_tps",
+      "pct_change": 0.8475069003606814
+    }
+  },
+  "pareto_axes": [
+    "predicted_loss",
+    "serving_tbt_ms",
+    "prefill_time_ms",
+    "memory_per_gpu_gb",
+    "training_tps"
+  ],
+  "pareto_distance": 0.0,
+  "pareto_dominated_count": 0,
+  "pareto_dominates_count": 0,
+  "pareto_frontier_size": 0,
+  "pareto_position": "EQUIVALENT",
+  "quality_delta": {
+    "attention_residual": 0.0,
+    "context_extrapolation": 0.0,
+    "fa_underrun": 0.0,
+    "moe_residual": -0.002999999999999999,
+    "precision_loss": 0.0,
+    "shape_law_loss": 5.600000000000006e-05,
+    "state_residual": 0.0
+  },
+  "quality_delta_total": -0.002943999999999999,
+  "reason_if_infeasible": "",
+  "resolved_workload": {
+    "context_length": 32768,
+    "cp": 1,
+    "dp": 8,
+    "ep": 8,
+    "pp": 1,
+    "prompt_len": 32768,
+    "serving_batch": 8,
+    "serving_tbt_ms_budget": 80.0,
+    "serving_ttft_ms_budget": 2000.0,
+    "tp": 8,
+    "workload_preset": "long_context"
+  },
+  "severe_stress_regression": false,
+  "stress_baseline": {
+    "active_axes": [
+      "hbm_bw_decode",
+      "hbm_capacity",
+      "kv_footprint",
+      "tc_util_decode",
+      "sram_tile_fit",
+      "all_reduce",
+      "all_to_all"
+    ],
+    "all_reduce": 0.005877439084106387,
+    "all_to_all": 0.014693597710265967,
+    "arch_name": "deepseek-v3-mla-moe-k0",
+    "bands": {
+      "all_reduce": "relaxed",
+      "all_to_all": "relaxed",
+      "hbm_bw_decode": "loaded",
+      "hbm_bw_prefill": "relaxed",
+      "hbm_capacity": "relaxed",
+      "kv_footprint": "relaxed",
+      "sram_tile_fit": "relaxed",
+      "tc_util_decode": "relaxed",
+      "tc_util_prefill": "loaded",
+      "training_mem": "violated"
+    },
+    "binding_axes": [],
+    "hardware_id": "h100",
+    "hbm_bw_decode": 0.8958106129664409,
+    "hbm_bw_prefill": 0.000612120071419542,
+    "hbm_capacity": 0.5756683010974113,
+    "intermediates": {
+      "a2a_per_layer_bytes": 2007040.0,
+      "act_bytes": 5548007075.1452465,
+      "ar_per_layer_bytes": 802816.0,
+      "decode_flops": 168542863360.0,
+      "decode_layer_time_s": 0.0001517698039933665,
+      "decode_step_s": 0.009257958043595355,
+      "decode_weight_bytes": 9361430016.0,
+      "grad_bytes": 21990179520.0,
+      "hbm_bw_bytes_s": 3350000000000.0,
+      "hbm_cap_bytes": 85899345920,
+      "kv_bytes": 18421383168.0,
+      "link_bw_ep_bytes_s": 900000000000.0,
+      "link_bw_tp_bytes_s": 900000000000.0,
+      "opt_bytes": 131941077120.0,
+      "peak_flops_s": 495000000000000.0,
+      "prefill_flops": 5539580098904064.0,
+      "prefill_step_s": 15.131236457837367,
+      "state_bytes_decode": 0.0,
+      "train_act_bytes": 22192028300.580986,
+      "training_grad_bytes": 21990179520.0,
+      "training_optimizer_bytes": 131941077120.0,
+      "training_weight_bytes": 21990179520.0,
+      "weight_bytes": 25480140288.0
+    },
+    "kv_footprint": 0.214453125,
+    "notes": [],
+    "phase": "decode",
+    "schema_version": 1,
+    "sram_tile_fit": 0.0,
+    "tc_util_decode": 0.03677815685134327,
+    "tc_util_prefill": 0.7396005566405893,
+    "training_mem": 2.3063442723427547,
+    "workload_id": "decode-b8-prefill32768-kv32768-train8192"
+  },
+  "stress_candidate": {
+    "active_axes": [
+      "hbm_bw_decode",
+      "hbm_capacity",
+      "kv_footprint",
+      "tc_util_decode",
+      "sram_tile_fit",
+      "all_reduce",
+      "all_to_all"
+    ],
+    "all_reduce": 0.005894376312661758,
+    "all_to_all": 0.014735940781654395,
+    "arch_name": "deepseek-v3-mla-moe-k0+densify_first_k",
+    "bands": {
+      "all_reduce": "relaxed",
+      "all_to_all": "relaxed",
+      "hbm_bw_decode": "loaded",
+      "hbm_bw_prefill": "relaxed",
+      "hbm_capacity": "relaxed",
+      "kv_footprint": "relaxed",
+      "sram_tile_fit": "relaxed",
+      "tc_util_decode": "relaxed",
+      "tc_util_prefill": "loaded",
+      "training_mem": "violated"
+    },
+    "binding_axes": [],
+    "hardware_id": "h100",
+    "hbm_bw_decode": 0.8955439131089674,
+    "hbm_bw_prefill": 0.0006054758016785373,
+    "hbm_capacity": 0.5715667385974113,
+    "intermediates": {
+      "a2a_per_layer_bytes": 2007040.0,
+      "act_bytes": 5548007075.1452465,
+      "ar_per_layer_bytes": 802816.0,
+      "decode_flops": 168542863360.0,
+      "decode_layer_time_s": 0.00015133370020194113,
+      "decode_step_s": 0.00923135571231841,
+      "decode_weight_bytes": 9273349632.0,
+      "grad_bytes": 21637857984.0,
+      "hbm_bw_bytes_s": 3350000000000.0,
+      "hbm_cap_bytes": 85899345920,
+      "kv_bytes": 18421383168.0,
+      "link_bw_ep_bytes_s": 900000000000.0,
+      "link_bw_tp_bytes_s": 900000000000.0,
+      "opt_bytes": 129827147904.0,
+      "peak_flops_s": 495000000000000.0,
+      "prefill_flops": 5539580098904064.0,
+      "prefill_step_s": 15.123581996325363,
+      "state_bytes_decode": 0.0,
+      "train_act_bytes": 22192028300.580986,
+      "training_grad_bytes": 21637857984.0,
+      "training_optimizer_bytes": 129827147904.0,
+      "training_weight_bytes": 21637857984.0,
+      "weight_bytes": 25127818752.0
+    },
+    "kv_footprint": 0.214453125,
+    "notes": [],
+    "phase": "decode",
+    "schema_version": 1,
+    "sram_tile_fit": 0.0,
+    "tc_util_decode": 0.03688414179470423,
+    "tc_util_prefill": 0.7399748888587396,
+    "training_mem": 2.273531772342755,
+    "workload_id": "decode-b8-prefill32768-kv32768-train8192"
+  },
+  "stress_relief_score": 0.0
+}

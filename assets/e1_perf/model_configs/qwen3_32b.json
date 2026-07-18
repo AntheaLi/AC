@@ -1,0 +1,72 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1",
+    "file_role": "E1 anchor fleet AC baseline config (hand-written, wave 1 scaffold)"
+  },
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "v0.4.0",
+    "generated_at": "2026-07-17T00:00:00+00:00",
+    "input_hardware": "h100",
+    "model_name": "qwen3-32b",
+    "source_note": "Qwen Qwen3-32B (base): 64 dense decoder layers, d_model 5120 with decoupled attention width (64 Q heads x head_dim 128 = 8192 inner, out-proj back to 5120; same decoupled-width pattern as configs/gpt_oss_120b.json), GQA 8 KV heads, SwiGLU FFN 25600, vocab 151936, RoPE theta 1000000 (rope_scaling null), RMSNorm eps 1e-6, untied embeddings. Architecture facts: official HF config.json of Qwen/Qwen3-32B (hidden_size 5120, num_hidden_layers 64, num_attention_heads 64, num_key_value_heads 8, head_dim 128, intermediate_size 25600, vocab_size 151936, rope_theta 1000000, rms_norm_eps 1e-6, max_position_embeddings 40960, tie_word_embeddings false); layer/head counts cross-checked against the Qwen3 Technical Report (arXiv 2505.09388, Table 1: Qwen3-32B 64 layers, 64/8 heads, 128K context). original_max_position set to 32768 (native pretrain context). Unrepresented in schema 0.3: per-head QK RMSNorm (q_norm/k_norm), ~16.8M params (~0.05%) not booked by AC's ledger; noted here, not modeled. params counts follow AC's parameter ledger (2*vocab*d embeddings + 2*d_model RMSNorm per layer; attention projections use n_heads*d_head independently of d_model, matching the Wave-18g decoupled-width support); for dense models the ledger books active == total, matching configs/mistral_7b.json conventions.",
+    "params": {
+      "total_b": 32.76210176,
+      "active_b": 32.76210176,
+      "kind": "dense"
+    },
+    "input_constraints": {},
+    "predicted": {},
+    "search_stats": {}
+  },
+  "parallelism": {
+    "tensor_parallel": 2,
+    "pipeline_parallel": 1,
+    "data_parallel": 1,
+    "expert_parallel": 1,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 5120,
+    "n_layers": 64,
+    "vocab_size": 151936,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 1000000,
+      "scaling": {
+        "method": "none",
+        "factor": 1.0,
+        "original_max_position": 32768
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63],
+        "type": "transformer_block",
+        "attention": {
+          "type": "full",
+          "n_heads": 64,
+          "n_kv_heads": 8,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {"qk": "bf16", "v": "bf16", "output": "bf16"}
+        },
+        "ffn": {
+          "type": "swiglu",
+          "ffn_dim": 25600,
+          "precision": "bf16"
+        },
+        "normalization": {"type": "rmsnorm", "eps": 1e-06, "precision": "bf16"},
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ]
+  }
+}

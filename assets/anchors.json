@@ -1,0 +1,991 @@
+{
+  "ac_version": "0.4.0",
+  "quality_model_version": "effective_capacity_v2",
+  "git_commit": "ab3c614",
+  "experiment_date": "2026-07-17",
+  "gate": "gate2",
+  "schema_version": "anchors_v1",
+  "anchors": [
+    {
+      "anchor_id": "e1_mistral_7b_tp1_decode_tbt_ms_p50",
+      "experiment": "E1",
+      "model": "mistralai/Mistral-7B-v0.1",
+      "hardware": "h100",
+      "metric": "decode_tbt_ms_p50",
+      "predicted": 8.216519832583115,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "mistral_7b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config configs/mistral_7b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_mistral_7b_tp1.json",
+        "config_path": "configs/mistral_7b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_mistral_7b_tp1_ttft_ms_p95",
+      "experiment": "E1",
+      "model": "mistralai/Mistral-7B-v0.1",
+      "hardware": "h100",
+      "metric": "ttft_ms_p95",
+      "predicted": 80.16864981928633,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "mistral_7b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config configs/mistral_7b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_mistral_7b_tp1.json",
+        "config_path": "configs/mistral_7b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_mistral_7b_tp1_peak_memory_gb",
+      "experiment": "E1",
+      "model": "mistralai/Mistral-7B-v0.1",
+      "hardware": "h100",
+      "metric": "peak_memory_gb",
+      "predicted": 13.88965787889832,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "mistral_7b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config configs/mistral_7b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_mistral_7b_tp1.json",
+        "config_path": "configs/mistral_7b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama31_8b_tp1_decode_tbt_ms_p50",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.1-8B",
+      "hardware": "h100",
+      "metric": "decode_tbt_ms_p50",
+      "predicted": 8.216519832583115,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama31_8b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama31_8b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama31_8b_tp1.json",
+        "config_path": "validation/e1_perf/model_configs/llama31_8b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama31_8b_tp1_ttft_ms_p95",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.1-8B",
+      "hardware": "h100",
+      "metric": "ttft_ms_p95",
+      "predicted": 80.16864981928633,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama31_8b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama31_8b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama31_8b_tp1.json",
+        "config_path": "validation/e1_perf/model_configs/llama31_8b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama31_8b_tp1_peak_memory_gb",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.1-8B",
+      "hardware": "h100",
+      "metric": "peak_memory_gb",
+      "predicted": 15.35840787889832,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama31_8b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama31_8b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama31_8b_tp1.json",
+        "config_path": "validation/e1_perf/model_configs/llama31_8b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_qwen3_8b_tp1_decode_tbt_ms_p50",
+      "experiment": "E1",
+      "model": "Qwen/Qwen3-8B",
+      "hardware": "h100",
+      "metric": "decode_tbt_ms_p50",
+      "predicted": 8.441839313148543,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "qwen3_8b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/qwen3_8b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_qwen3_8b_tp1.json",
+        "config_path": "validation/e1_perf/model_configs/qwen3_8b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_qwen3_8b_tp1_ttft_ms_p95",
+      "experiment": "E1",
+      "model": "Qwen/Qwen3-8B",
+      "hardware": "h100",
+      "metric": "ttft_ms_p95",
+      "predicted": 81.23700751423607,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "qwen3_8b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/qwen3_8b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_qwen3_8b_tp1.json",
+        "config_path": "validation/e1_perf/model_configs/qwen3_8b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_qwen3_8b_tp1_peak_memory_gb",
+      "experiment": "E1",
+      "model": "Qwen/Qwen3-8B",
+      "hardware": "h100",
+      "metric": "peak_memory_gb",
+      "predicted": 15.69390869140625,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "qwen3_8b_tp1",
+      "tp": 1,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/qwen3_8b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 1 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_qwen3_8b_tp1.json",
+        "config_path": "validation/e1_perf/model_configs/qwen3_8b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_qwen3_32b_tp2_decode_tbt_ms_p50",
+      "experiment": "E1",
+      "model": "Qwen/Qwen3-32B",
+      "hardware": "h100",
+      "metric": "decode_tbt_ms_p50",
+      "predicted": 19.212344425681117,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "qwen3_32b_tp2",
+      "tp": 2,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/qwen3_32b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 2 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_qwen3_32b_tp2.json",
+        "config_path": "validation/e1_perf/model_configs/qwen3_32b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_qwen3_32b_tp2_ttft_ms_p95",
+      "experiment": "E1",
+      "model": "Qwen/Qwen3-32B",
+      "hardware": "h100",
+      "metric": "ttft_ms_p95",
+      "predicted": 159.0601812827049,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "qwen3_32b_tp2",
+      "tp": 2,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/qwen3_32b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 2 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_qwen3_32b_tp2.json",
+        "config_path": "validation/e1_perf/model_configs/qwen3_32b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_qwen3_32b_tp2_peak_memory_gb",
+      "experiment": "E1",
+      "model": "Qwen/Qwen3-32B",
+      "hardware": "h100",
+      "metric": "peak_memory_gb",
+      "predicted": 30.8792724609375,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "qwen3_32b_tp2",
+      "tp": 2,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/qwen3_32b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 2 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_qwen3_32b_tp2.json",
+        "config_path": "validation/e1_perf/model_configs/qwen3_32b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama33_70b_tp4_decode_tbt_ms_p50",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
+      "hardware": "h100",
+      "metric": "decode_tbt_ms_p50",
+      "predicted": 21.83671473616046,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama33_70b_tp4",
+      "tp": 4,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama33_70b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 4 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama33_70b_tp4.json",
+        "config_path": "validation/e1_perf/model_configs/llama33_70b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama33_70b_tp4_ttft_ms_p95",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
+      "hardware": "h100",
+      "metric": "ttft_ms_p95",
+      "predicted": 167.72270709013324,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama33_70b_tp4",
+      "tp": 4,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama33_70b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 4 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama33_70b_tp4.json",
+        "config_path": "validation/e1_perf/model_configs/llama33_70b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama33_70b_tp4_peak_memory_gb",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
+      "hardware": "h100",
+      "metric": "peak_memory_gb",
+      "predicted": 33.111503100859366,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama33_70b_tp4",
+      "tp": 4,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama33_70b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 4 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama33_70b_tp4.json",
+        "config_path": "validation/e1_perf/model_configs/llama33_70b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama33_70b_tp8_decode_tbt_ms_p50",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
+      "hardware": "h100",
+      "metric": "decode_tbt_ms_p50",
+      "predicted": 14.233592286188106,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama33_70b_tp8",
+      "tp": 8,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama33_70b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 8 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama33_70b_tp8.json",
+        "config_path": "validation/e1_perf/model_configs/llama33_70b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama33_70b_tp8_ttft_ms_p95",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
+      "hardware": "h100",
+      "metric": "ttft_ms_p95",
+      "predicted": 100.74427511385079,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama33_70b_tp8",
+      "tp": 8,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama33_70b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 8 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama33_70b_tp8.json",
+        "config_path": "validation/e1_perf/model_configs/llama33_70b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama33_70b_tp8_peak_memory_gb",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.3-70B-Instruct",
+      "hardware": "h100",
+      "metric": "peak_memory_gb",
+      "predicted": 16.555751550429683,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama33_70b_tp8",
+      "tp": 8,
+      "ep": 1,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama33_70b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 8 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_llama33_70b_tp8.json",
+        "config_path": "validation/e1_perf/model_configs/llama33_70b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_gpt_oss_120b_tp8ep8_decode_tbt_ms_p50",
+      "experiment": "E1",
+      "model": "openai/gpt-oss-120b",
+      "hardware": "h100",
+      "metric": "decode_tbt_ms_p50",
+      "predicted": 3.4263895296368827,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "gpt_oss_120b_tp8ep8",
+      "tp": 8,
+      "ep": 8,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config configs/gpt_oss_120b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 8 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_gpt_oss_120b_tp8ep8.json",
+        "config_path": "configs/gpt_oss_120b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_gpt_oss_120b_tp8ep8_ttft_ms_p95",
+      "experiment": "E1",
+      "model": "openai/gpt-oss-120b",
+      "hardware": "h100",
+      "metric": "ttft_ms_p95",
+      "predicted": 25.607310878591974,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "gpt_oss_120b_tp8ep8",
+      "tp": 8,
+      "ep": 8,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config configs/gpt_oss_120b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 8 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_gpt_oss_120b_tp8ep8.json",
+        "config_path": "configs/gpt_oss_120b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_gpt_oss_120b_tp8ep8_peak_memory_gb",
+      "experiment": "E1",
+      "model": "openai/gpt-oss-120b",
+      "hardware": "h100",
+      "metric": "peak_memory_gb",
+      "predicted": 3.8543440103530884,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "gpt_oss_120b_tp8ep8",
+      "tp": 8,
+      "ep": 8,
+      "status": "awaiting_t1_measurement",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config configs/gpt_oss_120b.json --hardware h100 --workload chat --serving-batch 1 --context-length 2560 --prompt-len 2048 --tp 8 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/predict_gpt_oss_120b_tp8ep8.json",
+        "config_path": "configs/gpt_oss_120b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": null
+    },
+    {
+      "anchor_id": "e1_llama31_405b_h100_training_mfu_pct",
+      "experiment": "E1",
+      "model": "meta-llama/Llama-3.1-405B",
+      "hardware": "h100",
+      "metric": "training_mfu_pct",
+      "predicted": 26.24,
+      "observed": 40.5,
+      "abs_rel_err_pct": 35.21,
+      "provenance": {
+        "tier": "T2",
+        "source": "The Llama 3 Herd of Models, arXiv:2407.21783v3, Section 3.3.2 'Parallelism for Model Scaling', Table 4 (BF16 MFU 38-43%; 430/400/380 TFLOPs/GPU); registered value = interval midpoint. https://arxiv.org/abs/2407.21783",
+        "date": "2026-07-17"
+      },
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "llama31_405b_h100_training",
+      "tp": 8,
+      "ep": 1,
+      "status": "observed_t2",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e1_perf/model_configs/llama31_405b.json --hardware h100 --workload training --tp 8 --pp 14 --context-length 8192 --training-tokens 15600000000000 --apply scale_n_layers --apply-args delta=0 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/train_llama31_405b_h100.json",
+        "config_path": "validation/e1_perf/model_configs/llama31_405b.json",
+        "date": "2026-07-17",
+        "derivation": "implied MFU = 6 * 405.853372416e9 (AC ledger active) * (11930.687 tok/s/replica / 112 GPUs) / 989e12 (h100 datasheet bf16) = 26.24%; PP=18 sensitivity run: 25.98%"
+      },
+      "observed_notes": {
+        "observed_interval_pct": [
+          38.0,
+          43.0
+        ],
+        "abs_rel_err_pct_vs_nearest_edge_38": 30.95,
+        "ac_implied_tflops_per_gpu": 259.5,
+        "paper_tflops_per_gpu": [
+          430,
+          400,
+          380
+        ],
+        "secondary_evidence": "Llama-3.1 model card: 30.84M cumulative H100 GPU-hours -> wall-clock implied 34.6% MFU (includes downtime/all stages)",
+        "deviation": "AC config uses PP=14 (126 layers divisibility) vs paper PP=16 non-uniform split; sensitivity <1% (PP=18: 25.98%)"
+      }
+    },
+    {
+      "anchor_id": "e1_deepseek_v3_h800_training_mfu_pct",
+      "experiment": "E1",
+      "model": "deepseek-ai/DeepSeek-V3",
+      "hardware": "h800",
+      "metric": "training_mfu_pct",
+      "predicted": 9.13,
+      "observed": 34.64,
+      "abs_rel_err_pct": 73.64,
+      "provenance": {
+        "tier": "T2",
+        "source": "DeepSeek-V3 Technical Report, arXiv:2412.19437, Section 1, Table 1 'Training costs' (2,664K pre-train + 119K context ext + 5K post-train = 2,788K H800 GPU-hours; '180K H800 GPU hours per trillion tokens'; 14.8T tokens; 671B total / 37B activated). Registered value = pre-train-stage implied MFU: 6*37e9 FLOPs/token * 1543.2 tok/s/GPU / 989e12 = 34.64%. https://arxiv.org/abs/2412.19437",
+        "date": "2026-07-17"
+      },
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "anchor_key": "deepseek_v3_h800_training",
+      "tp": 8,
+      "ep": 8,
+      "status": "observed_t2",
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/deepseek_v3_mla_moe_k0.json --hardware h800 --workload training --training-tokens 14800000000000 --apply densify_first_k:k=3 --json --stdout",
+        "ac_raw_output": "validation/e1_perf/ac_runs/train_dsv3_h800.json",
+        "config_path": "validation/e3_retrodiction/model_configs/deepseek_v3_mla_moe_k0.json (E3-owned V3-like config; candidate after densify_first_k:k=3 = actual V3)",
+        "date": "2026-07-17",
+        "derivation": "implied MFU = 6 * 36.389e9 (AC ledger active, k3 candidate) * (3309.134 tok/s/replica / 8 GPUs) / 989e12 (h800 datasheet bf16) = 9.13%; k0 baseline: 9.13% (3214.079 tok/s/replica)"
+      },
+      "observed_notes": {
+        "observed_interval_pct": [
+          33.09,
+          34.64
+        ],
+        "interval_basis": "34.64% = pre-train stage (180K h per 1e12 tokens); 33.09% = all stages incl. extension+post (2.788M h total)",
+        "ac_implied_tflops_per_gpu": 90.3,
+        "observed_implied_tflops_per_gpu": 342.6,
+        "precision_caveat": "DeepSeek-V3 trained FP8 mixed-precision; AC config books bf16. Registered convention = bf16 datasheet peak both sides. vs fp8 datasheet (1979 TF): observed 17.3%, AC 4.6%",
+        "ac_memory_finding": "AC training_memory_per_gpu = 157.3 GiB > H800 80GB at TP8xEP8xPP1 — parallelism under-provisioned vs the real 2048-GPU DualPipe layout (recorded as protocol note)"
+      }
+    },
+    {
+      "anchor_id": "e2_olmo2_7b",
+      "experiment": "E2",
+      "model": "allenai/OLMo-2-1124-7B",
+      "hardware": "h100",
+      "metric": "final_training_loss",
+      "predicted": 2.001578,
+      "observed": 2.23052,
+      "abs_rel_err_pct": 10.26,
+      "provenance": {
+        "tier": "T2",
+        "source": "Ai2 official WandB project ai2-llm/OLMo-2-1124-7B, run uwjy7cji (OLMo-2-1124-7B-stage-1-run-11): train/CrossEntropyLoss at final step 928646 (= 3.895e12 tokens at GBS 1024 x 4096). Reached via the OLMo-2 paper (arXiv:2501.00656) 'WandB Logs' footnote https://api.wandb.ai/links/ai2-llm/fjn0v0ec. https://wandb.ai/ai2-llm/OLMo-2-1124-7B/runs/uwjy7cji",
+        "date": "2026-07-17"
+      },
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "status": "observed_t2",
+      "ci_covered": false,
+      "predicted_loss_ci": [
+        1.941531,
+        2.061625
+      ],
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e2_quality/model_configs/olmo2_7b.json --hardware h100 --training-tokens 4000000000000 --pretraining-context-length 4096 --context-length 4096 --apply scale_n_layers:delta=0 --no-pareto --json",
+        "ac_raw_output": "validation/e2_quality/runs/e2_olmo2_7b__stock",
+        "config_path": "validation/e2_quality/model_configs/olmo2_7b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": {
+        "measurement": "last logged train/CrossEntropyLoss of the final stage-1 segment; Z-loss logged separately (weight 1e-5, final 2.6e-4, not included)",
+        "endpoint_noise": "1647 logged points over steps 927000-928646: mean 2.22496, sd 0.01141, range [2.18883, 2.25795]; last-20 mean 2.22886 sd 0.01077",
+        "token_basis_caveat": "anchor tokens 4.0e12 (model card '4 Trillion'); paper: 3.9T stage-1 + 3x50B stage-2 on Dolmino mix with final soup. Observation taken at stage-1 endpoint 3.895e12 (same training distribution); stage-2/soup not a single training-distribution loss",
+        "figure_trap": "paper Figure 2 shows OLMo 2 curve only to ~2.5e12 tokens (x-axis aligned with OLMo-0424); not the endpoint",
+        "evidence": "validation/e2_quality/observed/wandb_evidence.json"
+      }
+    },
+    {
+      "anchor_id": "e2_pythia_1p4b",
+      "experiment": "E2",
+      "model": "EleutherAI/pythia-1.4b",
+      "hardware": "h100",
+      "metric": "final_training_loss",
+      "predicted": 2.301203,
+      "observed": 1.977952,
+      "abs_rel_err_pct": 16.34,
+      "provenance": {
+        "tier": "T2",
+        "source": "EleutherAI official WandB project eleutherai/pythia (linked from EleutherAI/pythia README line 73), run vd5ogsc6: train/lm_loss of final checkpoint (step 143000 = 299,892,736,000 tokens, /fsx/pile standard, bs1024). https://wandb.ai/eleutherai/pythia/runs/vd5ogsc6",
+        "date": "2026-07-17"
+      },
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "status": "observed_t2",
+      "ci_covered": false,
+      "predicted_loss_ci": [
+        2.231941,
+        2.370465
+      ],
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e2_quality/model_configs/pythia_1p4b.json --hardware h100 --training-tokens 299892736000 --pretraining-context-length 2048 --context-length 2048 --apply scale_n_layers:delta=0 --no-pareto --json",
+        "ac_raw_output": "validation/e2_quality/runs/e2_pythia_1p4b__stock",
+        "config_path": "validation/e2_quality/model_configs/pythia_1p4b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": {
+        "measurement": "official eval run on final checkpoint; train/valid/test trio 1.977952 / 1.960450 / 1.966468",
+        "corroboration": "run 3bj0rp1k (bs512 replication, 286000 steps x 512 x 2048 = same 299.9B tokens): train/lm_loss 1.965073; spread vs primary 0.013",
+        "anti_cherry_pick": "selected from a full 42-run scan of the project carrying final loss trios; deduped (2.039912), non-1024-batch and early-stop variants excluded; scan at validation/e2_quality/observed/pythia_eval_sweep_scan.json",
+        "evidence": "validation/e2_quality/observed/wandb_evidence.json"
+      }
+    },
+    {
+      "anchor_id": "e2_pythia_12b",
+      "experiment": "E2",
+      "model": "EleutherAI/pythia-12b",
+      "hardware": "h100",
+      "metric": "final_training_loss",
+      "predicted": 2.150205,
+      "observed": 1.757044,
+      "abs_rel_err_pct": 22.38,
+      "provenance": {
+        "tier": "T2",
+        "source": "EleutherAI official WandB project eleutherai/pythia, run kg5ni1dl: train/lm_loss of final checkpoint (step 143000 = 299,892,736,000 tokens, /fsx/pile standard, bs1024). https://wandb.ai/eleutherai/pythia/runs/kg5ni1dl",
+        "date": "2026-07-17"
+      },
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "status": "observed_t2",
+      "ci_covered": false,
+      "predicted_loss_ci": [
+        2.085698,
+        2.214711
+      ],
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e2_quality/model_configs/pythia_12b.json --hardware h100 --training-tokens 299892736000 --pretraining-context-length 2048 --context-length 2048 --apply scale_n_layers:delta=0 --no-pareto --json",
+        "ac_raw_output": "validation/e2_quality/runs/e2_pythia_12b__stock",
+        "config_path": "validation/e2_quality/model_configs/pythia_12b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": {
+        "measurement": "official eval run on final checkpoint; train/valid/test trio 1.757044 / 1.741183 / 1.741121",
+        "corroboration": "independent eval run 3hssg7up: train/lm_loss 1.757780 (spread 7e-4); mid-run training segments (steps 1.24e5-1.26e5) show 1.73-1.78, consistent trajectory",
+        "anti_cherry_pick": "same 42-run scan as e2_pythia_1p4b",
+        "evidence": "validation/e2_quality/observed/wandb_evidence.json"
+      }
+    },
+    {
+      "anchor_id": "e2_smollm3_3b",
+      "experiment": "E2",
+      "model": "HuggingFaceTB/SmolLM3-3B",
+      "hardware": "h100",
+      "metric": "final_training_loss",
+      "predicted": 2.095947,
+      "observed": null,
+      "abs_rel_err_pct": null,
+      "provenance": null,
+      "ac_version": "0.4.0",
+      "quality_model_version": "effective_capacity_v2",
+      "status": "dropped_no_official_observation",
+      "ci_covered": null,
+      "predicted_loss_ci": [
+        1.927055,
+        2.264839
+      ],
+      "predicted_provenance": {
+        "tier": "model-prediction",
+        "ac_command": "ac-delta-eval --baseline-config validation/e2_quality/model_configs/smollm3_3b.json --hardware h100 --training-tokens 11200000000000 --pretraining-context-length 65536 --context-length 65536 --apply scale_n_layers:delta=0 --no-pareto --json",
+        "ac_raw_output": "validation/e2_quality/runs/e2_smollm3_3b__stock",
+        "config_path": "validation/e2_quality/model_configs/smollm3_3b.json",
+        "date": "2026-07-17"
+      },
+      "observed_notes": {
+        "drop_reason": "no official final training loss number and no official full-run (11.2e12-token) loss curve published as of 2026-07-17; checked: HF blog smollm3 (no loss figure/number; promises future logs), model cards SmolLM3-3B/-3B-Base, SmolLM3-3B-checkpoints (weights only), huggingface/smollm repo (configs only), Smol Training Playbook + public chart data (ablation curves <= 1.0e11 tokens only), WandB public probes (none), HF dataset search (no logs released)",
+        "partial_reference": "official main-run curve for first 7.24e11 tokens only (run elie-48n-1004-part1, GBS 2.36M matches SmolLM3): end-of-segment lm_loss ~2.24-2.28, trajectory reference only, not an anchor observation; saved at validation/e2_quality/observed/smollm3_mainrun_first_724B_tokens_loss.csv",
+        "blocker": "training logs announced but not released as of 2026-07-17; re-check on release"
+      }
+    }
+  ],
+  "retrodiction_cases": [
+    {
+      "case_id": "case1a",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/deepseek_v3_mha_moe_k3.json --hardware h100 --workload long_context --apply swap_attention_to_mla:latent_dim=512,d_rope=64 --json",
+      "output_path": "validation/e3_retrodiction/runs/case1a/evaluation.json",
+      "expected_verdict": "MLA relieves >=1 axis among {hbm_bw_decode, kv_footprint}, quality within budget, not dominated",
+      "actual_verdict": "hit",
+      "key_metrics": {
+        "feasible": true,
+        "binding_axes_relieved": [
+          "hbm_bw_decode",
+          "hbm_capacity",
+          "kv_footprint"
+        ],
+        "quality_delta_total": -0.004186,
+        "pareto_position": "EXPANDS_FRONTIER",
+        "dominates": 12
+      },
+      "provenance": [
+        "arXiv:2412.19437v2 (T2)",
+        "arXiv:2405.04434v5 (T2)",
+        "huggingface.co/deepseek-ai/DeepSeek-V3 (T2)"
+      ]
+    },
+    {
+      "case_id": "case1b",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/deepseek_v3_gqa_moe_k3.json --hardware h100 --workload long_context --apply swap_attention_to_mla:latent_dim=512,d_rope=64 --json",
+      "output_path": "validation/e3_retrodiction/runs/case1b/evaluation.json",
+      "expected_verdict": "same direction as 1a, smaller relief magnitude",
+      "actual_verdict": "hit",
+      "key_metrics": {
+        "feasible": true,
+        "binding_axes_relieved": [
+          "hbm_bw_decode"
+        ],
+        "quality_delta_total": -0.009512,
+        "pareto_position": "EXPANDS_FRONTIER",
+        "dominates": 9
+      },
+      "provenance": [
+        "arXiv:2412.19437v2 (T2)",
+        "arXiv:2405.04434v5 (T2)"
+      ]
+    },
+    {
+      "case_id": "case2",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/llama3_70b_mha.json --hardware h100 --workload batched --apply swap_attention_to_gqa:group_size={1,8,64} --json (3 runs: case2_mqa, case2_gqa8, case2_gqa64)",
+      "output_path": "validation/e3_retrodiction/runs/case2_{mqa,gqa8,gqa64}/evaluation.json",
+      "expected_verdict": "group_size=8 on Pareto frontier: large KV relief, small quality delta; extremes worse",
+      "actual_verdict": "partial-hit",
+      "difference_axis": "frontier position (INTERIOR, dominated by 2) + prereg arm labels swapped (group_size semantics, D7)",
+      "key_metrics": {
+        "gqa8": {
+          "relieved": [
+            "hbm_capacity",
+            "kv_footprint"
+          ],
+          "quality_delta_total": 0.000101,
+          "pareto_position": "INTERIOR",
+          "dominated_by": 2
+        },
+        "mqa_actual_group64": {
+          "quality_delta_total": 0.021134,
+          "dominated_by": 51
+        },
+        "mha_noop_group1": {
+          "pareto_position": "EQUIVALENT",
+          "relieved": []
+        }
+      },
+      "provenance": [
+        "arXiv:2407.21783 (T2)",
+        "arXiv:2307.09288 (T2)"
+      ]
+    },
+    {
+      "case_id": "case3",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/mha_7b_n1.json --hardware h100 --workload long_context --apply swap_attention_to_gqa:group_size=4 [--apply swap_attention_to_swa:window_size=4096] --json (2 runs)",
+      "output_path": "validation/e3_retrodiction/runs/case3_{gqa4,gqa4_swa}/evaluation.json",
+      "expected_verdict": "SWA improves TBT/KV axes vs GQA comparator; preferred under latency objective",
+      "actual_verdict": "hit",
+      "key_metrics": {
+        "swa_arm": {
+          "pareto_position": "ON_FRONTIER",
+          "relieved": [
+            "hbm_capacity",
+            "kv_footprint"
+          ],
+          "introduced": [
+            "tc_util_prefill"
+          ],
+          "kv_footprint_change": "1.60->0.05"
+        },
+        "gqa_only_arm": {
+          "pareto_position": "INTERIOR",
+          "dominated_by": 1
+        }
+      },
+      "provenance": [
+        "arXiv:2310.06825 (T2)",
+        "mistral.ai/news/announcing-mistral-7b (T2)"
+      ]
+    },
+    {
+      "case_id": "case4",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/deepseek_v3_mla_moe_k0.json --hardware h100 --workload long_context --apply densify_first_k:k={1,3} --json (2 runs)",
+      "output_path": "validation/e3_retrodiction/runs/case4_{k1,k3}/evaluation.json",
+      "expected_verdict": "k=3 and k=1 positive quality residual vs k=0 at negligible cost",
+      "actual_verdict": "hit",
+      "key_metrics": {
+        "k3": {
+          "quality_delta_total": -0.008819,
+          "pareto_position": "EXPANDS_FRONTIER",
+          "dominates": 4
+        },
+        "k1": {
+          "quality_delta_total": -0.002944,
+          "pareto_position": "EQUIVALENT"
+        }
+      },
+      "provenance": [
+        "arXiv:2412.19437v2 (T2)",
+        "arXiv:2507.20534 (T2)",
+        "huggingface.co/Qwen/Qwen3-235B-A22B config (T2, correction D2)"
+      ]
+    },
+    {
+      "case_id": "case5",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/kimi_k2_like_1t_moe.json --hardware {h100,gb200_nvl72} --workload long_context --apply change_parallelism:{ep=1,tp=8 | ep=64,tp=1} --json (3 runs) + ac-compile --recipe validation/e3_retrodiction/recipes/case5_k2_greenfield_gb200_nvl72.yaml --max-candidates 30000 --local-refine-budget 10",
+      "output_path": "validation/e3_retrodiction/runs/case5_{tp8ep1,ep64,gb200_ep64,greenfield}/",
+      "expected_verdict": "(a) soft spill on h100; (b) all_to_all binding/heavily penalized on h100; (c) relieved on gb200_nvl72; (d) EP-wide candidate on NVL72 frontier",
+      "actual_verdict": "hit (arm b partial)",
+      "difference_axis": "arm b: all_to_all score 0.006->0.228 (38x) but band stays relaxed (self-damping, corroborates C V1(d)); arm d own run execution-capped (D8), evidence cited from C V2(a)/V2(b)",
+      "key_metrics": {
+        "h100_ep64": {
+          "all_to_all": 0.228,
+          "decode_step_ms": 12.09,
+          "hbm_capacity": 1.369,
+          "pareto_position": "ON_FRONTIER"
+        },
+        "gb200_ep64": {
+          "all_to_all": 0.015,
+          "decode_step_ms": 5.05,
+          "hbm_capacity_change": "1.65->0.57",
+          "pareto_position": "EXPANDS_FRONTIER"
+        },
+        "h100_tp8ep1": {
+          "hbm_capacity": 3.266,
+          "feasible": true
+        },
+        "cited_C_V2": {
+          "ep72_frontier_rows": 11,
+          "best_tbt_ep72_ms": 9.0,
+          "best_tbt_ep8_ms": 33.9,
+          "source": "validation/c_nvl72/runs/search_nvl72.json + report.md"
+        }
+      },
+      "provenance": [
+        "arXiv:2507.20534 (T2)",
+        "huggingface.co/moonshotai/Kimi-K2-Instruct (T2)",
+        "developer.nvidia.com/ai-models (T2)",
+        "developer.nvidia.com/blog/inside-the-nvidia-rubin-platform (T2)",
+        "wccftech.com 2025-12-03 (T3)"
+      ]
+    },
+    {
+      "case_id": "N1",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/mha_7b_n1.json --hardware h100 --workload chat --context-length 32768 --apply scale_n_layers:delta=0 --json",
+      "output_path": "validation/e3_retrodiction/runs/n1_mha32k/evaluation.json",
+      "expected_verdict": "kv_footprint and/or hbm_bw_decode binding; heavily penalized or borderline",
+      "actual_verdict": "hit (control)",
+      "key_metrics": {
+        "hbm_bw_decode": 1.016,
+        "kv_bytes": 17179869184,
+        "feasible": true
+      },
+      "provenance": [
+        "arXiv:2310.06825 shape (T2)",
+        "synthetic control (T3)"
+      ]
+    },
+    {
+      "case_id": "N2",
+      "ac_command": "ac-delta-eval --baseline-config {validation/e3_retrodiction/model_configs/dmodel_misaligned_7b_n2.json, configs/mistral_7b.json} --hardware h100 --workload chat --context-length 32768 --apply scale_n_layers:delta=0 --json (2 runs)",
+      "output_path": "validation/e3_retrodiction/runs/n2_{misaligned,aligned}/evaluation.json",
+      "expected_verdict": "tc_util stress/penalty absent in aligned twin",
+      "actual_verdict": "partial (control)",
+      "difference_axis": "direction confirmed (tc_util_prefill 0.852 vs 0.752, +13%) but aligned twin already 'loaded'; letter unattainable (control-design error)",
+      "key_metrics": {
+        "misaligned": {
+          "tc_util_prefill": 0.852,
+          "hbm_bw_decode": 1.028
+        },
+        "aligned": {
+          "tc_util_prefill": 0.752,
+          "hbm_bw_decode": 0.681
+        }
+      },
+      "provenance": [
+        "synthetic control (T3)",
+        "configs/mistral_7b.json frozen twin (T1)"
+      ]
+    },
+    {
+      "case_id": "N3",
+      "ac_command": "ac-delta-eval --baseline-config {moe_7b_total_64x8_n3,moe_430b_total_64x8_n3}.json --hardware h100 --workload batched --apply change_parallelism:tp={1,8},ep=1 --json (3 runs)",
+      "output_path": "validation/e3_retrodiction/runs/n3_{literal,scaled_tp8,scaled_tp1}/evaluation.json",
+      "expected_verdict": "double-recorded per D1: plan-literal INFEASIBLE vs audit FEASIBLE; scaled TP8 soft band; scaled TP1 hard sentinel",
+      "actual_verdict": "hit per D1 audit record; TP1 arm partial",
+      "difference_axis": "TP1 sentinel missed by GB/GiB unit slip (848.17 GB = 9.87x HBM < 10x GiB sentinel); rejected instead via penalty + DOMINATED_BY_BASELINE (64 dominators)",
+      "key_metrics": {
+        "literal": {
+          "feasible": true,
+          "binding_axes": []
+        },
+        "scaled_tp8": {
+          "hbm_capacity": 1.409,
+          "feasible": true
+        },
+        "scaled_tp1": {
+          "hbm_capacity": 11.274,
+          "decode_step_ms": 272.7,
+          "pareto_position": "DOMINATED_BY_BASELINE",
+          "dominated_by": 64
+        }
+      },
+      "provenance": [
+        "synthetic controls (T3)",
+        "D1/D9 deviations"
+      ]
+    }
+  ]
+}

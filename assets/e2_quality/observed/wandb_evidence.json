@@ -1,0 +1,115 @@
+{
+ "e2_olmo2_7b": {
+  "run_url": "https://wandb.ai/ai2-llm/OLMo-2-1124-7B/runs/uwjy7cji",
+  "displayName": "OLMo-2-1124-7B-stage-1-run-11",
+  "state": "finished",
+  "createdAt": "2024-12-03T09:06:41Z",
+  "final_step": 928646,
+  "tokens_at_final_step": 3895023632384,
+  "train_CrossEntropyLoss_final": 2.2305197715759277,
+  "train_Perplexity_final": 9.30470114198681,
+  "train_ZLoss_final": 0.0002583892201073468,
+  "tail_stats": {
+   "window": "steps 927000-928646 (1647 logged points)",
+   "mean": 2.22496,
+   "sd": 0.01141,
+   "min": 2.18883,
+   "max": 2.25795,
+   "last20_mean": 2.22886,
+   "last20_sd": 0.01077
+  },
+  "config_batch": {
+   "global_train_batch_size": {
+    "value": 1024
+   },
+   "max_sequence_length": null,
+   "run_name": {
+    "value": "peteish7"
+   }
+  }
+ },
+ "e2_pythia_1p4b": {
+  "run_url": "https://wandb.ai/eleutherai/pythia/runs/vd5ogsc6",
+  "displayName": "ip-26-0-128-55-0",
+  "state": "finished",
+  "createdAt": "2023-01-28T16:01:48Z",
+  "final_step": 143000,
+  "train_lm_loss": 1.977952241897583,
+  "validation_lm_loss": 1.960450530052185,
+  "test_lm_loss": 1.9664677381515503,
+  "config": {
+   "num_layers": 24,
+   "hidden_size": 2048,
+   "train_batch_size": 1024,
+   "seq_length": 2048,
+   "train_data_paths": [
+    "/fsx/pile/pile_20B_tokenizer_text_document"
+   ],
+   "train_iters": 143000
+  },
+  "n_history_keys": 97
+ },
+ "e2_pythia_12b_corr": {
+  "run_url": "https://wandb.ai/eleutherai/pythia/runs/3hssg7up",
+  "displayName": "ip-26-0-136-150-0",
+  "state": "finished",
+  "createdAt": "2023-02-11T16:32:24Z",
+  "final_step": 143000,
+  "train_lm_loss": 1.7577977180480957,
+  "validation_lm_loss": 1.7419646978378296,
+  "test_lm_loss": 1.741864800453186,
+  "config": {
+   "num_layers": 36,
+   "hidden_size": 5120,
+   "train_batch_size": 1024,
+   "seq_length": 2048,
+   "train_data_paths": [
+    "/fsx/pile/pile_20B_tokenizer_text_document"
+   ],
+   "train_iters": 143000
+  },
+  "n_history_keys": 533
+ },
+ "e2_pythia_12b": {
+  "run_url": "https://wandb.ai/eleutherai/pythia/runs/kg5ni1dl",
+  "displayName": "ip-26-0-129-191-0",
+  "state": "finished",
+  "createdAt": "2023-03-08T05:51:47Z",
+  "final_step": 143000,
+  "train_lm_loss": 1.757043719291687,
+  "validation_lm_loss": 1.741183161735535,
+  "test_lm_loss": 1.7411205768585205,
+  "config": {
+   "num_layers": 36,
+   "hidden_size": 5120,
+   "train_batch_size": 1024,
+   "seq_length": 2048,
+   "train_data_paths": [
+    "/fsx/pile/pile_20B_tokenizer_text_document"
+   ],
+   "train_iters": 143000
+  },
+  "n_history_keys": 533
+ },
+ "e2_pythia_1p4b_corr_bs512": {
+  "run_url": "https://wandb.ai/eleutherai/pythia/runs/3bj0rp1k",
+  "displayName": "cw-prod-a100-cu117-17-0",
+  "state": "finished",
+  "createdAt": "2023-03-09T13:48:58Z",
+  "final_step": 286000,
+  "train_lm_loss": 1.9650733470916748,
+  "validation_lm_loss": 1.96327805519104,
+  "test_lm_loss": 1.953285574913025,
+  "config": {
+   "num_layers": 24,
+   "hidden_size": 2048,
+   "train_batch_size": 512,
+   "seq_length": 2048,
+   "train_data_paths": [
+    "/mnt/hdd/pile/pile_20B_tokenizer_text_document"
+   ],
+   "train_iters": 286000
+  },
+  "n_history_keys": 91
+ }
+}

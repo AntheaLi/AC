@@ -1,0 +1,77 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1",
+    "note": "AC compiler-schema baseline for the E2 quality anchor Pythia-12B (non-deduplicated suite). See pythia_12b.provenance.json for per-field sources and the GELU->SwiGLU param-equivalent adaptation."
+  },
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "0.4.0",
+    "generated_at": "2026-07-17T00:00:00+00:00",
+    "input_hardware": "h100",
+    "model_name": "pythia-12b",
+    "source_note": "EleutherAI Pythia-12B: 36 dense layers, MHA (40/40), GELU MLP 20480 (encoded param-equivalently as swiglu ffn_dim 13653, see provenance), RoPE base 1e4 (rotary_pct 0.25 not representable), 2k pretrain context, 299.9B training tokens. TP=1 because 13653 has no power-of-2 divisor (throughput-only field; quality predictions are TP-invariant).",
+    "params": {
+      "total_b": 11.84,
+      "active_b": 11.84,
+      "kind": "dense"
+    },
+    "input_constraints": {
+      "training_tokens": 299892736000,
+      "unique_training_tokens": null,
+      "pretraining_context_length": 2048,
+      "context_length": 2048
+    },
+    "predicted": {},
+    "search_stats": {}
+  },
+  "parallelism": {
+    "tensor_parallel": 1,
+    "pipeline_parallel": 1,
+    "data_parallel": 8,
+    "expert_parallel": 1,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 5120,
+    "n_layers": 36,
+    "vocab_size": 50688,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 10000,
+      "scaling": {
+        "method": "none",
+        "factor": 1.0,
+        "original_max_position": 2048
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35],
+        "type": "transformer_block",
+        "attention": {
+          "type": "full",
+          "n_heads": 40,
+          "n_kv_heads": 40,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {"qk": "bf16", "v": "bf16", "output": "bf16"}
+        },
+        "ffn": {
+          "type": "swiglu",
+          "ffn_dim": 13653,
+          "precision": "bf16"
+        },
+        "normalization": {"type": "layernorm", "eps": 1e-05, "precision": "bf16"},
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ]
+  }
+}

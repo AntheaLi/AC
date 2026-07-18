@@ -1,0 +1,150 @@
+# validation/e2_quality/pair_dates.yaml
+# ----------------------------------------------------------------------------
+# Gate 2 wave-1 header:
+#   ac_version:            0.4.0
+#   quality_model_version: effective_capacity_v2
+#   git_commit:            c170cda
+#   experiment_date:       2026-07-17
+#   agent_wave:            gate2-wave1
+#
+# Date annotations for the shipped paired-ablation corpus
+# (tests/fixtures/public_ablation_pairs_v1.json), which carries NO publication-
+# date metadata of its own. One entry per pair id.
+#
+# Dating rule (documented in validation/prereg/e2_predictions.md):
+#   publication_date = earliest public availability of the evidence, i.e. the
+#   arXiv v1 submission date (UTC) of the paper/report the pair's `source`
+#   cites. Venue publication dates (e.g. ICLR 2024 for YaRN) are NOT used:
+#   the ablation numbers were public from the preprint date.
+#   For a pair comparing TWO papers (peng2024_yarn_vs_pi), the pair date is the
+#   LATER of the two v1 dates (the comparison needs both).
+#
+# All dates are bibliographic facts, tier T2 (official preprint record).
+# Accessed 2026-07-17 via https://arxiv.org/abs/<id> ("Submission history").
+# ----------------------------------------------------------------------------
+
+cutoff: "2024-01-01"   # keep pairs with publication_date strictly before this
+
+pairs:
+  waleffe2024_pure_mamba_vs_hybrid_8b:
+    publication_date: "2024-06-12"
+    evidence:
+      - paper: "Waleffe et al., 'An Empirical Study of Mamba-based Language Models'"
+        arxiv: "2406.07887"
+        arxiv_v1_date_utc: "2024-06-12"
+        source_url: "https://arxiv.org/abs/2406.07887"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  waleffe2024_hybrid_vs_transformer_8b:
+    publication_date: "2024-06-12"
+    evidence:
+      - paper: "Waleffe et al., 'An Empirical Study of Mamba-based Language Models'"
+        arxiv: "2406.07887"
+        arxiv_v1_date_utc: "2024-06-12"
+        source_url: "https://arxiv.org/abs/2406.07887"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  jamba2024_ratio_parity_256k:
+    publication_date: "2024-03-28"
+    evidence:
+      - paper: "Lieber et al. (AI21), 'Jamba: A Hybrid Transformer-Mamba Language Model'"
+        arxiv: "2403.19887"
+        arxiv_v1_date_utc: "2024-03-28"
+        source_url: "https://arxiv.org/abs/2403.19887"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  ainslie2023_gqa8_vs_mha:
+    publication_date: "2023-05-22"
+    evidence:
+      - paper: "Ainslie et al., 'GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints'"
+        arxiv: "2305.13245"
+        arxiv_v1_date_utc: "2023-05-22"
+        source_url: "https://arxiv.org/abs/2305.13245"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  ainslie2023_mqa_vs_mha:
+    publication_date: "2023-05-22"
+    evidence:
+      - paper: "Ainslie et al., 'GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints'"
+        arxiv: "2305.13245"
+        arxiv_v1_date_utc: "2023-05-22"
+        source_url: "https://arxiv.org/abs/2305.13245"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  deepseek2024_mla_vs_mha:
+    publication_date: "2024-05-07"
+    evidence:
+      - paper: "DeepSeek-AI, 'DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model'"
+        arxiv: "2405.04434"
+        arxiv_v1_date_utc: "2024-05-07"
+        source_url: "https://arxiv.org/abs/2405.04434"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  gemma2_2024_local_global_parity:
+    publication_date: "2024-07-31"
+    evidence:
+      - paper: "Gemma Team, 'Gemma 2: Improving Open Language Models at a Practical Size'"
+        arxiv: "2408.00118"
+        arxiv_v1_date_utc: "2024-07-31"
+        source_url: "https://arxiv.org/abs/2408.00118"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  mistral2023_swa_ppl_hit:
+    publication_date: "2023-10-10"
+    evidence:
+      - paper: "Jiang et al. (Mistral AI), 'Mistral 7B'"
+        arxiv: "2310.06825"
+        arxiv_v1_date_utc: "2023-10-10"
+        source_url: "https://arxiv.org/abs/2310.06825"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  deepseekmoe2024_capacity:
+    publication_date: "2024-01-11"
+    evidence:
+      - paper: "Dai et al., 'DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models'"
+        arxiv: "2401.06066"
+        arxiv_v1_date_utc: "2024-01-11"
+        source_url: "https://arxiv.org/abs/2401.06066"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+    # NOTE: nearest-to-boundary pair. v1 is 2024-01-11, i.e. 10 days AFTER the
+    # 2024-01-01 cutoff, so it is EXCLUDED by the strict rule. Recorded here so
+    # the boundary decision is auditable.
+
+  deepseekv3_2024_mtp:
+    publication_date: "2024-12-27"
+    evidence:
+      - paper: "DeepSeek-AI, 'DeepSeek-V3 Technical Report'"
+        arxiv: "2412.19437"
+        arxiv_v1_date_utc: "2024-12-27"
+        source_url: "https://arxiv.org/abs/2412.19437"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+
+  peng2024_yarn_vs_pi:
+    publication_date: "2023-08-31"   # max(YaRN v1, PI v1): comparison needs both
+    evidence:
+      - paper: "Peng et al., 'YaRN: Efficient Context Window Extension of Large Language Models'"
+        arxiv: "2309.00071"
+        arxiv_v1_date_utc: "2023-08-31"
+        source_url: "https://arxiv.org/abs/2309.00071"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+      - paper: "Chen et al., 'Extending Context Window of Large Language Models via Positional Interpolation'"
+        arxiv: "2306.15595"
+        arxiv_v1_date_utc: "2023-06-27"
+        source_url: "https://arxiv.org/abs/2306.15595"
+        date_accessed: "2026-07-17"
+        tier: "T2"
+    # NOTE: the pair id says "peng2024" because YaRN's VENUE is ICLR 2024, but
+    # the preprint (and therefore the ablation evidence) has been public since
+    # 2023-08-31. Under the earliest-public-availability rule this pair is
+    # PRE-2024 and is KEPT.

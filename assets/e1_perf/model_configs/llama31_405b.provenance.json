@@ -1,0 +1,53 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1 (E1 wave-2 fill)",
+    "file_role": "provenance sidecar for llama31_405b.json (E1 training-side anchor)"
+  },
+  "model": "meta-llama/Llama-3.1-405B",
+  "ac_config": "llama31_405b.json",
+  "date_accessed": "2026-07-17",
+  "sources": {
+    "S1": {
+      "name": "meta-llama/llama-models (official Meta GitHub), models/sku_list.py, llama3_1_405b arch_args",
+      "url": "https://raw.githubusercontent.com/meta-llama/llama-models/main/models/sku_list.py",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    },
+    "S2": {
+      "name": "meta-llama/llama-models, models/llama3/model.py (official FFN hidden-dim derivation)",
+      "url": "https://raw.githubusercontent.com/meta-llama/llama-models/main/models/llama3/model.py",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    },
+    "S3": {
+      "name": "The Llama 3 Herd of Models, arXiv:2407.21783v3, Table 3 (405B column) and Section 3.3.2/Table 4 (training parallelism + BF16 MFU)",
+      "url": "https://arxiv.org/abs/2407.21783",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    }
+  },
+  "fields": {
+    "d_model": {"value": 16384, "source": "S1 (dim), S3 (Model Dimension 16,384)", "tier": "T2"},
+    "n_layers": {"value": 126, "source": "S1 (n_layers), S3 (Layers 126)", "tier": "T2"},
+    "n_heads": {"value": 128, "source": "S1 (n_heads), S3 (Attention Heads 128)", "tier": "T2"},
+    "n_kv_heads": {"value": 8, "source": "S1 (n_kv_heads), S3 (Key/Value Heads 8)", "tier": "T2"},
+    "d_head": {"value": 128, "source": "derived: d_model/n_heads = 16384/128 (S1)", "tier": "T2"},
+    "ffn_dim": {"value": 53248, "source": "S2 official formula: int(2*(4*16384)/3)=43690; int(1.2*43690)=52428; round up to multiple 4096 -> 53248; cross-check S3 Table 3 (FFN Dimension 53,248)", "tier": "T2"},
+    "vocab_size": {"value": 128256, "source": "S1 (LLAMA3_VOCAB_SIZE = 128256)", "tier": "T2"},
+    "rope_base": {"value": 500000, "source": "S1 (rope_theta 500000.0)", "tier": "T2"},
+    "rms_norm_eps": {"value": 1e-05, "source": "S1 (norm_eps)", "tier": "T2"},
+    "tied_embeddings": {"value": false, "source": "S1/S2", "tier": "T2"},
+    "pretrain_context": {"value": 8192, "source": "S1 (use_scaled_rope, original 8k), S3 Table 4 (Seq. Len. 8,192 stage 1)", "tier": "T2"},
+    "training_tokens": {"value": 15.6e12, "source": "S3 Section 3 ('405B trainable parameters on 15.6T text tokens', 3.8e25 FLOPs)", "tier": "T2"},
+    "training_parallelism": {"value": "TP=8, CP=1, PP=16, DP=64 (8192 GPUs, stage 1); TP=8, CP=1, PP=16, DP=128 (16384 GPUs); TP=8, CP=16, PP=16, DP=4 (long-context stage)", "source": "S3 Table 4", "tier": "T2"},
+    "total_params_b": {"value": 405.853372416, "source": "computed with AC parameter ledger from S1/S3 dims; consistent with the model class (405B)", "tier": "T2"}
+  },
+  "notes": [
+    "meta-llama/Llama-3.1-405B on Hugging Face is license-gated; fields come from Meta's official GitHub repository and the arXiv paper, both public.",
+    "This config backs the training-side T2 anchor only (Llama-3 405B MFU); it is not part of the vLLM serving fleet (no T1 serving anchor planned for 405B)."
+  ]
+}

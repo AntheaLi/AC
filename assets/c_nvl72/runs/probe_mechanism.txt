@@ -1,0 +1,22 @@
+# Mechanism probe (pre-run, 2026-07-17) — fixed K2-class MoE, 288 experts top-8
+# fp8 weights, d_model=7168, 61 layers, tp=1 pp=1 dp=2304
+## batch=32 expert_dim=1408 (~530B total)
+h100           ep=  8  TBT=  80.607 ms  train_tps=      2247.4  mem/GPU=   90.1 GB  spill=nvlink a2a_share=0.001
+h100           ep= 16  TBT=  45.622 ms  train_tps=      1899.3  mem/GPU=   59.1 GB  spill=fits   a2a_share=0.005
+h100           ep= 32  TBT=  37.387 ms  train_tps=      1730.6  mem/GPU=   43.6 GB  spill=fits   a2a_share=0.004
+h100           ep= 72  TBT=  32.187 ms  train_tps=      1649.2  mem/GPU=   35.0 GB  spill=fits   a2a_share=0.003
+gb200_nvl72    ep=  8  TBT=  27.691 ms  train_tps=      4854.1  mem/GPU=   90.1 GB  spill=fits   a2a_share=0.002
+gb200_nvl72    ep= 16  TBT=  20.827 ms  train_tps=      4983.0  mem/GPU=   59.1 GB  spill=fits   a2a_share=0.001
+gb200_nvl72    ep= 32  TBT=  17.393 ms  train_tps=      5125.7  mem/GPU=   43.6 GB  spill=fits   a2a_share=0.001
+gb200_nvl72    ep= 72  TBT=  15.247 ms  train_tps=      5121.4  mem/GPU=   35.0 GB  spill=fits   a2a_share=0.000
+
+## batch=256 expert_dim=1408 (~530B total)
+h100           ep=  8  TBT= 228.537 ms  train_tps=      2247.4  mem/GPU=  161.5 GB  spill=nvlink a2a_share=0.007
+h100           ep= 16  TBT= 162.697 ms  train_tps=      1899.3  mem/GPU=  130.6 GB  spill=nvlink a2a_share=0.021
+h100           ep= 32  TBT= 127.134 ms  train_tps=      1730.6  mem/GPU=  115.1 GB  spill=nvlink a2a_share=0.018
+h100           ep= 72  TBT= 106.681 ms  train_tps=      1649.2  mem/GPU=  106.5 GB  spill=nvlink a2a_share=0.010
+gb200_nvl72    ep=  8  TBT=  42.772 ms  train_tps=      4854.1  mem/GPU=  161.5 GB  spill=fits   a2a_share=0.008
+gb200_nvl72    ep= 16  TBT=  34.883 ms  train_tps=      4983.0  mem/GPU=  130.6 GB  spill=fits   a2a_share=0.005
+gb200_nvl72    ep= 32  TBT=  30.927 ms  train_tps=      5125.7  mem/GPU=  115.1 GB  spill=fits   a2a_share=0.003
+gb200_nvl72    ep= 72  TBT=  28.727 ms  train_tps=      5121.4  mem/GPU=  106.5 GB  spill=fits   a2a_share=0.001
+

@@ -1,0 +1,51 @@
+{
+ "_header": {
+  "ac_version": "0.4.0",
+  "quality_model_version": "effective_capacity_v2",
+  "git_commit": "b32064c",
+  "experiment_date": "2026-07-17",
+  "agent_wave": "gate2-wave2",
+  "file_role": "E2 wave-2 observation evidence index — raw pulls from official training logs (tier T2), accessed 2026-07-17"
+ },
+ "date_accessed": "2026-07-17",
+ "sources": {
+  "olmo2_wandb": {
+   "tier": "T2",
+   "pointer": "OLMo-2 paper (arXiv:2501.00656) 'WandB Logs' footnote -> https://api.wandb.ai/links/ai2-llm/fjn0v0ec -> public project ai2-llm/OLMo-2-1124-7B",
+   "run": "https://wandb.ai/ai2-llm/OLMo-2-1124-7B/runs/uwjy7cji (OLMo-2-1124-7B-stage-1-run-11, final stage-1 segment)",
+   "metric_key": "train/CrossEntropyLoss (summary = last logged); Z-loss logged separately (weight 1e-5, ~2.6e-4, excluded from CE)",
+   "paper_url": "https://arxiv.org/abs/2501.00656"
+  },
+  "pythia_wandb": {
+   "tier": "T2",
+   "pointer": "EleutherAI/pythia README line 73: 'The loss curves for all models are contained in our (messy!) wandb project' -> https://wandb.ai/eleutherai/pythia",
+   "runs": {
+    "1p4b_standard": "https://wandb.ai/eleutherai/pythia/runs/vd5ogsc6 (final-eval run, step 143000, /fsx/pile standard)",
+    "12b_standard": "https://wandb.ai/eleutherai/pythia/runs/kg5ni1dl (final-eval run, step 143000, /fsx/pile standard)",
+    "12b_corroboration": "https://wandb.ai/eleutherai/pythia/runs/3hssg7up (independent eval run, 1.75780 vs 1.75704)",
+    "1p4b_corroboration": "https://wandb.ai/eleutherai/pythia/runs/3bj0rp1k (bs512 replication, 286000 steps x 512 x 2048 = same 299.9B tokens, 1.96507)"
+   },
+   "metric_key": "train/lm_loss (final-checkpoint loss on train split; validation/test logged alongside)",
+   "readme_url": "https://github.com/EleutherAI/pythia/blob/master/README.md",
+   "paper_url": "https://arxiv.org/abs/2304.01373"
+  },
+  "smollm3_search": {
+   "tier": "T2 attempted — NO official final loss found",
+   "checked": [
+    "HF blog https://huggingface.co/blog/smollm3 (no loss figure/number; states 'We will also share our training logs')",
+    "Model cards HuggingFaceTB/SmolLM3-3B, -3B-Base (no loss)",
+    "HuggingFaceTB/SmolLM3-3B-checkpoints (weights only, no logs)",
+    "github.com/huggingface/smollm text/pretraining/smollm3 (configs only)",
+    "Smol Training Playbook https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook + public chart data (ablation curves <= 100B tokens only)",
+    "WandB public probes (huggingface/HuggingFaceTB orgs: no public smollm3 project)",
+    "HF dataset search smollm3/logs/trackio (no training-log dataset as of 2026-07-17)"
+   ],
+   "partial_official_curve": "smollm3_mainrun_first_724B_tokens_loss.csv — official main-run lm_loss for first 7.24e11 tokens only (playbook chart data, run elie-48n-1004-part1, GBS 2.36M matches SmolLM3); insufficient for an 11.2e12-token endpoint read"
+  }
+ },
+ "files": {
+  "wandb_evidence.json": "raw summary/config pulls for the 5 cited WandB runs",
+  "pythia_eval_sweep_scan.json": "full 42-run scan of pythia project runs carrying final loss trios (anti-cherry-picking audit)",
+  "smollm3_mainrun_first_724B_tokens_loss.csv": "official early-segment main-run loss curve (see smollm3_search.partial_official_curve)"
+ }
+}

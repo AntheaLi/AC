@@ -1,0 +1,449 @@
+{
+  "baseline_name": "mha-7b-n1",
+  "binding_axes_baseline": [
+    "hbm_bw_decode",
+    "hbm_capacity",
+    "kv_footprint"
+  ],
+  "binding_axes_introduced": [
+    "tc_util_prefill"
+  ],
+  "binding_axes_relieved": [
+    "hbm_capacity",
+    "kv_footprint"
+  ],
+  "delta_args": {
+    "sequence": [
+      {
+        "args": {
+          "group_size": 4
+        },
+        "name": "swap_attention_to_gqa"
+      },
+      {
+        "args": {
+          "window_size": 4096
+        },
+        "name": "swap_attention_to_swa"
+      }
+    ]
+  },
+  "delta_name": "swap_attention_to_gqa+swap_attention_to_swa",
+  "delta_summary": {},
+  "feasible": true,
+  "field_changes": [
+    {
+      "baseline": 32,
+      "candidate": 8,
+      "field": "n_kv_heads"
+    },
+    {
+      "baseline": 8.047034,
+      "candidate": 7.241728,
+      "field": "total_params_b"
+    },
+    {
+      "baseline": "full",
+      "candidate": "swa",
+      "field": "attention.type"
+    },
+    {
+      "baseline": 0,
+      "candidate": 4096,
+      "field": "attention.sliding_window"
+    },
+    {
+      "baseline": null,
+      "candidate": [
+        "swap_attention_to_gqa",
+        "swap_attention_to_swa"
+      ],
+      "field": "applied_deltas"
+    }
+  ],
+  "hardware": "h100",
+  "justification": "Baseline binding stresses: HBM-BW-decode=1.00 binding, HBM-capacity=2.03 violated, KV-footprint=1.60 violated. Applying swap_attention_to_gqa+swap_attention_to_swa relieves HBM-capacity 2.03\u21920.46; KV-footprint 1.60\u21920.05. Quality gain: -0.0002 shape-law (-0.0002 total residual change).",
+  "metrics": {
+    "active_params_b": {
+      "baseline": 7.784890368,
+      "candidate": 6.979584,
+      "delta": -0.8053063680000001,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "active_params_b",
+      "pct_change": -10.344479240327308
+    },
+    "kv_cache_gb": {
+      "baseline": 16.0,
+      "candidate": 0.5,
+      "delta": -15.5,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "kv_cache_gb",
+      "pct_change": -96.875
+    },
+    "memory_per_gpu_gb": {
+      "baseline": 162.30247803023477,
+      "candidate": 36.80247803023476,
+      "delta": -125.5,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "memory_per_gpu_gb",
+      "pct_change": -77.32475900745092
+    },
+    "predicted_loss": {
+      "baseline": 2.0302658014538735,
+      "candidate": 2.0653618649614702,
+      "delta": 0.03509606350759675,
+      "direction": "worsens",
+      "lower_is_better": true,
+      "name": "predicted_loss",
+      "pct_change": 1.7286437806549495
+    },
+    "prefill_time_ms": {
+      "baseline": 2416.7449755262123,
+      "candidate": 846.2910142087494,
+      "delta": -1570.453961317463,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "prefill_time_ms",
+      "pct_change": -64.98219618623676
+    },
+    "quality_architecture_residual": {
+      "baseline": 0.00018817649909090128,
+      "candidate": 0.005547424246855512,
+      "delta": 0.005359247747764611,
+      "direction": "worsens",
+      "lower_is_better": true,
+      "name": "quality_architecture_residual",
+      "pct_change": 2847.989931609766
+    },
+    "quality_context_utility": {
+      "baseline": 0.0,
+      "candidate": 0.011090354888959127,
+      "delta": 0.011090354888959127,
+      "direction": "worsens",
+      "lower_is_better": true,
+      "name": "quality_context_utility",
+      "pct_change": null
+    },
+    "quality_data_quality": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_data_quality",
+      "pct_change": 0.0
+    },
+    "quality_effective_capacity": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_effective_capacity",
+      "pct_change": 0.0
+    },
+    "quality_effective_data": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_effective_data",
+      "pct_change": 0.0
+    },
+    "quality_feasibility": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_feasibility",
+      "pct_change": 0.0
+    },
+    "quality_large_shape_stability_prior": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_large_shape_stability_prior",
+      "pct_change": 0.0
+    },
+    "quality_moe_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_moe_residual",
+      "pct_change": 0.0
+    },
+    "quality_precision_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_precision_residual",
+      "pct_change": 0.0
+    },
+    "quality_risk_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_risk_residual",
+      "pct_change": 0.0
+    },
+    "quality_spine": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_spine",
+      "pct_change": 0.0
+    },
+    "quality_state_residual": {
+      "baseline": 0.0,
+      "candidate": 0.0,
+      "delta": 0.0,
+      "direction": "neutral",
+      "lower_is_better": true,
+      "name": "quality_state_residual",
+      "pct_change": 0.0
+    },
+    "quality_vocab_residual": {
+      "baseline": 0.044371718169633055,
+      "candidate": 0.042348316408972145,
+      "delta": -0.0020234017606609103,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "quality_vocab_residual",
+      "pct_change": -4.560115866880445
+    },
+    "scaling_law_loss": {
+      "baseline": 1.9436566651812341,
+      "candidate": 1.9503200973559165,
+      "delta": 0.006663432174682349,
+      "direction": "worsens",
+      "lower_is_better": true,
+      "name": "scaling_law_loss",
+      "pct_change": 0.3428296928182542
+    },
+    "serving_tbt_ms": {
+      "baseline": 165.70431599236474,
+      "candidate": 10.017010032251441,
+      "delta": -155.6873059601133,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "serving_tbt_ms",
+      "pct_change": -93.95488888007418
+    },
+    "total_params_b": {
+      "baseline": 8.047034,
+      "candidate": 7.241728,
+      "delta": -0.8053059999999999,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "total_params_b",
+      "pct_change": -10.007488473392803
+    },
+    "training_memory_per_gpu_gb": {
+      "baseline": 124.73858337474618,
+      "candidate": 112.73858337474618,
+      "delta": -12.0,
+      "direction": "improves",
+      "lower_is_better": true,
+      "name": "training_memory_per_gpu_gb",
+      "pct_change": -9.620118872080639
+    },
+    "training_tps": {
+      "baseline": 7647.755883797112,
+      "candidate": 9578.319964589622,
+      "delta": 1930.5640807925101,
+      "direction": "improves",
+      "lower_is_better": false,
+      "name": "training_tps",
+      "pct_change": 25.243536929345407
+    }
+  },
+  "pareto_axes": [
+    "predicted_loss",
+    "serving_tbt_ms",
+    "prefill_time_ms",
+    "memory_per_gpu_gb",
+    "training_tps"
+  ],
+  "pareto_distance": 0.2619518715435794,
+  "pareto_dominated_count": 0,
+  "pareto_dominates_count": 0,
+  "pareto_frontier_size": 198,
+  "pareto_position": "ON_FRONTIER",
+  "quality_delta": {
+    "attention_residual": 0.0,
+    "context_extrapolation": 0.0,
+    "fa_underrun": 0.0,
+    "moe_residual": 0.0,
+    "precision_loss": 0.0,
+    "shape_law_loss": -0.000186,
+    "state_residual": 0.0
+  },
+  "quality_delta_total": -0.000186,
+  "reason_if_infeasible": "",
+  "resolved_workload": {
+    "context_length": 32768,
+    "cp": 1,
+    "dp": 1,
+    "ep": 1,
+    "pp": 1,
+    "prompt_len": 32768,
+    "serving_batch": 8,
+    "serving_tbt_ms_budget": 80.0,
+    "serving_ttft_ms_budget": 2000.0,
+    "tp": 1,
+    "workload_preset": "long_context"
+  },
+  "severe_stress_regression": false,
+  "stress_baseline": {
+    "active_axes": [
+      "hbm_bw_decode",
+      "hbm_capacity",
+      "kv_footprint",
+      "tc_util_decode",
+      "sram_tile_fit",
+      "all_reduce",
+      "all_to_all"
+    ],
+    "all_reduce": 0.0,
+    "all_to_all": 0.0,
+    "arch_name": "mha-7b-n1",
+    "bands": {
+      "all_reduce": "relaxed",
+      "all_to_all": "relaxed",
+      "hbm_bw_decode": "binding",
+      "hbm_bw_prefill": "relaxed",
+      "hbm_capacity": "violated",
+      "kv_footprint": "violated",
+      "sram_tile_fit": "relaxed",
+      "tc_util_decode": "relaxed",
+      "tc_util_prefill": "loaded",
+      "training_mem": "violated"
+    },
+    "binding_axes": [
+      "hbm_bw_decode",
+      "hbm_capacity",
+      "kv_footprint"
+    ],
+    "hardware_id": "h100",
+    "hbm_bw_decode": 1.0030793787807166,
+    "hbm_bw_prefill": 0.0005569358275339366,
+    "hbm_capacity": 2.0287809753779347,
+    "intermediates": {
+      "a2a_per_layer_bytes": 0.0,
+      "act_bytes": 20737936591.904198,
+      "ar_per_layer_bytes": 0.0,
+      "decode_flops": 261993005056.0,
+      "decode_layer_time_s": 0.001427814247164179,
+      "decode_step_s": 0.04569005590925373,
+      "decode_weight_bytes": 16094068736.0,
+      "grad_bytes": 16094068736.0,
+      "hbm_bw_bytes_s": 3350000000000.0,
+      "hbm_cap_bytes": 85899345920,
+      "kv_bytes": 137438953472.0,
+      "link_bw_ep_bytes_s": null,
+      "link_bw_tp_bytes_s": null,
+      "opt_bytes": 96564412416.0,
+      "peak_flops_s": 495000000000000.0,
+      "prefill_flops": 8584986789675008.0,
+      "prefill_step_s": 19.741284206430144,
+      "state_bytes_decode": 0.0,
+      "train_act_bytes": 82951746367.61679,
+      "training_grad_bytes": 16094068736.0,
+      "training_optimizer_bytes": 96564412416.0,
+      "training_weight_bytes": 16094068736.0,
+      "weight_bytes": 16094068736.0
+    },
+    "kv_footprint": 1.6,
+    "notes": [],
+    "phase": "decode",
+    "schema_version": 1,
+    "sram_tile_fit": 0.0,
+    "tc_util_decode": 0.011584113601089577,
+    "tc_util_prefill": 0.8785349258210872,
+    "training_mem": 2.464562378074238,
+    "workload_id": "decode-b8-prefill32768-kv32768-train8192"
+  },
+  "stress_candidate": {
+    "active_axes": [
+      "hbm_bw_decode",
+      "hbm_capacity",
+      "kv_footprint",
+      "tc_util_decode",
+      "sram_tile_fit",
+      "all_reduce",
+      "all_to_all"
+    ],
+    "all_reduce": 0.0,
+    "all_to_all": 0.0,
+    "arch_name": "mha-7b-n1+composed",
+    "bands": {
+      "all_reduce": "relaxed",
+      "all_to_all": "relaxed",
+      "hbm_bw_decode": "binding",
+      "hbm_bw_prefill": "relaxed",
+      "hbm_capacity": "relaxed",
+      "kv_footprint": "relaxed",
+      "sram_tile_fit": "relaxed",
+      "tc_util_decode": "relaxed",
+      "tc_util_prefill": "pressured",
+      "training_mem": "violated"
+    },
+    "binding_axes": [
+      "hbm_bw_decode"
+    ],
+    "hardware_id": "h100",
+    "hbm_bw_decode": 1.0259223189734188,
+    "hbm_bw_prefill": 0.0011764183402723108,
+    "hbm_capacity": 0.46003097537793447,
+    "intermediates": {
+      "a2a_per_layer_bytes": 0.0,
+      "act_bytes": 20737936591.904198,
+      "ar_per_layer_bytes": 0.0,
+      "decode_flops": 128849018880.0,
+      "decode_layer_time_s": 0.00017074573373134327,
+      "decode_step_s": 0.0054638634794029846,
+      "decode_weight_bytes": 14483456000.0,
+      "grad_bytes": 14483456000.0,
+      "hbm_bw_bytes_s": 3350000000000.0,
+      "hbm_cap_bytes": 85899345920,
+      "kv_bytes": 4294967296.0,
+      "link_bw_ep_bytes_s": null,
+      "link_bw_tp_bytes_s": null,
+      "opt_bytes": 86900736000.0,
+      "peak_flops_s": 495000000000000.0,
+      "prefill_flops": 4222124650659840.0,
+      "prefill_step_s": 8.937168161168831,
+      "state_bytes_decode": 0.0,
+      "train_act_bytes": 82951746367.61679,
+      "training_grad_bytes": 14483456000.0,
+      "training_optimizer_bytes": 86900736000.0,
+      "training_weight_bytes": 14483456000.0,
+      "weight_bytes": 14483456000.0
+    },
+    "kv_footprint": 0.05,
+    "notes": [],
+    "phase": "decode",
+    "schema_version": 1,
+    "sram_tile_fit": 0.0,
+    "tc_util_decode": 0.047640474404910704,
+    "tc_util_prefill": 0.9543900925874753,
+    "training_mem": 2.314562378074238,
+    "workload_id": "decode-b8-prefill32768-kv32768-train8192"
+  },
+  "stress_relief_score": 2.7915549537062625
+}

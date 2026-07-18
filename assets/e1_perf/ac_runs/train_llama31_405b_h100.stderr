@@ -1,0 +1,1 @@
+WARNING: --pp=14 is not a power of two. Most accelerator nodes use power-of-two parallelism; double-check this is intended.

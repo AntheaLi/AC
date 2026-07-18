@@ -1,0 +1,163 @@
+{
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "ac 0.4.0",
+    "generated_at": "2026-07-17T00:00:00+00:00",
+    "input_hardware": null,
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent": "gate2-wave1",
+    "task": "A-E3 preregistration",
+    "model_name": "llama3-70b-mha",
+    "source_note": "Llama-3-70B shape (arXiv:2407.21783 Table 3) counterfactual MHA variant (64 KV heads); wave-2 applies swap_attention_to_gqa group_size in {1,8,64}.",
+    "params": {
+      "total_b": 79.949,
+      "active_b": 79.95,
+      "embed_b": 1.05,
+      "unembed_b": 1.05
+    },
+    "input_constraints": {
+      "workload": "pretraining",
+      "slo": {}
+    },
+    "predicted": {},
+    "search_stats": {}
+  },
+  "parallelism": {
+    "tensor_parallel": 8,
+    "pipeline_parallel": 1,
+    "data_parallel": 1,
+    "expert_parallel": 1,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 8192,
+    "n_layers": 80,
+    "vocab_size": 128256,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 500000,
+      "scaling": {
+        "method": "none",
+        "factor": 1.0,
+        "original_max_position": 32768
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79
+        ],
+        "type": "transformer_block",
+        "attention": {
+          "type": "full",
+          "n_heads": 64,
+          "n_kv_heads": 64,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {
+            "qk": "bf16",
+            "v": "bf16",
+            "output": "bf16"
+          }
+        },
+        "ffn": {
+          "type": "swiglu",
+          "ffn_dim": 28672,
+          "precision": "bf16"
+        },
+        "normalization": {
+          "type": "rmsnorm",
+          "eps": 1e-05,
+          "precision": "bf16"
+        },
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ]
+  }
+}

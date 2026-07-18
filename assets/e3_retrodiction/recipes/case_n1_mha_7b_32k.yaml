@@ -1,0 +1,14 @@
+# ac_version: 0.4.0
+# quality_model_version: effective_capacity_v2
+# git_commit: c170cda
+# experiment_date: 2026-07-17
+# agent: gate2-wave1
+# task: A-E3 preregistration (wave 1)
+# NOTE: archival record. ac-delta-eval has no --recipe flag; replay
+# via the verbatim CLI lines in validation/prereg/e3_cases.md.
+case: N1
+baseline_config: validation/e3_retrodiction/model_configs/mha_7b_n1.json
+hardware: h100
+workload: chat
+apply:
+context_length: 32768

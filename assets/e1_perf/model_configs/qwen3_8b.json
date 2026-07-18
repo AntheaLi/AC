@@ -1,0 +1,72 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1",
+    "file_role": "E1 anchor fleet AC baseline config (hand-written, wave 1 scaffold)"
+  },
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "v0.4.0",
+    "generated_at": "2026-07-17T00:00:00+00:00",
+    "input_hardware": "h100",
+    "model_name": "qwen3-8b",
+    "source_note": "Qwen Qwen3-8B (base): 36 dense decoder layers, d_model 4096, GQA (32 Q heads / 8 KV heads, head_dim 128), SwiGLU FFN 12288, vocab 151936, RoPE theta 1000000 (rope_scaling null), RMSNorm eps 1e-6, untied embeddings (tie_word_embeddings false). Architecture facts: official HF config.json of Qwen/Qwen3-8B (hidden_size 4096, num_hidden_layers 36, num_attention_heads 32, num_key_value_heads 8, head_dim 128, intermediate_size 12288, vocab_size 151936, rope_theta 1000000, rms_norm_eps 1e-6, max_position_embeddings 40960, tie_word_embeddings false); layer/head counts cross-checked against the Qwen3 Technical Report (arXiv 2505.09388, Table 1: Qwen3-8B 36 layers, 32/8 heads, no tied embeddings, 128K context). original_max_position set to 32768 (Qwen3 native pretrain context; the 40960 HF value is the shipped max position). Unrepresented in schema 0.3: Qwen3 applies per-head QK RMSNorm (q_norm/k_norm) inside attention, adding 2*d_head*n_heads*n_layers ~= 9.4M params (~0.1%) not booked by AC's ledger; noted here, not modeled. params counts follow AC's parameter ledger (2*vocab*d embeddings + 2*d_model RMSNorm per layer); for dense models the ledger books active == total, matching configs/mistral_7b.json conventions.",
+    "params": {
+      "total_b": 8.190722048,
+      "active_b": 8.190722048,
+      "kind": "dense"
+    },
+    "input_constraints": {},
+    "predicted": {},
+    "search_stats": {}
+  },
+  "parallelism": {
+    "tensor_parallel": 1,
+    "pipeline_parallel": 1,
+    "data_parallel": 1,
+    "expert_parallel": 1,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 4096,
+    "n_layers": 36,
+    "vocab_size": 151936,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 1000000,
+      "scaling": {
+        "method": "none",
+        "factor": 1.0,
+        "original_max_position": 32768
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35],
+        "type": "transformer_block",
+        "attention": {
+          "type": "full",
+          "n_heads": 32,
+          "n_kv_heads": 8,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {"qk": "bf16", "v": "bf16", "output": "bf16"}
+        },
+        "ffn": {
+          "type": "swiglu",
+          "ffn_dim": 12288,
+          "precision": "bf16"
+        },
+        "normalization": {"type": "rmsnorm", "eps": 1e-06, "precision": "bf16"},
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ]
+  }
+}

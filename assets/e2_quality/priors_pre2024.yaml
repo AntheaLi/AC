@@ -1,0 +1,82 @@
+# validation/e2_quality/priors_pre2024.yaml
+# ----------------------------------------------------------------------
+# Gate 2 wave-1 header:
+#   ac_version:            0.4.0
+#   quality_model_version: effective_capacity_v2
+#   git_commit:            c170cda
+#   experiment_date:       2026-07-17
+#   agent_wave:            gate2-wave1
+#
+# TEMPORAL-HOLDOUT quality prior for the E2 quality-anchor study.
+# Consumed via: AC_QUALITY_DEFAULTS=<repo>/validation/e2_quality/priors_pre2024.yaml
+# Deep-merged over ac.quality_model.DEFAULT_QUALITY_CONSTANTS by
+# load_quality_constants(); only the keys below differ from stock.
+#
+# Split rule: keep pairs with publication_date < 2024-01-01 (arXiv v1;
+# earliest public availability). Dates: pair_dates.yaml (tier T2).
+# Kept 4 of 11 pairs; dropped 7.
+# De-anchored terms (pairs>0 in the full corpus, 0 pre-cutoff) are
+# zeroed through their own existing knobs — see build_priors_pre2024.py
+# for the design rationale. Fitted per-term scales are NOT applied
+# (cross-paper confounded, n<=2; recorded in split_summary.json).
+#
+# Generated deterministically by build_priors_pre2024.py; do not edit
+# by hand — edit the script and re-run.
+
+# --- de-anchored: effective_capacity (full-corpus n=1, pre-2024 n=0) ---
+# Sole anchoring pair (DeepSeekMoE, 2024-01-11) is post-cutoff. `enabled:
+# false` is consumed by _effective_capacity_transform and recovers N_eff =
+# N_active. Dense anchors are unaffected (identity transform either way).
+effective_capacity:
+  enabled: false
+
+# --- de-anchored: mtp_residual (full-corpus n=1, pre-2024 n=0) ---
+# Sole anchoring pair (DeepSeek-V3, 2024-12-27) is post-cutoff. The block
+# has no `enabled` consumer; bonus_per_depth: 0.0 zeroes the bonus. Dense
+# non-MTP anchors are unaffected.
+mtp_residual:
+  bonus_per_depth: 0.0
+
+# --- de-anchored: state_residual (full-corpus n=3, pre-2024 n=0) ---
+# All three anchoring pairs are post-2023 (Waleffe 2024-06-12 x2, Jamba
+# 2024-03-28). The term has no `enabled` consumer; clamping [min_delta,
+# max_delta] to 0 zeroes its value for hybrid/state architectures. Dense
+# anchors are unaffected (term is n/a for them).
+state_residual:
+  min_delta: 0.0
+  max_delta: 0.0
+
+temporal_holdout:
+  cutoff: '2024-01-01'
+  dating_rule: publication_date = earliest public availability (arXiv v1, UTC); pair
+    of two papers dated at the later of the two
+  date_annotations: validation/e2_quality/pair_dates.yaml
+  corpus_full: tests/fixtures/public_ablation_pairs_v1.json
+  corpus_full_sha256: 70a6bd5837342db410c8858f52dbc30ae845cd46f7521086003bcc5c80e15aa6
+  corpus_pre2024: validation/e2_quality/public_ablation_pairs_pre2024.json
+  corpus_pre2024_sha256: 1459327688906494b4c3df80dfb2bbf37b3cbfe3a70d37dca33e20aa49b137f2
+  pairs_total: 11
+  pairs_kept:
+  - ainslie2023_gqa8_vs_mha
+  - ainslie2023_mqa_vs_mha
+  - mistral2023_swa_ppl_hit
+  - peng2024_yarn_vs_pi
+  pairs_dropped:
+  - waleffe2024_pure_mamba_vs_hybrid_8b
+  - waleffe2024_hybrid_vs_transformer_8b
+  - jamba2024_ratio_parity_256k
+  - deepseek2024_mla_vs_mha
+  - gemma2_2024_local_global_parity
+  - deepseekmoe2024_capacity
+  - deepseekv3_2024_mtp
+  deanchored_terms:
+  - effective_capacity
+  - mtp_residual
+  - state_residual
+  fitted_scales_applied: false
+  generator: validation/e2_quality/build_priors_pre2024.py
+  ac_version: 0.4.0
+  quality_model_version: effective_capacity_v2
+  git_commit: c170cda
+  experiment_date: '2026-07-17'
+  agent_wave: gate2-wave1

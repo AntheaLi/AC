@@ -1,0 +1,77 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1",
+    "note": "AC compiler-schema baseline for the E2 quality anchor OLMo-2-1124-7B. See olmo2_7b.provenance.json for per-field sources."
+  },
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "0.4.0",
+    "generated_at": "2026-07-17T00:00:00+00:00",
+    "input_hardware": "h100",
+    "model_name": "olmo2-1124-7b",
+    "source_note": "Ai2 OLMo-2-1124-7B: 32 dense decoder layers, MHA (32/32), SwiGLU FFN 11008, RoPE base 5e5, 4k pretrain context, 4T training tokens (model card).",
+    "params": {
+      "total_b": 7.3,
+      "active_b": 7.3,
+      "kind": "dense"
+    },
+    "input_constraints": {
+      "training_tokens": 4000000000000,
+      "unique_training_tokens": null,
+      "pretraining_context_length": 4096,
+      "context_length": 4096
+    },
+    "predicted": {},
+    "search_stats": {}
+  },
+  "parallelism": {
+    "tensor_parallel": 8,
+    "pipeline_parallel": 1,
+    "data_parallel": 8,
+    "expert_parallel": 1,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 4096,
+    "n_layers": 32,
+    "vocab_size": 100352,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 500000,
+      "scaling": {
+        "method": "none",
+        "factor": 1.0,
+        "original_max_position": 4096
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31],
+        "type": "transformer_block",
+        "attention": {
+          "type": "full",
+          "n_heads": 32,
+          "n_kv_heads": 32,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {"qk": "bf16", "v": "bf16", "output": "bf16"}
+        },
+        "ffn": {
+          "type": "swiglu",
+          "ffn_dim": 11008,
+          "precision": "bf16"
+        },
+        "normalization": {"type": "rmsnorm", "eps": 1e-06, "precision": "bf16"},
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ]
+  }
+}

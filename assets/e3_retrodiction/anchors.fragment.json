@@ -1,0 +1,117 @@
+{
+  "schema_version": "1.0",
+  "fragment": "e3_retrodiction",
+  "ac_version": "0.4.0",
+  "quality_model_version": "effective_capacity_v2",
+  "git_commit": "c170cda",
+  "prereg_commit": "ba3bbd5",
+  "scaffolding_commit": "b32064c",
+  "experiment_date": "2026-07-17",
+  "agent_wave": "gate2-wave1",
+  "score": {"cases_hit": 4, "cases_partial": 1, "cases_miss": 0, "bar": ">=4/5", "bar_met": true},
+  "records": [
+    {
+      "case_id": "case1a",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/deepseek_v3_mha_moe_k3.json --hardware h100 --workload long_context --apply swap_attention_to_mla:latent_dim=512,d_rope=64 --json",
+      "output_path": "validation/e3_retrodiction/runs/case1a/evaluation.json",
+      "expected_verdict": "MLA relieves >=1 axis among {hbm_bw_decode, kv_footprint}, quality within budget, not dominated",
+      "actual_verdict": "hit",
+      "key_metrics": {"feasible": true, "binding_axes_relieved": ["hbm_bw_decode", "hbm_capacity", "kv_footprint"], "quality_delta_total": -0.004186, "pareto_position": "EXPANDS_FRONTIER", "dominates": 12},
+      "provenance": ["arXiv:2412.19437v2 (T2)", "arXiv:2405.04434v5 (T2)", "huggingface.co/deepseek-ai/DeepSeek-V3 (T2)"]
+    },
+    {
+      "case_id": "case1b",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/deepseek_v3_gqa_moe_k3.json --hardware h100 --workload long_context --apply swap_attention_to_mla:latent_dim=512,d_rope=64 --json",
+      "output_path": "validation/e3_retrodiction/runs/case1b/evaluation.json",
+      "expected_verdict": "same direction as 1a, smaller relief magnitude",
+      "actual_verdict": "hit",
+      "key_metrics": {"feasible": true, "binding_axes_relieved": ["hbm_bw_decode"], "quality_delta_total": -0.009512, "pareto_position": "EXPANDS_FRONTIER", "dominates": 9},
+      "provenance": ["arXiv:2412.19437v2 (T2)", "arXiv:2405.04434v5 (T2)"]
+    },
+    {
+      "case_id": "case2",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/llama3_70b_mha.json --hardware h100 --workload batched --apply swap_attention_to_gqa:group_size={1,8,64} --json (3 runs: case2_mqa, case2_gqa8, case2_gqa64)",
+      "output_path": "validation/e3_retrodiction/runs/case2_{mqa,gqa8,gqa64}/evaluation.json",
+      "expected_verdict": "group_size=8 on Pareto frontier: large KV relief, small quality delta; extremes worse",
+      "actual_verdict": "partial-hit",
+      "difference_axis": "frontier position (INTERIOR, dominated by 2) + prereg arm labels swapped (group_size semantics, D7)",
+      "key_metrics": {"gqa8": {"relieved": ["hbm_capacity", "kv_footprint"], "quality_delta_total": 0.000101, "pareto_position": "INTERIOR", "dominated_by": 2}, "mqa_actual_group64": {"quality_delta_total": 0.021134, "dominated_by": 51}, "mha_noop_group1": {"pareto_position": "EQUIVALENT", "relieved": []}},
+      "provenance": ["arXiv:2407.21783 (T2)", "arXiv:2307.09288 (T2)"]
+    },
+    {
+      "case_id": "case3",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/mha_7b_n1.json --hardware h100 --workload long_context --apply swap_attention_to_gqa:group_size=4 [--apply swap_attention_to_swa:window_size=4096] --json (2 runs)",
+      "output_path": "validation/e3_retrodiction/runs/case3_{gqa4,gqa4_swa}/evaluation.json",
+      "expected_verdict": "SWA improves TBT/KV axes vs GQA comparator; preferred under latency objective",
+      "actual_verdict": "hit",
+      "key_metrics": {"swa_arm": {"pareto_position": "ON_FRONTIER", "relieved": ["hbm_capacity", "kv_footprint"], "introduced": ["tc_util_prefill"], "kv_footprint_change": "1.60->0.05"}, "gqa_only_arm": {"pareto_position": "INTERIOR", "dominated_by": 1}},
+      "provenance": ["arXiv:2310.06825 (T2)", "mistral.ai/news/announcing-mistral-7b (T2)"]
+    },
+    {
+      "case_id": "case4",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/deepseek_v3_mla_moe_k0.json --hardware h100 --workload long_context --apply densify_first_k:k={1,3} --json (2 runs)",
+      "output_path": "validation/e3_retrodiction/runs/case4_{k1,k3}/evaluation.json",
+      "expected_verdict": "k=3 and k=1 positive quality residual vs k=0 at negligible cost",
+      "actual_verdict": "hit",
+      "key_metrics": {"k3": {"quality_delta_total": -0.008819, "pareto_position": "EXPANDS_FRONTIER", "dominates": 4}, "k1": {"quality_delta_total": -0.002944, "pareto_position": "EQUIVALENT"}},
+      "provenance": ["arXiv:2412.19437v2 (T2)", "arXiv:2507.20534 (T2)", "huggingface.co/Qwen/Qwen3-235B-A22B config (T2, correction D2)"]
+    },
+    {
+      "case_id": "case5",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/kimi_k2_like_1t_moe.json --hardware {h100,gb200_nvl72} --workload long_context --apply change_parallelism:{ep=1,tp=8 | ep=64,tp=1} --json (3 runs) + ac-compile --recipe validation/e3_retrodiction/recipes/case5_k2_greenfield_gb200_nvl72.yaml --max-candidates 30000 --local-refine-budget 10",
+      "output_path": "validation/e3_retrodiction/runs/case5_{tp8ep1,ep64,gb200_ep64,greenfield}/",
+      "expected_verdict": "(a) soft spill on h100; (b) all_to_all binding/heavily penalized on h100; (c) relieved on gb200_nvl72; (d) EP-wide candidate on NVL72 frontier",
+      "actual_verdict": "hit (arm b partial)",
+      "difference_axis": "arm b: all_to_all score 0.006->0.228 (38x) but band stays relaxed (self-damping, corroborates C V1(d)); arm d own run execution-capped (D8), evidence cited from C V2(a)/V2(b)",
+      "key_metrics": {
+        "h100_ep64": {"all_to_all": 0.228, "decode_step_ms": 12.09, "hbm_capacity": 1.369, "pareto_position": "ON_FRONTIER"},
+        "gb200_ep64": {"all_to_all": 0.015, "decode_step_ms": 5.05, "hbm_capacity_change": "1.65->0.57", "pareto_position": "EXPANDS_FRONTIER"},
+        "h100_tp8ep1": {"hbm_capacity": 3.266, "feasible": true},
+        "cited_C_V2": {"ep72_frontier_rows": 11, "best_tbt_ep72_ms": 9.0, "best_tbt_ep8_ms": 33.9, "source": "validation/c_nvl72/runs/search_nvl72.json + report.md"}
+      },
+      "provenance": ["arXiv:2507.20534 (T2)", "huggingface.co/moonshotai/Kimi-K2-Instruct (T2)", "developer.nvidia.com/ai-models (T2)", "developer.nvidia.com/blog/inside-the-nvidia-rubin-platform (T2)", "wccftech.com 2025-12-03 (T3)"]
+    },
+    {
+      "case_id": "N1",
+      "ac_command": "ac-delta-eval --baseline-config validation/e3_retrodiction/model_configs/mha_7b_n1.json --hardware h100 --workload chat --context-length 32768 --apply scale_n_layers:delta=0 --json",
+      "output_path": "validation/e3_retrodiction/runs/n1_mha32k/evaluation.json",
+      "expected_verdict": "kv_footprint and/or hbm_bw_decode binding; heavily penalized or borderline",
+      "actual_verdict": "hit (control)",
+      "key_metrics": {"hbm_bw_decode": 1.016, "kv_bytes": 17179869184, "feasible": true},
+      "provenance": ["arXiv:2310.06825 shape (T2)", "synthetic control (T3)"]
+    },
+    {
+      "case_id": "N2",
+      "ac_command": "ac-delta-eval --baseline-config {validation/e3_retrodiction/model_configs/dmodel_misaligned_7b_n2.json, configs/mistral_7b.json} --hardware h100 --workload chat --context-length 32768 --apply scale_n_layers:delta=0 --json (2 runs)",
+      "output_path": "validation/e3_retrodiction/runs/n2_{misaligned,aligned}/evaluation.json",
+      "expected_verdict": "tc_util stress/penalty absent in aligned twin",
+      "actual_verdict": "partial (control)",
+      "difference_axis": "direction confirmed (tc_util_prefill 0.852 vs 0.752, +13%) but aligned twin already 'loaded'; letter unattainable (control-design error)",
+      "key_metrics": {"misaligned": {"tc_util_prefill": 0.852, "hbm_bw_decode": 1.028}, "aligned": {"tc_util_prefill": 0.752, "hbm_bw_decode": 0.681}},
+      "provenance": ["synthetic control (T3)", "configs/mistral_7b.json frozen twin (T1)"]
+    },
+    {
+      "case_id": "N3",
+      "ac_command": "ac-delta-eval --baseline-config {moe_7b_total_64x8_n3,moe_430b_total_64x8_n3}.json --hardware h100 --workload batched --apply change_parallelism:tp={1,8},ep=1 --json (3 runs)",
+      "output_path": "validation/e3_retrodiction/runs/n3_{literal,scaled_tp8,scaled_tp1}/evaluation.json",
+      "expected_verdict": "double-recorded per D1: plan-literal INFEASIBLE vs audit FEASIBLE; scaled TP8 soft band; scaled TP1 hard sentinel",
+      "actual_verdict": "hit per D1 audit record; TP1 arm partial",
+      "difference_axis": "TP1 sentinel missed by GB/GiB unit slip (848.17 GB = 9.87x HBM < 10x GiB sentinel); rejected instead via penalty + DOMINATED_BY_BASELINE (64 dominators)",
+      "key_metrics": {"literal": {"feasible": true, "binding_axes": []}, "scaled_tp8": {"hbm_capacity": 1.409, "feasible": true}, "scaled_tp1": {"hbm_capacity": 11.274, "decode_step_ms": 272.7, "pareto_position": "DOMINATED_BY_BASELINE", "dominated_by": 64}},
+      "provenance": ["synthetic controls (T3)", "D1/D9 deviations"]
+    }
+  ],
+  "wave2_substitutions": [
+    "D6: --out redirected out/ -> runs/<case_id>/ (all commands)",
+    "D7: case2 arm labels swapped (group_size semantics)",
+    "D8: case5(d) dropped --json (unsupported); added --max-candidates 30000 --local-refine-budget 10 (300s sandbox)",
+    "D9: N3 TP1 sentinel unit slip GB vs GiB"
+  ],
+  "error_taxonomy": [
+    {"id": "E-1", "case": "case2", "category": "constraint-reconstruction error"},
+    {"id": "E-2", "case": "case5(b)", "category": "prior gap (threshold calibration)"},
+    {"id": "E-3", "case": "N2", "category": "constraint-reconstruction error"},
+    {"id": "E-4", "case": "N3-TP1", "category": "constraint-reconstruction error"},
+    {"id": "E-5", "case": "case5(d)", "category": "execution artifact (not scored against model)"}
+  ]
+}

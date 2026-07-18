@@ -1,0 +1,57 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1"
+  },
+  "anchor_id": "e2_smollm3_3b",
+  "model": "HuggingFaceTB/SmolLM3-3B",
+  "facts": {
+    "architecture": {
+      "d_model": 2048,
+      "n_layers": 36,
+      "n_heads": 16,
+      "n_kv_heads": 4,
+      "d_head": 128,
+      "ffn_dim": 11008,
+      "ffn_type": "SwiGLU (hidden_act silu)",
+      "vocab_size": 128256,
+      "tied_embeddings": true,
+      "rope_theta": 5000000,
+      "no_rope_layer_interval": 4,
+      "max_position_embeddings": 65536,
+      "normalization": "rmsnorm, eps 1e-6",
+      "source_url": "https://huggingface.co/HuggingFaceTB/SmolLM3-3B/raw/main/config.json",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    },
+    "training_tokens": {
+      "value": 11200000000000,
+      "as_published": "11.2T tokens (Model Summary: 'pretrained on 11.2T tokens with a staged curriculum of web, code, math and reasoning data'); the Training section table of the same card rounds to '11T'",
+      "source_url": "https://huggingface.co/HuggingFaceTB/SmolLM3-3B",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    },
+    "pretraining_context_length": {
+      "value": 65536,
+      "as_published": "Trained on 64k context; 128k supported via YaRN extrapolation (not used for this anchor)",
+      "source_url": "https://huggingface.co/HuggingFaceTB/SmolLM3-3B",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    }
+  },
+  "ac_config_adaptations": [
+    "Tied embeddings: SmolLM3 ties input/output embeddings (true total ~3.08B: 2,812,280,832 layer params + 262,668,288 embedding + norms). AC's parameter ledger always counts 2*vocab*d_model (untied) and its loader only warns on tied_embeddings, so AC's N for this config is 3,337,764,864 (+8.6% over the true count). We keep the published vocab_size (a real architecture fact that also feeds vocab_residual) and accept the modest spine-N inflation as a known AC limitation; metadata.params declares the AC-ledger value (3.34B) to stay consistent with the 2% ledger gate.",
+    "NoPE: SmolLM3 omits RoPE on 3 of every 4 layers (no_rope_layer_interval 4). AC's dense schema has no NoPE concept; positional_encoding records the RoPE base (5e6). No AC quality term reads NoPE patterns.",
+    "No other adaptations: GQA (16/4), SwiGLU 11008, vocab 128256 are all first-class in AC."
+  ],
+  "prediction_inputs": {
+    "training_tokens": 11200000000000,
+    "unique_training_tokens": null,
+    "pretraining_context_length": 65536,
+    "evaluation_context_length": 65536,
+    "note": "Staged-curriculum unique-token count is not published; unique left null (D_eff = D). Evaluation context == pretraining context so context_utility is identically zero."
+  }
+}

@@ -1,0 +1,212 @@
+{
+  "schema_version": "wave18h.pair_fit.v1",
+  "pairs_path": "/Users/yichenl/source/AC/ac-cli-release/validation/e2_quality/public_ablation_pairs_pre2024.json",
+  "results": [
+    {
+      "pair_id": "ainslie2023_gqa8_vs_mha",
+      "term": "architecture_residual",
+      "source": "Ainslie et al. 2023, 'GQA: Training Generalized Multi-Query...', T5-XXL uptrained, GQA-8 vs MHA",
+      "observed_pct": 0.1,
+      "predicted_pct": 0.1076,
+      "term_predicted_pct": -0.0186,
+      "residual_pct": -0.0076,
+      "tolerance_pct": 0.3,
+      "within_tolerance": true,
+      "operating_point": {
+        "axis": "kv_heads",
+        "context": 8192,
+        "group_a": 1,
+        "group_b": 8
+      }
+    },
+    {
+      "pair_id": "ainslie2023_mqa_vs_mha",
+      "term": "architecture_residual",
+      "source": "Ainslie et al. 2023, MQA (1 KV head) vs MHA",
+      "observed_pct": 0.55,
+      "predicted_pct": 2.1694,
+      "term_predicted_pct": 2.0819,
+      "residual_pct": -1.6194,
+      "tolerance_pct": 0.4,
+      "within_tolerance": false,
+      "operating_point": {
+        "axis": "kv_heads",
+        "context": 8192,
+        "group_a": 1,
+        "group_b": 32
+      }
+    },
+    {
+      "pair_id": "mistral2023_swa_ppl_hit",
+      "term": "attention_locality",
+      "source": "Mistral-7B v0.1: whole-model SWA window 4096; ppl hit vs full attention grows past the window",
+      "observed_pct": 0.55,
+      "predicted_pct": 0.532,
+      "term_predicted_pct": 0.5545,
+      "residual_pct": 0.018,
+      "tolerance_pct": 0.4,
+      "within_tolerance": true,
+      "operating_point": {
+        "context": 8192,
+        "local_fraction": 1.0,
+        "window": 4096
+      }
+    },
+    {
+      "pair_id": "peng2024_yarn_vs_pi",
+      "term": "context_utility",
+      "source": "Peng et al. 2024 (YaRN) vs Chen et al. 2023 (PI): extension-method quality at 4x extension",
+      "observed_pct": -0.3,
+      "predicted_pct": -0.1591,
+      "term_predicted_pct": -0.1664,
+      "residual_pct": -0.1409,
+      "tolerance_pct": 0.3,
+      "within_tolerance": true,
+      "operating_point": {
+        "axis": "rope_method",
+        "context": 65536,
+        "factor": 8.0
+      }
+    }
+  ],
+  "term_fits": [
+    {
+      "term": "state_residual",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'state_residual' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "architecture_residual",
+      "n_pairs": 2,
+      "scale": 0.222,
+      "bias_pct": -0.814,
+      "rms_pct": 1.145,
+      "covered_points": [
+        {
+          "axis": "kv_heads",
+          "context": 8192,
+          "group_a": 1,
+          "group_b": 8
+        },
+        {
+          "axis": "kv_heads",
+          "context": 8192,
+          "group_a": 1,
+          "group_b": 32
+        }
+      ],
+      "warnings": [
+        "fitted scale 0.22 is far from 1.0 \u2014 the term's magnitude disagrees with published evidence; inspect before trusting decisions dominated by 'architecture_residual'."
+      ]
+    },
+    {
+      "term": "attention_locality",
+      "n_pairs": 1,
+      "scale": 1.032,
+      "bias_pct": 0.018,
+      "rms_pct": 0.018,
+      "covered_points": [
+        {
+          "context": 8192,
+          "local_fraction": 1.0,
+          "window": 4096
+        }
+      ],
+      "warnings": [
+        "only 1 pair(s) \u2014 scale is a point estimate with no cross-validation; treat as directional."
+      ]
+    },
+    {
+      "term": "effective_capacity",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'effective_capacity' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "moe_residual",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'moe_residual' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "mtp_residual",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'mtp_residual' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "context_utility",
+      "n_pairs": 1,
+      "scale": 1.847,
+      "bias_pct": -0.141,
+      "rms_pct": 0.141,
+      "covered_points": [
+        {
+          "axis": "rope_method",
+          "context": 65536,
+          "factor": 8.0
+        }
+      ],
+      "warnings": [
+        "only 1 pair(s) \u2014 scale is a point estimate with no cross-validation; treat as directional."
+      ]
+    },
+    {
+      "term": "precision_residual",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'precision_residual' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "large_shape_stability_prior",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'large_shape_stability_prior' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "risk_residual",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'risk_residual' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    }
+  ],
+  "coverage_gaps": [
+    "attention_locality: anchored local fractions [1.0], windows [4096]; other regions are priors."
+  ]
+}

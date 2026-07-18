@@ -1,0 +1,713 @@
+{
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "v0.3.0",
+    "generated_at": "2026-07-17T23:03:35+00:00",
+    "input_hardware": "h100",
+    "input_constraints": {
+      "hardware": "h100",
+      "tp": 8,
+      "tp_options": [
+        8
+      ],
+      "pp": 1,
+      "pp_options": [
+        1
+      ],
+      "dp": 8,
+      "training_cluster_gpus": null,
+      "max_training_cluster_gpus": null,
+      "ep": 8,
+      "ep_options": [],
+      "cp": 1,
+      "cp_options": [
+        1
+      ],
+      "cp_method": "ring",
+      "target_params": "116.76950784B",
+      "training_tokens": "20.0T",
+      "unique_training_tokens": null,
+      "pretraining_context_length": 8192,
+      "quality_model_version": "effective_capacity_v2",
+      "context_length": 8192,
+      "serving_tbt_ms": null,
+      "serving_ttft_ms": null,
+      "serving_batch": 32,
+      "prompt_len": null,
+      "output_len": 512,
+      "scheduler": "continuous",
+      "concurrency": 256,
+      "training_micro_batch": 8,
+      "pipeline_microbatches": 1,
+      "objective_profile": "research_quality",
+      "allow_moe": false,
+      "max_total_params_b": null,
+      "allow_state": false,
+      "mode": "baseline_modifier",
+      "baseline": "gpt-oss-120b",
+      "quality_risk_budget_pct": 1.0,
+      "allow_quality_spending": true
+    },
+    "predicted": {
+      "evaluated_architecture_hash": "90fc57812249575fe5465df07fa0eac4bed2cf4f3a9b020f6c23abb7ac69500a",
+      "quality_rank_score": -1.983,
+      "predicted_loss": 1.983,
+      "training_throughput_tokens_per_sec": 39282,
+      "training_throughput_tokens_per_sec_per_replica": 39282,
+      "training_throughput_tokens_per_sec_per_gpu": 4910,
+      "aggregate_training_throughput_tokens_per_sec": 314255,
+      "training_throughput_tokens_per_sec_per_serving_gpu": 614,
+      "serving_instance_gpus": 64,
+      "training_throughput_unit": "tokens/sec per TP\u00d7PP\u00d7CP training replica (8\u00d71\u00d71 = 8 GPUs/replica; EP=8 lays over DP and does not add replica GPUs); per-GPU = 4910 tok/s; aggregate over DP=8 replicas (64 total GPUs) = 314255 tok/s; a serving instance spans 64 GPUs (TP\u00d7PP\u00d7CP\u00d7EP)",
+      "serving_tbt_ms": 5.6,
+      "serving_ttft_ms": 53.2,
+      "serving_request_latency_ms": 2932.4,
+      "prefill_model": {
+        "prompt_len": 8192,
+        "cold_prefill": true,
+        "prefix_cache_hit_rate": 0.0,
+        "scheduler": "continuous",
+        "chunk_size": null,
+        "chunking_changes_total_ttft": false,
+        "context_parallel_degree": 1,
+        "context_parallel_method": "ring"
+      },
+      "memory_per_gpu_gb": 6.0,
+      "training_memory_per_gpu_gb": 27.2,
+      "parallelism_costs": {
+        "tp_allreduce_per_layer_ms": 1.474,
+        "ep_alltoall_per_layer_ms": 2.1911,
+        "dp_gradient_sync_ms": 0.2996,
+        "pp_training_transfer_ms": 0.0,
+        "pp_prefill_transfer_ms": 0.0,
+        "pp_decode_transfer_ms": 0.0,
+        "pipeline_bubble_fraction": 0.0
+      },
+      "active_params_b": 5.589147,
+      "total_params_b": 115.159277,
+      "moe_style": "fine",
+      "ep_degree": 8,
+      "confidence": "medium",
+      "scaling_spine_loss": 1.9586,
+      "spine_active_params_b": 4.437,
+      "total_residual_pct": 1.25,
+      "architecture_residual_pct": 1.84,
+      "precision_residual_pct": 0.1,
+      "risk_uncertainty_pct": 0.0,
+      "total_penalty_pct": 1.25,
+      "dominant_penalty": "attention_heads",
+      "uncertainty_low_pct": 0.34,
+      "uncertainty_high_pct": 2.15,
+      "uncertainty_total_pct": 8.07,
+      "uncertainty_breakdown": {
+        "scale_law": 8.0,
+        "architecture": 0.574,
+        "precision": 0.5,
+        "moe": 0.4,
+        "state": 0.0,
+        "context_utility": 0.287,
+        "effective_capacity": 0.559,
+        "effective_data": 0.0,
+        "large_shape": 0.0,
+        "risk": 0.0,
+        "data_quality": 0.0
+      },
+      "confidence_envelope": {
+        "loss_low": 1.82298,
+        "loss_high": 2.143064,
+        "uncertainty_total_pct": 8.071,
+        "target_coverage": null,
+        "robust_to_loss_uncertainty": false,
+        "contending_candidates": 1631,
+        "contending_family": {
+          "varying_axes": [
+            "n_layers",
+            "n_kv_heads",
+            "ffn_precision",
+            "kv_cache_bits"
+          ],
+          "row_count": 1631,
+          "members": [
+            {
+              "d_model": 2880,
+              "n_layers": 34,
+              "n_heads": 64,
+              "d_head": 64,
+              "n_kv_heads": 8,
+              "ffn_dim": 2880,
+              "weight_precision": "bf16",
+              "ffn_precision": "bf16",
+              "activation_precision": "bf16",
+              "kv_cache_bits": 8,
+              "attention_type": "full",
+              "moe_style": "fine",
+              "active_params_b": 5.589147,
+              "predicted_loss": 1.983022,
+              "training_tps": 25765,
+              "serving_tbt_ms": 8.18,
+              "memory_per_gpu_gb": 12.01,
+              "tied_via": "both"
+            },
+            {
+              "d_model": 2880,
+              "n_layers": 34,
+              "n_heads": 64,
+              "d_head": 64,
+              "n_kv_heads": 8,
+              "ffn_dim": 2880,
+              "weight_precision": "bf16",
+              "ffn_precision": "bf16",
+              "activation_precision": "bf16",
+              "kv_cache_bits": 8,
+              "attention_type": "full",
+              "moe_style": "fine",
+              "active_params_b": 5.589147,
+              "predicted_loss": 1.983022,
+              "training_tps": 39281,
+              "serving_tbt_ms": 5.62,
+              "memory_per_gpu_gb": 6.01,
+              "tied_via": "both"
+            },
+            {
+              "d_model": 2880,
+              "n_layers": 34,
+              "n_heads": 64,
+              "d_head": 64,
+              "n_kv_heads": 32,
+              "ffn_dim": 2880,
+              "weight_precision": "bf16",
+              "ffn_precision": "fp8",
+              "activation_precision": "bf16",
+              "kv_cache_bits": 16,
+              "attention_type": "full",
+              "moe_style": "fine",
+              "active_params_b": 5.739552,
+              "predicted_loss": 1.983044,
+              "training_tps": 25045,
+              "serving_tbt_ms": 12.42,
+              "memory_per_gpu_gb": 19.0,
+              "tied_via": "both"
+            },
+            {
+              "d_model": 2880,
+              "n_layers": 34,
+              "n_heads": 64,
+              "d_head": 64,
+              "n_kv_heads": 32,
+              "ffn_dim": 2880,
+              "weight_precision": "bf16",
+              "ffn_precision": "fp8",
+              "activation_precision": "bf16",
+              "kv_cache_bits": 16,
+              "attention_type": "full",
+              "moe_style": "fine",
+              "active_params_b": 5.739552,
+              "predicted_loss": 1.983044,
+              "training_tps": 38431,
+              "serving_tbt_ms": 7.74,
+              "memory_per_gpu_gb": 9.5,
+              "tied_via": "both"
+            },
+            {
+              "d_model": 2880,
+              "n_layers": 34,
+              "n_heads": 64,
+              "d_head": 64,
+              "n_kv_heads": 32,
+              "ffn_dim": 2880,
+              "weight_precision": "bf16",
+              "ffn_precision": "fp8",
+              "activation_precision": "bf16",
+              "kv_cache_bits": 8,
+              "attention_type": "full",
+              "moe_style": "fine",
+              "active_params_b": 5.889957,
+              "predicted_loss": 1.983073,
+              "training_tps": 25038,
+              "serving_tbt_ms": 10.18,
+              "memory_per_gpu_gb": 15.21,
+              "tied_via": "both"
+            }
+          ],
+          "selected": {
+            "d_model": 2880,
+            "n_layers": 34,
+            "n_heads": 64,
+            "d_head": 64,
+            "n_kv_heads": 8,
+            "ffn_dim": 2880,
+            "weight_precision": "bf16",
+            "ffn_precision": "bf16",
+            "activation_precision": "bf16",
+            "kv_cache_bits": 8,
+            "attention_type": "full",
+            "moe_style": "fine",
+            "active_params_b": 5.589147,
+            "predicted_loss": 1.983022,
+            "training_tps": 39281,
+            "serving_tbt_ms": 5.62,
+            "memory_per_gpu_gb": 6.01
+          }
+        },
+        "throughput_uncertainty": {
+          "training_tps_sigma": 7523.7,
+          "serving_tbt_sigma_ms": 1.68,
+          "prefill_time_sigma_ms": 4.54,
+          "efficiency_bucket": "decode=mix:compute=0.76,memory=0.01,comm=0.24; prefill=mix:compute=0.58,memory=0.12,comm=0.31; training=mix:compute=0.62,memory=0.06,comm=0.32"
+        },
+        "best_contender_loss_low": 1.812175
+      },
+      "selection_diagnostics": {
+        "objective_profile": "research_quality",
+        "selected_pareto_rank": 54,
+        "selected_objective_score": 0.00616288,
+        "best_loss_pareto_rank": 43,
+        "best_loss_objective_score": 0.0,
+        "loss_gap_vs_best_pct": 0.6163,
+        "selected": {
+          "d_model": 2880,
+          "n_layers": 34,
+          "n_heads": 64,
+          "d_head": 64,
+          "n_kv_heads": 8,
+          "attention_type": "full",
+          "weight_precision": "bf16",
+          "ffn_precision": "bf16",
+          "activation_precision": "bf16",
+          "kv_bits": 8,
+          "moe_style": "fine",
+          "ep_degree": 8,
+          "active_params_b": 5.589147,
+          "total_params_b": 115.159277,
+          "predicted_loss": 1.983022,
+          "training_tps": 39282,
+          "serving_tbt_ms": 5.623,
+          "serving_ttft_ms": 53.192,
+          "memory_per_gpu_gb": 6.007,
+          "confidence": "medium"
+        },
+        "best_loss": {
+          "d_model": 2880,
+          "n_layers": 34,
+          "n_heads": 64,
+          "d_head": 64,
+          "n_kv_heads": 64,
+          "attention_type": "full",
+          "weight_precision": "bf16",
+          "ffn_precision": "bf16",
+          "activation_precision": "bf16",
+          "kv_bits": 16,
+          "moe_style": "fine",
+          "ep_degree": 8,
+          "active_params_b": 6.516645,
+          "total_params_b": 123.080613,
+          "predicted_loss": 1.970876,
+          "training_tps": 35463,
+          "serving_tbt_ms": 10.488,
+          "serving_ttft_ms": 56.971,
+          "memory_per_gpu_gb": 14.012,
+          "confidence": "medium"
+        },
+        "warnings": [
+          "Selected point is 0.62% worse in predicted loss than the best-loss Pareto point."
+        ]
+      },
+      "selection_warnings": [
+        "Selected point is 0.62% worse in predicted loss than the best-loss Pareto point."
+      ],
+      "calibration_warnings": [],
+      "eval_predictions": {},
+      "quality_model_version": "effective_capacity_v2",
+      "pretraining_loss_proxy": 1.983022,
+      "task_adjusted_loss_proxy": 1.983022,
+      "effective_capacity_delta": -0.02216371,
+      "effective_data_delta": 0.0,
+      "effective_params_b": 6.127199,
+      "effective_training_tokens_t": 20.0,
+      "quality_terms": {
+        "spine": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 8.0,
+          "confidence": "medium",
+          "source": "Hoffmann_et_al_2022_placeholder_defaults",
+          "notes": [
+            "Scaling-law spine over effective non-embedding capacity and effective training tokens."
+          ],
+          "features": {
+            "N_active": 5589146880,
+            "M_active_non_embedding_proxy": 4437146880,
+            "M_effective_non_embedding_proxy": 6127199261,
+            "N_total": 115159276800,
+            "D_raw": 20000000000000,
+            "D_effective": 20000000000000,
+            "tokens_per_active_param": 4507.400935981637,
+            "tokens_per_effective_param": 3264.1340926026724,
+            "L_inf": 1.69,
+            "raw_spine_loss": 1.9807625717352462,
+            "quality_model_version": "effective_capacity_v2"
+          }
+        },
+        "effective_data": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 0.0,
+          "confidence": "medium",
+          "source": "muennighoff_effective_data_uncalibrated_prior",
+          "notes": [
+            "Repeated token exposures are discounted with a saturating effective-data transform.",
+            "unique_tokens was not supplied; AC assumes all token exposures are unique."
+          ],
+          "features": {
+            "raw_tokens": 20000000000000,
+            "unique_tokens": 20000000000000,
+            "repeat_count": 0.0,
+            "repeat_half_life_epochs": 4.0,
+            "effective_tokens_unscaled": 20000000000000,
+            "data_multiplier": 1.0,
+            "unique_tokens_supplied": false,
+            "raw_spine_loss": 1.9807625717352462,
+            "data_only_spine_loss": 1.9807625717352462,
+            "unscaled_loss_delta": 0.0,
+            "scaled_loss_delta": 0.0,
+            "overfit_penalty": 0.0
+          }
+        },
+        "effective_capacity": {
+          "value_pct": -1.1189,
+          "uncertainty_pct": 0.5595,
+          "confidence": "low",
+          "source": "uncalibrated_effective_sparse_capacity_prior",
+          "notes": [
+            "MoE inactive capacity enters through N_effective; the legacy fractional MoE capacity bonus is disabled in this model version.",
+            "Signed around data_utilization_parity: below ~20 tokens per total parameter the sparse capacity is under-trained and N_eff < N_active (net penalty).",
+            "Capacity elasticity, parity, and data saturation are uncalibrated defaults intended for AC auto-calibration overlays."
+          ],
+          "features": {
+            "N_active_non_embedding": 4437146880,
+            "N_total_non_embedding": 114007276800,
+            "N_effective_non_embedding": 6127199261,
+            "capacity_ratio": 25.693825307851878,
+            "tokens_per_total_param": 175.4273986833795,
+            "tokens_per_total_param_half_saturation": 20.0,
+            "data_utilization": 0.8976602045836833,
+            "data_utilization_parity": 0.5,
+            "capacity_elasticity": 0.25,
+            "capacity_multiplier": 1.0,
+            "data_only_spine_loss": 1.9807625717352462,
+            "effective_spine_loss": 1.9585988609279497,
+            "unscaled_loss_delta": -0.02216371080729651,
+            "scaled_loss_delta": -0.02216371080729651
+          }
+        },
+        "architecture_residual": {
+          "value_pct": 1.8401,
+          "uncertainty_pct": 0.5742,
+          "confidence": "medium",
+          "source": "coupled_width_depth_attention_residual",
+          "notes": [
+            "Query heads are a weak, saturating prior derived from width, not a monotonic quality law.",
+            "KV heads are modeled as a direct memory/latency tradeoff; the uncertain quality term is GQA sharing."
+          ],
+          "features": {
+            "d_model": 2880,
+            "n_layers": 34,
+            "n_query_heads": 64,
+            "n_query_heads_default": 22,
+            "d_head": 64,
+            "n_kv_heads": 8,
+            "gqa_group_size": 8.0,
+            "ffn_ratio": 1.0,
+            "mlp_to_attention_param_ratio": 0.9375,
+            "depth_width_ratio": 0.011805555555555555,
+            "attention_param_ratio": 0.5161,
+            "kv_bytes_per_token_per_layer_bf16": 2048,
+            "attention_bottleneck_risk": false,
+            "subterms": {
+              "width_depth": 0.006987,
+              "mlp_attention_ratio": 0.0,
+              "d_head": 0.004805,
+              "attn_kernel_underrun": 0.0,
+              "query_heads": 0.005701,
+              "kv_heads": 0.0,
+              "gqa_sharing": 0.0,
+              "attention_bottleneck": 0.0,
+              "attention_long_context": 0.0,
+              "attention_mla": 0.0,
+              "attention_csa": 0.0,
+              "attention_indexshare": 0.0,
+              "attention_msa": 0.0,
+              "attention_nsa": 0.0,
+              "attention_swa_locality": 0.000908,
+              "sparsity_2_4": 0.0,
+              "yoco_sharing": 0.0
+            },
+            "attn_long_context_ref_ctx": 32768,
+            "attn_long_context_effective_ctx": 8192,
+            "attention_fraction": 1.0
+          }
+        },
+        "precision_residual": {
+          "value_pct": 0.1,
+          "uncertainty_pct": 0.5,
+          "confidence": "high",
+          "source": "component_precision_sensitivity_with_hardware_feasibility",
+          "notes": [],
+          "features": {
+            "ffn": "bf16",
+            "attention_qkv": "bf16",
+            "attention_o": "bf16",
+            "lm_head": "bf16",
+            "embedding": "bf16",
+            "kv_cache": "int8"
+          }
+        },
+        "moe_residual": {
+          "value_pct": -0.6931,
+          "uncertainty_pct": 0.4,
+          "confidence": "low",
+          "source": "moe_capacity_krajewski_plus_mixtral_deepseek_priors",
+          "notes": [
+            "MoE routing/stability residual only; sparse capacity is represented by the effective-capacity scaling spine.",
+            "Very high expert count without measured load-balance prior."
+          ],
+          "features": {
+            "N_active": 5589146880,
+            "N_total": 115159276800,
+            "n_experts": 128,
+            "top_k": 4,
+            "active_ratio": 0.048534,
+            "expert_activation_ratio": 0.03125,
+            "shared_expert_ratio": 0.0,
+            "has_shared_expert": false,
+            "router_precision": "bf16",
+            "load_balance_prior": 1.0,
+            "granularity": 32.0,
+            "subterms": {
+              "capacity_bonus": 0.0,
+              "granularity_bonus": -0.006931,
+              "routing_penalty": 0.0,
+              "shared_expert_adjust": 0.0,
+              "top_k1_penalty": 0.0,
+              "router_fp8_penalty": 0.0,
+              "dense_prefix_bonus": -0.0,
+              "moe_layer_fraction": 1.0,
+              "n_dense_ffn_layers": 0
+            },
+            "capacity_bonus_included": false
+          }
+        },
+        "context_utility": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 0.2871,
+          "confidence": "high",
+          "source": "task_context_delta_relative_to_pretrain_context",
+          "notes": [
+            "Serving/task context is modeled as a delta relative to the pretraining context; it no longer changes the pretraining spine."
+          ],
+          "features": {
+            "pretraining_context_length": 8192,
+            "evaluation_context_length": 8192,
+            "task_type": "general",
+            "traffic_mix": {},
+            "architecture_context_delta": 0.0,
+            "state_context_delta": 0.0
+          }
+        },
+        "vocab_residual": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 0.0,
+          "confidence": "low",
+          "source": "tao_2024_vocab_scaling_plus_frontier_practice_prior",
+          "notes": [],
+          "features": {
+            "vocab_size": 200000,
+            "v_opt": 111861
+          }
+        },
+        "risk_residual": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 0.0,
+          "confidence": "high",
+          "source": "compiler_attention_and_architecture_risk_prior",
+          "notes": [],
+          "features": {
+            "gqa_group_size": 8.0,
+            "attention_bottleneck_risk": false,
+            "d_head": 64
+          }
+        },
+        "feasibility": {
+          "value_pct": 0.0,
+          "uncertainty_pct": 0.0,
+          "confidence": "high",
+          "source": "hard_constraint",
+          "notes": [],
+          "features": {}
+        }
+      },
+      "binding_serving_regime": "decode-heavy",
+      "binding_constraints": [],
+      "kv_cache_gb": 0.03,
+      "risk_score": 2.5,
+      "risk_label": "medium",
+      "quality_preserving": false,
+      "move_class": "precision",
+      "baseline_delta_loss_pct": -0.041,
+      "baseline_change_summary": "n_layers: 36 -> 34; kv_cache_bits: 16 -> 8; expert_dim: 2880 -> 3008"
+    },
+    "search_stats": {
+      "candidates_generated": 1932,
+      "candidates_evaluated": 1933,
+      "evaluation_failures": 0,
+      "evaluation_failure_reasons": {},
+      "candidates_enumerated_raw": 0,
+      "candidates_feasible": 1933,
+      "pareto_size": 116,
+      "search_time_sec": 4.32,
+      "modifier_candidates_generated": 1932,
+      "modifier_candidates_evaluated": 1933,
+      "modifier_feasible": 1933,
+      "modifier_pareto_size": 116
+    }
+  },
+  "parallelism": {
+    "tensor_parallel": 8,
+    "pipeline_parallel": 1,
+    "data_parallel": 8,
+    "expert_parallel": 8,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 2880,
+    "n_layers": 34,
+    "ffn_dim": 2880,
+    "weight_precision": "bf16",
+    "vocab_size": 200000,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 500000,
+      "scaling": {
+        "method": "yarn",
+        "factor": 32.0,
+        "original_max_position": 4096
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [
+          0,
+          2,
+          4,
+          7,
+          9,
+          11,
+          13,
+          15,
+          18,
+          20,
+          22,
+          24,
+          26,
+          29,
+          31,
+          33
+        ],
+        "type": "transformer_block",
+        "attention": {
+          "type": "full",
+          "n_heads": 64,
+          "n_kv_heads": 8,
+          "d_head": 64,
+          "rope": true,
+          "kv_cache_bits": 8,
+          "precision": {
+            "qk": "bf16",
+            "v": "bf16",
+            "output": "bf16"
+          }
+        },
+        "ffn": {
+          "type": "moe",
+          "n_experts": 128,
+          "top_k": 4,
+          "expert_dim": 3008,
+          "shared_expert": null,
+          "router": {
+            "type": "topk_softmax",
+            "aux_loss_coef": 0.01,
+            "z_loss_coef": 0.001
+          },
+          "capacity_factor": 1.25,
+          "precision": "bf16"
+        },
+        "normalization": {
+          "type": "rmsnorm",
+          "eps": 1e-05,
+          "precision": "bf16"
+        },
+        "residual_dtype": "bf16",
+        "state": null
+      },
+      {
+        "layer_idx": [
+          1,
+          3,
+          5,
+          6,
+          8,
+          10,
+          12,
+          14,
+          16,
+          17,
+          19,
+          21,
+          23,
+          25,
+          27,
+          28,
+          30,
+          32
+        ],
+        "type": "transformer_block",
+        "attention": {
+          "type": "swa",
+          "n_heads": 64,
+          "n_kv_heads": 8,
+          "d_head": 64,
+          "rope": true,
+          "kv_cache_bits": 8,
+          "precision": {
+            "qk": "bf16",
+            "v": "bf16",
+            "output": "bf16"
+          },
+          "window_size": 128
+        },
+        "ffn": {
+          "type": "moe",
+          "n_experts": 128,
+          "top_k": 4,
+          "expert_dim": 3008,
+          "shared_expert": null,
+          "router": {
+            "type": "topk_softmax",
+            "aux_loss_coef": 0.01,
+            "z_loss_coef": 0.001
+          },
+          "capacity_factor": 1.25,
+          "precision": "bf16"
+        },
+        "normalization": {
+          "type": "rmsnorm",
+          "eps": 1e-05,
+          "precision": "bf16"
+        },
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ],
+    "n_dense_ffn_layers": 0
+  }
+}

@@ -1,0 +1,195 @@
+{
+  "schema_version": "0.3",
+  "metadata": {
+    "compiler_version": "ac 0.4.0",
+    "generated_at": "2026-07-17T00:00:00+00:00",
+    "input_hardware": null,
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent": "gate2-wave1",
+    "task": "A-E3 preregistration",
+    "model_name": "kimi-k2-like-1t-moe",
+    "source_note": "K2-like 1T MoE shape from Kimi K2 Tech Report (arXiv:2507.20534) + HF config moonshotai/Kimi-K2-Instruct; band 0 = layer 0 dense FFN (first_k_dense_replace=1), band 1 = layers 1..60 MoE. Stored with ep=8 (schema requires n_experts divisible by ep: 384%72!=0, so EP=72 is not expressible for 384 experts; wave-2 case-5 uses ep=64/96 nearest-legal and records the deviation).",
+    "params": {
+      "total_b": 1026.243,
+      "active_b": 32.7,
+      "embed_b": 1.2,
+      "unembed_b": 1.2
+    },
+    "input_constraints": {
+      "workload": "pretraining",
+      "slo": {}
+    },
+    "predicted": {},
+    "search_stats": {}
+  },
+  "parallelism": {
+    "tensor_parallel": 1,
+    "pipeline_parallel": 1,
+    "data_parallel": 1,
+    "expert_parallel": 8,
+    "context_parallel": 1,
+    "cp_method": "ring"
+  },
+  "architecture": {
+    "d_model": 7168,
+    "n_layers": 61,
+    "vocab_size": 163840,
+    "tied_embeddings": false,
+    "positional_encoding": {
+      "type": "rope",
+      "base": 50000,
+      "scaling": {
+        "method": "yarn",
+        "factor": 32,
+        "original_max_position": 4096
+      }
+    },
+    "layer_configs": [
+      {
+        "layer_idx": [
+          0
+        ],
+        "type": "transformer_block",
+        "attention": {
+          "type": "mla",
+          "n_heads": 64,
+          "n_kv_heads": 64,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {
+            "qk": "bf16",
+            "v": "bf16",
+            "output": "bf16"
+          },
+          "kv_latent_dim": 512,
+          "q_latent_dim": 1536,
+          "rope_head_dim": 64,
+          "nope_head_dim": 128
+        },
+        "ffn": {
+          "type": "swiglu",
+          "ffn_dim": 18432,
+          "precision": "bf16"
+        },
+        "normalization": {
+          "type": "rmsnorm",
+          "eps": 1e-06,
+          "precision": "bf16"
+        },
+        "residual_dtype": "bf16",
+        "state": null
+      },
+      {
+        "layer_idx": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60
+        ],
+        "type": "transformer_block",
+        "attention": {
+          "type": "mla",
+          "n_heads": 64,
+          "n_kv_heads": 64,
+          "d_head": 128,
+          "rope": true,
+          "kv_cache_bits": 16,
+          "precision": {
+            "qk": "bf16",
+            "v": "bf16",
+            "output": "bf16"
+          },
+          "kv_latent_dim": 512,
+          "q_latent_dim": 1536,
+          "rope_head_dim": 64,
+          "nope_head_dim": 128
+        },
+        "ffn": {
+          "type": "moe",
+          "n_experts": 384,
+          "top_k": 8,
+          "expert_dim": 2048,
+          "shared_expert": {
+            "ffn_dim": 2048,
+            "precision": "bf16"
+          },
+          "router": {
+            "type": "topk_softmax",
+            "aux_loss_coef": 0.001,
+            "z_loss_coef": 0.0
+          },
+          "capacity_factor": 1.25,
+          "precision": "bf16"
+        },
+        "normalization": {
+          "type": "rmsnorm",
+          "eps": 1e-06,
+          "precision": "bf16"
+        },
+        "residual_dtype": "bf16",
+        "state": null
+      }
+    ],
+    "n_dense_ffn_layers": 1
+  }
+}

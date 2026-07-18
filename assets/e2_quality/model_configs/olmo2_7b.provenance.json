@@ -1,0 +1,54 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1"
+  },
+  "anchor_id": "e2_olmo2_7b",
+  "model": "allenai/OLMo-2-1124-7B",
+  "facts": {
+    "architecture": {
+      "d_model": 4096,
+      "n_layers": 32,
+      "n_heads": 32,
+      "n_kv_heads": 32,
+      "d_head": 128,
+      "ffn_dim": 11008,
+      "ffn_type": "SwiGLU (hidden_act silu)",
+      "vocab_size": 100352,
+      "tied_embeddings": false,
+      "rope_theta": 500000,
+      "max_position_embeddings": 4096,
+      "normalization": "rmsnorm, eps 1e-6",
+      "source_url": "https://huggingface.co/allenai/OLMo-2-1124-7B/raw/main/config.json",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    },
+    "training_tokens": {
+      "value": 4000000000000,
+      "as_published": "4 Trillion (model card architecture table); stage-1 pretraining on OLMo-mix-1124 is 3.9T tokens at ~1 epoch, stage-2 (Dolmino) adds <=50B per soup member for the 7B",
+      "source_url": "https://huggingface.co/allenai/OLMo-2-1124-7B",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    },
+    "pretraining_context_length": {
+      "value": 4096,
+      "source_url": "https://huggingface.co/allenai/OLMo-2-1124-7B",
+      "date_accessed": "2026-07-17",
+      "tier": "T2"
+    }
+  },
+  "ac_config_adaptations": [
+    "None beyond schema transcription. All fields taken verbatim from the official HF config.json; attention is MHA (n_kv_heads == n_heads == 32).",
+    "metadata.params.total_b/active_b = 7.3B is the count AC's own parameter ledger computes from this architecture block (7,298,351,104); AC requires metadata to agree with its ledger within 2%. The family name '7B' is the published label."
+  ],
+  "prediction_inputs": {
+    "training_tokens": 4000000000000,
+    "unique_training_tokens": null,
+    "pretraining_context_length": 4096,
+    "evaluation_context_length": 4096,
+    "note": "evaluation context == pretraining context so the context_utility term is identically zero: the anchor is the training-distribution loss at the published token count."
+  }
+}

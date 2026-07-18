@@ -1,0 +1,27 @@
+# ac_version: 0.4.0
+# quality_model_version: effective_capacity_v2
+# git_commit: c170cda
+# experiment_date: 2026-07-17
+# agent: gate2-wave1
+# task: A-E3 preregistration (wave 1)
+# NATIVELY REPLAYABLE: ac-compile --recipe <this file> (once gb200_nvl72
+# hardware spec + CLI choices land via gate-2 subtask C; blocker otherwise).
+flags:
+  hardware: gb200_nvl72
+  params: 32
+  max_total_params_b: 1100
+  allow_moe: true
+  moe_n_experts: "384"
+  moe_top_k: "8"
+  ep_options: "8,16,32,64"
+  allow_mla: true
+  mla_kv_latent: "512"
+  mla_q_latent: "1536"
+  dense_ffn_layers: "0,1"
+  tokens: 15.5
+  context: 131072
+  serving_tbt: 50
+  serving_ttft: 2000
+  objective_profile: serving_cost
+  num_gpus: 72
+  tp_options: "1,4,8"

@@ -1,0 +1,364 @@
+{
+  "schema_version": "wave18h.pair_fit.v1",
+  "pairs_path": "/Users/yichenl/source/AC/ac-cli-release/tests/fixtures/public_ablation_pairs_v1.json",
+  "results": [
+    {
+      "pair_id": "waleffe2024_pure_mamba_vs_hybrid_8b",
+      "term": "state_residual",
+      "source": "Waleffe et al. 2024 (NVIDIA), 'An Empirical Study of Mamba-based Language Models', 8B / 1.1T tokens",
+      "observed_pct": 1.5,
+      "predicted_pct": 0.8518,
+      "term_predicted_pct": 0.8705,
+      "residual_pct": 0.6482,
+      "tolerance_pct": 0.8,
+      "within_tolerance": true,
+      "operating_point": {
+        "p_attn_a": 0.07,
+        "p_attn_b": 0.0,
+        "context": 8192
+      }
+    },
+    {
+      "pair_id": "waleffe2024_hybrid_vs_transformer_8b",
+      "term": "state_residual",
+      "source": "Waleffe et al. 2024, 8B / 1.1T tokens, hybrid (p_attn=0.07) vs pure Transformer",
+      "observed_pct": -0.4,
+      "predicted_pct": 0.0684,
+      "term_predicted_pct": 0.2515,
+      "residual_pct": -0.4684,
+      "tolerance_pct": 0.6,
+      "within_tolerance": true,
+      "operating_point": {
+        "p_attn_a": 1.0,
+        "p_attn_b": 0.07,
+        "context": 8192
+      }
+    },
+    {
+      "pair_id": "jamba2024_ratio_parity_256k",
+      "term": "state_residual",
+      "source": "Lieber et al. 2024 (AI21), Jamba: 1:7 attention:Mamba parity with pure-attention up to 256K ctx",
+      "observed_pct": 0.0,
+      "predicted_pct": -2.7158,
+      "term_predicted_pct": 0.033,
+      "residual_pct": 2.7158,
+      "tolerance_pct": 1.0,
+      "within_tolerance": false,
+      "operating_point": {
+        "p_attn_a": 1.0,
+        "p_attn_b": 0.125,
+        "context": 262144
+      }
+    },
+    {
+      "pair_id": "ainslie2023_gqa8_vs_mha",
+      "term": "architecture_residual",
+      "source": "Ainslie et al. 2023, 'GQA: Training Generalized Multi-Query...', T5-XXL uptrained, GQA-8 vs MHA",
+      "observed_pct": 0.1,
+      "predicted_pct": 0.1076,
+      "term_predicted_pct": -0.0186,
+      "residual_pct": -0.0076,
+      "tolerance_pct": 0.3,
+      "within_tolerance": true,
+      "operating_point": {
+        "axis": "kv_heads",
+        "group_a": 1,
+        "group_b": 8,
+        "context": 8192
+      }
+    },
+    {
+      "pair_id": "ainslie2023_mqa_vs_mha",
+      "term": "architecture_residual",
+      "source": "Ainslie et al. 2023, MQA (1 KV head) vs MHA",
+      "observed_pct": 0.55,
+      "predicted_pct": 2.1694,
+      "term_predicted_pct": 2.0819,
+      "residual_pct": -1.6194,
+      "tolerance_pct": 0.4,
+      "within_tolerance": false,
+      "operating_point": {
+        "axis": "kv_heads",
+        "group_a": 1,
+        "group_b": 32,
+        "context": 8192
+      }
+    },
+    {
+      "pair_id": "deepseek2024_mla_vs_mha",
+      "term": "architecture_residual",
+      "source": "DeepSeek-V2 tech report 2024, Table: MLA matches or slightly beats MHA at matched scale",
+      "observed_pct": -0.1,
+      "predicted_pct": 1.3133,
+      "term_predicted_pct": 0.0119,
+      "residual_pct": -1.4133,
+      "tolerance_pct": 0.4,
+      "within_tolerance": false,
+      "operating_point": {
+        "axis": "mla",
+        "kv_latent": 512,
+        "context": 8192
+      }
+    },
+    {
+      "pair_id": "gemma2_2024_local_global_parity",
+      "term": "attention_locality",
+      "source": "Gemma-2 tech report 2024: 1:1 local(4096):global interleave, quality parity with full-attention ablation",
+      "observed_pct": 0.0,
+      "predicted_pct": 0.0137,
+      "term_predicted_pct": 0.0139,
+      "residual_pct": -0.0137,
+      "tolerance_pct": 0.3,
+      "within_tolerance": true,
+      "operating_point": {
+        "local_fraction": 0.5,
+        "window": 4096,
+        "context": 8192
+      }
+    },
+    {
+      "pair_id": "mistral2023_swa_ppl_hit",
+      "term": "attention_locality",
+      "source": "Mistral-7B v0.1: whole-model SWA window 4096; ppl hit vs full attention grows past the window",
+      "observed_pct": 0.55,
+      "predicted_pct": 0.532,
+      "term_predicted_pct": 0.5545,
+      "residual_pct": 0.018,
+      "tolerance_pct": 0.4,
+      "within_tolerance": true,
+      "operating_point": {
+        "local_fraction": 1.0,
+        "window": 4096,
+        "context": 8192
+      }
+    },
+    {
+      "pair_id": "deepseekmoe2024_capacity",
+      "term": "effective_capacity",
+      "source": "Dai et al. 2024, DeepSeekMoE 16B: 64-expert fine-grained MoE (2.8B active / 16.4B total) matches dense ~7B at ~40% compute; at MATCHED active params MoE is decisively better",
+      "observed_pct": -2.5,
+      "predicted_pct": -0.1112,
+      "term_predicted_pct": -0.8432,
+      "residual_pct": -2.3888,
+      "tolerance_pct": 1.2,
+      "within_tolerance": false,
+      "operating_point": {
+        "axis": "moe_capacity",
+        "ratio": 5.9,
+        "tokens_per_total": 122,
+        "context": 4096
+      }
+    },
+    {
+      "pair_id": "deepseekv3_2024_mtp",
+      "term": "mtp_residual",
+      "source": "DeepSeek-V3 2024 \u00a72.2 / ablation: MTP depth-1 improves quality at fixed pretraining budget",
+      "observed_pct": -0.6,
+      "predicted_pct": -0.092,
+      "term_predicted_pct": 0.0,
+      "residual_pct": -0.508,
+      "tolerance_pct": 0.4,
+      "within_tolerance": false,
+      "operating_point": {
+        "axis": "mtp",
+        "depth": 1,
+        "context": 4096
+      }
+    },
+    {
+      "pair_id": "peng2024_yarn_vs_pi",
+      "term": "context_utility",
+      "source": "Peng et al. 2024 (YaRN) vs Chen et al. 2023 (PI): extension-method quality at 4x extension",
+      "observed_pct": -0.3,
+      "predicted_pct": -0.1591,
+      "term_predicted_pct": -0.1664,
+      "residual_pct": -0.1409,
+      "tolerance_pct": 0.3,
+      "within_tolerance": true,
+      "operating_point": {
+        "axis": "rope_method",
+        "factor": 8.0,
+        "context": 65536
+      }
+    }
+  ],
+  "term_fits": [
+    {
+      "term": "state_residual",
+      "n_pairs": 3,
+      "scale": 1.652,
+      "bias_pct": 0.965,
+      "rms_pct": 1.635,
+      "covered_points": [
+        {
+          "p_attn_a": 0.07,
+          "p_attn_b": 0.0,
+          "context": 8192
+        },
+        {
+          "p_attn_a": 1.0,
+          "p_attn_b": 0.07,
+          "context": 8192
+        },
+        {
+          "p_attn_a": 1.0,
+          "p_attn_b": 0.125,
+          "context": 262144
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "term": "architecture_residual",
+      "n_pairs": 3,
+      "scale": 0.218,
+      "bias_pct": -1.013,
+      "rms_pct": 1.241,
+      "covered_points": [
+        {
+          "axis": "kv_heads",
+          "group_a": 1,
+          "group_b": 8,
+          "context": 8192
+        },
+        {
+          "axis": "kv_heads",
+          "group_a": 1,
+          "group_b": 32,
+          "context": 8192
+        },
+        {
+          "axis": "mla",
+          "kv_latent": 512,
+          "context": 8192
+        }
+      ],
+      "warnings": [
+        "fitted scale 0.22 is far from 1.0 \u2014 the term's magnitude disagrees with published evidence; inspect before trusting decisions dominated by 'architecture_residual'."
+      ]
+    },
+    {
+      "term": "attention_locality",
+      "n_pairs": 2,
+      "scale": 1.032,
+      "bias_pct": 0.002,
+      "rms_pct": 0.016,
+      "covered_points": [
+        {
+          "local_fraction": 0.5,
+          "window": 4096,
+          "context": 8192
+        },
+        {
+          "local_fraction": 1.0,
+          "window": 4096,
+          "context": 8192
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "term": "effective_capacity",
+      "n_pairs": 1,
+      "scale": 3.833,
+      "bias_pct": -2.389,
+      "rms_pct": 2.389,
+      "covered_points": [
+        {
+          "axis": "moe_capacity",
+          "ratio": 5.9,
+          "tokens_per_total": 122,
+          "context": 4096
+        }
+      ],
+      "warnings": [
+        "fitted scale 3.83 is far from 1.0 \u2014 the term's magnitude disagrees with published evidence; inspect before trusting decisions dominated by 'effective_capacity'.",
+        "only 1 pair(s) \u2014 scale is a point estimate with no cross-validation; treat as directional."
+      ]
+    },
+    {
+      "term": "moe_residual",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'moe_residual' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "mtp_residual",
+      "n_pairs": 1,
+      "scale": null,
+      "bias_pct": -0.508,
+      "rms_pct": 0.508,
+      "covered_points": [
+        {
+          "axis": "mtp",
+          "depth": 1,
+          "context": 4096
+        }
+      ],
+      "warnings": [
+        "'mtp_residual' pairs exist but the model predicts ~0 delta for all of them \u2014 the term is UNIDENTIFIABLE from this corpus (shape error, or the pairs sit where the term is flat).",
+        "only 1 pair(s) \u2014 scale is a point estimate with no cross-validation; treat as directional."
+      ]
+    },
+    {
+      "term": "context_utility",
+      "n_pairs": 1,
+      "scale": 1.847,
+      "bias_pct": -0.141,
+      "rms_pct": 0.141,
+      "covered_points": [
+        {
+          "axis": "rope_method",
+          "factor": 8.0,
+          "context": 65536
+        }
+      ],
+      "warnings": [
+        "only 1 pair(s) \u2014 scale is a point estimate with no cross-validation; treat as directional."
+      ]
+    },
+    {
+      "term": "precision_residual",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'precision_residual' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "large_shape_stability_prior",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'large_shape_stability_prior' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    },
+    {
+      "term": "risk_residual",
+      "n_pairs": 0,
+      "scale": null,
+      "bias_pct": 0.0,
+      "rms_pct": 0.0,
+      "covered_points": [],
+      "warnings": [
+        "UNCOVERED: no published pair constrains 'risk_residual' \u2014 its constants are hand priors; any decision it dominates is extrapolation."
+      ]
+    }
+  ],
+  "coverage_gaps": [
+    "state_residual: anchored p_attn range [0.00, 1.00], contexts [8192, 8192, 262144]. No anchor above ctx 262,144 \u2014 the long-context benefit magnitude at 1M+ is extrapolation.",
+    "attention_locality: anchored local fractions [0.5, 1.0], windows [4096, 4096]; other regions are priors.",
+    "effective_capacity: anchored sparsity ratios [5.9]; ratios beyond this range (e.g. >8x) lean on the N_eff functional form, not on paired evidence."
+  ]
+}

@@ -1,0 +1,166 @@
+{
+  "base_loss": 1.9873,
+  "hardware": "gb200_nvl72",
+  "sampling_note": "Perturbation re-runs stride-sampled at 1600 candidates (main search ran at 30000); deltas are computed against a base re-optimized under the same cap, so sampling bias cancels in the difference. Loss levels here may differ slightly from the main search's optimum.",
+  "prices": [
+    {
+      "constraint": "serving_tbt_ms",
+      "original_value": "50.0ms",
+      "perturbed_value": "60.0ms",
+      "perturbation_desc": "+20% TBT budget",
+      "original_loss": 1.9873,
+      "perturbed_loss": 1.9873,
+      "delta_loss": 0.0,
+      "delta_loss_pct": 0.0,
+      "interpretation": "No meaningful quality change \u2014 this constraint is not binding."
+    },
+    {
+      "constraint": "serving_ttft_ms",
+      "original_value": "2000.0ms",
+      "perturbed_value": "2400.0ms",
+      "perturbation_desc": "+20% TTFT budget",
+      "original_loss": 1.9873,
+      "perturbed_loss": 1.9873,
+      "delta_loss": 0.0,
+      "delta_loss_pct": 0.0,
+      "interpretation": "No meaningful quality change \u2014 this constraint is not binding."
+    },
+    {
+      "constraint": "param_tolerance",
+      "original_value": "\u00b115%",
+      "perturbed_value": "\u00b125%",
+      "perturbation_desc": "Widen parameter band to \u00b125%",
+      "original_loss": 1.9873,
+      "perturbed_loss": 1.9873,
+      "delta_loss": 0.0,
+      "delta_loss_pct": 0.0,
+      "interpretation": "No meaningful quality change \u2014 this constraint is not binding."
+    },
+    {
+      "constraint": "training_tokens",
+      "original_value": "15.5T",
+      "perturbed_value": "31.0T",
+      "perturbation_desc": "2\u00d7 training tokens",
+      "original_loss": 1.9873,
+      "perturbed_loss": 1.9718,
+      "delta_loss": -0.0155,
+      "delta_loss_pct": -0.78,
+      "interpretation": "Relaxing this constraint improves predicted quality by 0.78%."
+    },
+    {
+      "constraint": "context_length",
+      "original_value": "131072",
+      "perturbed_value": "65536",
+      "perturbation_desc": "Half context length (reduces KV cache pressure)",
+      "original_loss": 1.9873,
+      "perturbed_loss": 1.9794,
+      "delta_loss": -0.0078,
+      "delta_loss_pct": -0.39,
+      "interpretation": "Relaxing this constraint improves predicted quality by 0.39%."
+    },
+    {
+      "constraint": "serving_constraints",
+      "original_value": "TBT\u226450.0ms, TTFT\u22642000.0ms",
+      "perturbed_value": "None",
+      "perturbation_desc": "Remove all serving constraints (training-only optimization)",
+      "original_loss": 1.9873,
+      "perturbed_loss": 1.9873,
+      "delta_loss": 0.0,
+      "delta_loss_pct": 0.0,
+      "interpretation": "No meaningful quality change \u2014 this constraint is not binding."
+    }
+  ],
+  "arch_dim_prices": [
+    {
+      "dimension": "n_layers",
+      "change": "+1 layer",
+      "base_value": 10,
+      "perturbed_value": 11,
+      "delta_loss_pct": -2.33,
+      "delta_train_tps_pct": -9.09,
+      "delta_tbt_pct": 9.99,
+      "delta_mem_pct": 2.67,
+      "decision": "neutral",
+      "reason": "Within the 12.8% uncertainty band on quality (weighted score \u0394=-1.23)",
+      "feasible": true
+    },
+    {
+      "dimension": "n_layers",
+      "change": "-1 layer",
+      "base_value": 10,
+      "perturbed_value": 9,
+      "delta_loss_pct": 2.73,
+      "delta_train_tps_pct": 11.11,
+      "delta_tbt_pct": -9.99,
+      "delta_mem_pct": -2.78,
+      "decision": "neutral",
+      "reason": "Within the 14.2% uncertainty band on quality (weighted score \u0394=+1.71)",
+      "feasible": true
+    },
+    {
+      "dimension": "d_model",
+      "change": "+256 d_model",
+      "base_value": 15360,
+      "perturbed_value": 15616,
+      "delta_loss_pct": 0.32,
+      "delta_train_tps_pct": -1.42,
+      "delta_tbt_pct": 0.52,
+      "delta_mem_pct": 1.6,
+      "decision": "neutral",
+      "reason": "Within the 13.5% uncertainty band on quality (weighted score \u0394=+1.08)",
+      "feasible": true
+    },
+    {
+      "dimension": "d_model",
+      "change": "-256 d_model",
+      "base_value": 15360,
+      "perturbed_value": 15104,
+      "delta_loss_pct": -0.32,
+      "delta_train_tps_pct": 3.26,
+      "delta_tbt_pct": -0.97,
+      "delta_mem_pct": -1.6,
+      "decision": "neutral",
+      "reason": "Within the 13.3% uncertainty band on quality (weighted score \u0394=-1.22)",
+      "feasible": true
+    },
+    {
+      "dimension": "ffn_dim",
+      "change": "+512 FFN dim",
+      "base_value": 40960,
+      "perturbed_value": 41472,
+      "delta_loss_pct": 0.01,
+      "delta_train_tps_pct": -1.34,
+      "delta_tbt_pct": 0.45,
+      "delta_mem_pct": 0.02,
+      "decision": "neutral",
+      "reason": "Within the 13.4% uncertainty band on quality (weighted score \u0394=+0.13)",
+      "feasible": true
+    },
+    {
+      "dimension": "ffn_dim",
+      "change": "-512 FFN dim",
+      "base_value": 40960,
+      "perturbed_value": 40448,
+      "delta_loss_pct": -0.01,
+      "delta_train_tps_pct": 0.0,
+      "delta_tbt_pct": -0.29,
+      "delta_mem_pct": -0.02,
+      "decision": "neutral",
+      "reason": "Within the 13.4% uncertainty band on quality (weighted score \u0394=-0.05)",
+      "feasible": true
+    },
+    {
+      "dimension": "n_kv_heads",
+      "change": "+1 KV head",
+      "base_value": 1,
+      "perturbed_value": 2,
+      "delta_loss_pct": -0.68,
+      "delta_train_tps_pct": -0.0,
+      "delta_tbt_pct": 0.0,
+      "delta_mem_pct": 0.0,
+      "decision": "neutral",
+      "reason": "Within the 13.2% uncertainty band on quality (weighted score \u0394=-1.02)",
+      "feasible": true
+    }
+  ]
+}

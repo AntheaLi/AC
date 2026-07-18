@@ -1,0 +1,46 @@
+{
+  "_header": {
+    "ac_version": "0.4.0",
+    "quality_model_version": "effective_capacity_v2",
+    "git_commit": "c170cda",
+    "experiment_date": "2026-07-17",
+    "agent_wave": "gate2-wave1",
+    "file_role": "provenance sidecar for qwen3_32b.json (E1 anchor fleet)"
+  },
+  "model": "Qwen/Qwen3-32B",
+  "ac_config": "qwen3_32b.json",
+  "date_accessed": "2026-07-17",
+  "sources": {
+    "S1": {
+      "name": "Official HF config.json, Qwen/Qwen3-32B (raw)",
+      "url": "https://huggingface.co/Qwen/Qwen3-32B/raw/main/config.json",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    },
+    "S2": {
+      "name": "Qwen3 Technical Report, arXiv:2505.09388, Table 1 (Qwen3-32B: 64 layers, 64/8 Q/KV heads, untied embeddings, 128K context)",
+      "url": "https://arxiv.org/abs/2505.09388",
+      "tier": "T2",
+      "date_accessed": "2026-07-17"
+    }
+  },
+  "fields": {
+    "d_model": {"value": 5120, "source": "S1 (hidden_size)", "tier": "T2"},
+    "n_layers": {"value": 64, "source": "S1 (num_hidden_layers), S2 (Layers 64)", "tier": "T2"},
+    "n_heads": {"value": 64, "source": "S1 (num_attention_heads), S2 (Heads Q/KV 64/8)", "tier": "T2"},
+    "n_kv_heads": {"value": 8, "source": "S1 (num_key_value_heads), S2 (Heads Q/KV 64/8)", "tier": "T2"},
+    "d_head": {"value": 128, "source": "S1 (head_dim, explicit; decoupled: 64x128=8192 != d_model 5120)", "tier": "T2"},
+    "ffn_dim": {"value": 25600, "source": "S1 (intermediate_size)", "tier": "T2"},
+    "vocab_size": {"value": 151936, "source": "S1 (vocab_size)", "tier": "T2"},
+    "rope_base": {"value": 1000000, "source": "S1 (rope_theta)", "tier": "T2"},
+    "rope_scaling": {"value": "none", "source": "S1 (rope_scaling: null)", "tier": "T2"},
+    "rms_norm_eps": {"value": 1e-06, "source": "S1 (rms_norm_eps)", "tier": "T2"},
+    "tied_embeddings": {"value": false, "source": "S1 (tie_word_embeddings: false), S2 (Table 1: No)", "tier": "T2"},
+    "pretrain_context": {"value": 32768, "source": "S2 (native 32K pretraining context; S1 max_position_embeddings 40960 is the shipped max position)", "tier": "T2"},
+    "total_params_b": {"value": 32.76210176, "source": "computed with AC parameter ledger from S1 dims (attention projections use n_heads*d_head independently of d_model); consistent with the model class (32B)", "tier": "T2"}
+  },
+  "notes": [
+    "Qwen3 applies per-head QK RMSNorm (q_norm/k_norm) inside attention; ~16.8M params (~0.05%) are not booked by AC's ledger and the norm is not representable in schema 0.3. Recorded here; not modeled.",
+    "Serving anchor will use HF repo Qwen/Qwen3-32B (base), no license gate."
+  ]
+}
