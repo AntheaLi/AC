@@ -764,8 +764,8 @@ class Feasibility:
 
     Replaces the previously-scattered guards in evaluate_candidate:
       - memory_extreme_overflow (mem > 10x HBM)
-      - precision_unsupported (qual.predicted_loss > 1e4 sentinel)
-      - quality_sentinel_tripped (post-pick loss > 10x baseline)
+      - precision_unsupported / quality_sentinel_tripped
+        (quality.quality_sentinel is explicit; displayed loss is capped)
       - tbt_budget_warning (soft — does not fail)
       - ttft_budget_warning (soft — does not fail)
       - hbm_spill_warning (soft — annotates spill tier)
@@ -1035,6 +1035,16 @@ PRECISION_CONFIGS = {
         "ffn_precision": "fp8",
         "attn_precision": {"qk": "bf16", "v": "fp8", "output": "fp8"},
     },
+    "ffn_mxfp8": {
+        "weight_precision": "bf16",
+        "ffn_precision": "mxfp8",
+        "attn_precision": {"qk": "bf16", "v": "bf16", "output": "bf16"},
+    },
+    "all_mxfp8": {
+        "weight_precision": "mxfp8",
+        "ffn_precision": "mxfp8",
+        "attn_precision": {"qk": "bf16", "v": "mxfp8", "output": "mxfp8"},
+    },
     "ffn_fp4": {
         "weight_precision": "fp8",
         "ffn_precision": "fp4",
@@ -1069,6 +1079,19 @@ PRECISION_CONFIGS = {
         "ffn_precision": "mxfp6",
         "attn_precision": {"qk": "bf16", "v": "mxfp6", "output": "mxfp6"},
     },
+    # NVIDIA NVFP4 uses 16-value blocks with E4M3 block scales. Keep the
+    # FFN-only recipe mixed with FP8 elsewhere, matching the existing FP4/MX
+    # search modes; the all-component recipe keeps QK logits in BF16.
+    "ffn_nvfp4": {
+        "weight_precision": "fp8",
+        "ffn_precision": "nvfp4",
+        "attn_precision": {"qk": "bf16", "v": "fp8", "output": "fp8"},
+    },
+    "all_nvfp4": {
+        "weight_precision": "nvfp4",
+        "ffn_precision": "nvfp4",
+        "attn_precision": {"qk": "bf16", "v": "nvfp4", "output": "nvfp4"},
+    },
 }
 
 
@@ -1096,7 +1119,9 @@ def get_precision_configs_for_hardware(hw_name: str) -> List[str]:
     if hw_name in ("b200", "gb200_nvl72"):
         # gb200_nvl72 (Gate-2 Task C) is B200 silicon — same precision set.
         return ["all_bf16", "ffn_fp8", "all_fp8",
+                "ffn_mxfp8", "all_mxfp8",
                 "ffn_fp4", "all_fp4",
+                "ffn_nvfp4", "all_nvfp4",
                 "ffn_mxfp4", "all_mxfp4",
                 "ffn_mxfp6", "all_mxfp6"]
     elif hw_name in ("h100", "h800"):
@@ -3774,7 +3799,8 @@ def evaluate_candidate(
         getattr(constraints, "allow_quality_sentinel", False)
         or _os.environ.get("AC_QUALITY_SENTINEL_SOFT") == "1"
     )
-    if qual.predicted_loss > 1e4:
+    _quality_sentinel = bool(getattr(qual, "quality_sentinel", False))
+    if _quality_sentinel:
         if _soft_sentinel:
             violations.append("Quality model reports infeasible (precision not supported) — surfaced as soft warning under allow_quality_sentinel")
         else:
@@ -3815,14 +3841,14 @@ def evaluate_candidate(
         ),
         "quality_sentinel_tripped": GuardResult(
             name="quality_sentinel_tripped",
-            triggered=(qual.predicted_loss > 1e4),
-            fails_feasibility=(qual.predicted_loss > 1e4) and not _soft_sentinel,
-            is_warning=(qual.predicted_loss > 1e4) and _soft_sentinel,
+            triggered=_quality_sentinel,
+            fails_feasibility=_quality_sentinel and not _soft_sentinel,
+            is_warning=_quality_sentinel and _soft_sentinel,
             message=("Quality model returned INFEASIBLE sentinel (precision "
                      "not supported, or extreme memory overflow routed here)"
-                     if qual.predicted_loss > 1e4 else ""),
-            metric_value=qual.predicted_loss,
-            threshold=1e4,
+                     if _quality_sentinel else ""),
+            metric_value=qual.total_penalty_fraction,
+            threshold=1000.0,
         ),
         "training_cluster_cap": GuardResult(
             name="training_cluster_cap",
@@ -4615,9 +4641,9 @@ def optimize(
         optimal = min(scoring_pool, key=display_sort_key)
 
     # v1-fix sanity gate (June 2026): never surface a candidate whose
-    # predicted_loss carries the INFEASIBLE-sentinel inflation. Even though
-    # evaluate_candidate sets meets_constraints=False when
-    # predicted_loss > 1e4 (line ~1957), a few code paths (re-batched
+    # quality result carries the INFEASIBLE sentinel. Even though
+    # evaluate_candidate sets meets_constraints=False when the explicit
+    # quality_sentinel flag is true, a few code paths (re-batched
     # serializer reruns, hardware-fallback evaluators) historically picked
     # up an INFEASIBLE-tainted candidate as "best of the bad lot" and let
     # loss ~ 2e6 leak into the public grid. The audit caught 19.8% of
@@ -4633,9 +4659,7 @@ def optimize(
     )
     if optimal is not None and not _soft_sentinel_optimal:
         try:
-            base = float(optimal.quality.chinchilla_baseline)
-            loss = float(optimal.predicted_loss)
-            if base > 0 and loss > _SENTINEL_LOSS_MULT * base:
+            if bool(optimal.quality.quality_sentinel):
                 optimal = None
         except (AttributeError, TypeError, ValueError):
             # Defensive: if the quality fields are absent, treat as no result.
@@ -5281,9 +5305,7 @@ def optimize_across_contexts(
     if optimal_idx is not None and not soft_sentinel:
         ref_ev = optimal_ev_per_ctx[reference_ctx]
         try:
-            base = float(ref_ev.quality.chinchilla_baseline)
-            loss = float(ref_ev.predicted_loss)
-            if base > 0 and loss > _SENTINEL_LOSS_MULT * base:
+            if bool(ref_ev.quality.quality_sentinel):
                 optimal_idx = None
                 optimal_ev_per_ctx = {}
         except (AttributeError, TypeError, ValueError):

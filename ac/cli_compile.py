@@ -527,6 +527,10 @@ def parse_precision_modes(value: str):
         "ffn_fp8": "ffn_fp8",
         "fp8": "all_fp8",
         "all_fp8": "all_fp8",
+        "mxfp8_ffn": "ffn_mxfp8",
+        "ffn_mxfp8": "ffn_mxfp8",
+        "mxfp8": "all_mxfp8",
+        "all_mxfp8": "all_mxfp8",
         "fp4_ffn": "ffn_fp4",
         "ffn_fp4": "ffn_fp4",
         "fp4": "all_fp4",
@@ -539,6 +543,10 @@ def parse_precision_modes(value: str):
         "ffn_mxfp6": "ffn_mxfp6",
         "mxfp6": "all_mxfp6",
         "all_mxfp6": "all_mxfp6",
+        "nvfp4_ffn": "ffn_nvfp4",
+        "ffn_nvfp4": "ffn_nvfp4",
+        "nvfp4": "all_nvfp4",
+        "all_nvfp4": "all_nvfp4",
     }
     out = []
     for raw in value.split(","):
@@ -859,7 +867,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kv-dtypes", type=parse_kv_dtype_options, default=None,
                    help="Comma-separated KV dtype options, e.g. bf16,int8,int4")
     p.add_argument("--precision-modes", type=parse_precision_modes, default=None,
-                   help="Comma-separated precision modes, e.g. bf16,fp8_ffn,fp4,mxfp4")
+                   help="Comma-separated precision modes, e.g. bf16,fp8_ffn,mxfp8,nvfp4")
 
     # Output files
     p.add_argument("--output-config", default="arch.json",

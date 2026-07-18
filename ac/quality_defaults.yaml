@@ -127,29 +127,54 @@ precision_residual:
 # at the 7B-13B scale.
 precision_sensitivity:
   ffn:
+    mxfp8: {delta: 0.0015, uncertainty: 0.005, risk: "low"}
     fp8: {delta: 0.002, uncertainty: 0.005, risk: "low"}
+    mxfp6: {delta: 0.004, uncertainty: 0.012, risk: "low"}
+    nvfp4: {delta: 0.008, uncertainty: 0.016, risk: "low_medium"}
+    mxfp4: {delta: 0.012, uncertainty: 0.020, risk: "low_medium"}
     fp4: {delta: 0.04, uncertainty: 0.04, risk: "medium"}
   attention_qkv:
+    mxfp8: {delta: 0.003, uncertainty: 0.008, risk: "low"}
     fp8: {delta: 0.004, uncertainty: 0.008, risk: "low_medium"}
+    mxfp6: {delta: 0.006, uncertainty: 0.015, risk: "low_medium"}
+    nvfp4: {delta: 0.012, uncertainty: 0.020, risk: "medium"}
+    mxfp4: {delta: 0.018, uncertainty: 0.025, risk: "medium"}
     fp4: {delta: 0.06, uncertainty: 0.06, risk: "medium_high"}
   attention_o:
+    mxfp8: {delta: 0.0025, uncertainty: 0.007, risk: "low"}
     fp8: {delta: 0.003, uncertainty: 0.007, risk: "low_medium"}
+    mxfp6: {delta: 0.005, uncertainty: 0.013, risk: "low_medium"}
+    nvfp4: {delta: 0.010, uncertainty: 0.019, risk: "medium"}
+    mxfp4: {delta: 0.015, uncertainty: 0.025, risk: "medium"}
     fp4: {delta: 0.05, uncertainty: 0.05, risk: "medium_high"}
   qk_logits:
-    fp8: {delta: 0.02, uncertainty: 0.03, risk: "medium"}
+    mxfp8: {delta: 0.04, uncertainty: 0.045, risk: "medium_high"}
+    fp8: {delta: 0.05, uncertainty: 0.05, risk: "medium_high"}
+    mxfp6: {delta: 0.06, uncertainty: 0.06, risk: "high"}
+    nvfp4: {delta: 0.07, uncertainty: 0.07, risk: "high"}
+    mxfp4: {delta: 0.08, uncertainty: 0.08, risk: "high"}
+    fp4: {delta: 0.10, uncertainty: 0.10, risk: "high"}
     fp32_accum: {delta: 0.00, uncertainty: 0.00, risk: "low"}
   router:
     fp8: {delta: 0.02, uncertainty: 0.03, risk: "medium"}
     bf16: {delta: 0.00, uncertainty: 0.00, risk: "low"}
   experts:
-    int8: {delta: 0.01, uncertainty: 0.02, risk: "low_medium"}
-    fp8: {delta: 0.003, uncertainty: 0.01, risk: "low"}
-    fp4: {delta: 0.04, uncertainty: 0.05, risk: "medium"}
+    int8: {delta: 0.02, uncertainty: 0.03, risk: "medium"}
+    mxfp8: {delta: 0.008, uncertainty: 0.025, risk: "low_medium"}
+    fp8: {delta: 0.01, uncertainty: 0.03, risk: "medium"}
+    mxfp6: {delta: 0.018, uncertainty: 0.035, risk: "medium"}
+    nvfp4: {delta: 0.035, uncertainty: 0.045, risk: "medium"}
+    mxfp4: {delta: 0.045, uncertainty: 0.05, risk: "medium_high"}
+    fp4: {delta: 0.06, uncertainty: 0.06, risk: "medium_high"}
   kv_cache:
     int8: {delta: 0.001, uncertainty: 0.005, risk: "low"}
     int4: {delta: 0.012, uncertainty: 0.02, risk: "medium"}
   lm_head:
+    mxfp8: {delta: 0.005, uncertainty: 0.012, risk: "low"}
     fp8: {delta: 0.006, uncertainty: 0.012, risk: "low_medium"}
+    mxfp6: {delta: 0.009, uncertainty: 0.015, risk: "low_medium"}
+    nvfp4: {delta: 0.0135, uncertainty: 0.020, risk: "medium"}
+    mxfp4: {delta: 0.018, uncertainty: 0.025, risk: "medium"}
     fp4: {delta: 0.05, uncertainty: 0.06, risk: "medium_high"}
     bf16: {delta: 0.00, uncertainty: 0.00, risk: "low"}
 

@@ -348,12 +348,16 @@ _PRECISION_MODE_CANONICAL_TO_INPUT = {
     "all_bf16": "bf16",
     "ffn_fp8": "fp8_ffn",
     "all_fp8": "fp8",
+    "ffn_mxfp8": "mxfp8_ffn",
+    "all_mxfp8": "mxfp8",
     "ffn_fp4": "fp4_ffn",
     "all_fp4": "fp4",
     "ffn_mxfp4": "mxfp4_ffn",
     "all_mxfp4": "mxfp4",
     "ffn_mxfp6": "mxfp6_ffn",
     "all_mxfp6": "mxfp6",
+    "ffn_nvfp4": "nvfp4_ffn",
+    "all_nvfp4": "nvfp4",
 }
 
 

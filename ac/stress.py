@@ -46,6 +46,7 @@ try:
     )
     from .architecture import (
         compose_layer_type_list, parameter_ledger,
+        precision_bytes_per_element,
         training_parameter_byte_layout, training_parameter_layout,
     )
 except ImportError:
@@ -60,6 +61,7 @@ except ImportError:
     )
     from architecture import (
         compose_layer_type_list, parameter_ledger,
+        precision_bytes_per_element,
         training_parameter_byte_layout, training_parameter_layout,
     )
 
@@ -288,12 +290,8 @@ class StressVector:
 # Volume / FLOPS helpers (formulas mirror throughput_model.py)
 # =============================================================================
 
-_BPE_TABLE = {"bf16": 2, "fp16": 2, "fp8": 1, "fp4": 0.5,
-              "int8": 1, "int4": 0.5, "tf32": 4}
-
-
 def _bpe(prec: str) -> float:
-    return _BPE_TABLE.get(prec, 2)
+    return precision_bytes_per_element(prec)
 
 
 def _kv_cache_bytes_total(

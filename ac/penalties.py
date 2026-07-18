@@ -248,7 +248,9 @@ def precision_supported(precision: str, hardware: str = "h100") -> bool:
 # non-native formats correctly by construction: `peak_flops_s` falls back
 # to the bf16 compute rate while `bytes_per_elem` charges the reduced
 # storage bytes — exactly weight-only-quant serving physics.
-WEIGHT_STORAGE_UNIVERSAL = {"fp8", "fp4", "mxfp4", "mxfp6", "int8", "int4"}
+WEIGHT_STORAGE_UNIVERSAL = {
+    "fp8", "fp4", "mxfp4", "mxfp6", "mxfp8", "nvfp4", "int8", "int4",
+}
 
 
 def weight_storage_supported(precision: str, hardware: str = "h100") -> bool:
@@ -352,6 +354,11 @@ WEIGHT_PRECISION_PENALTIES = {
     # (microscaling recovers most of the plain-FP4 gap, per MXFP launch data).
     ("embedding", "mxfp6"): 0.012,
     ("embedding", "mxfp4"): 0.018,
+    # MXFP8's 32-value microscaling is modeled as slightly more robust than
+    # tensor-scaled FP8. NVFP4's 16-value E4M3 scales place it between MXFP6
+    # and MXFP4. These are conservative priors, not calibrated frontier fits.
+    ("embedding", "mxfp8"): 0.009,
+    ("embedding", "nvfp4"): 0.015,
 }
 
 # Hardware availability for each precision
@@ -365,6 +372,9 @@ PRECISION_HARDWARE_SUPPORT = {
     # v1-fix microscaling: OCP MX formats. Blackwell + Trainium 3.
     "mxfp4": {"b200", "gb200_nvl72", "trainium3", "trn3"},
     "mxfp6": {"b200", "gb200_nvl72", "trainium3", "trn3"},
+    # Transformer Engine exposes these recipes on Blackwell (SM100+).
+    "mxfp8": {"b200", "gb200_nvl72"},
+    "nvfp4": {"b200", "gb200_nvl72"},
     "int8": {"h100", "b200", "gb200_nvl72", "h800", "tpu_v5e", "tpu_v5p", "trainium2", "trn2", "trainium3", "trn3"},
 }
 
@@ -423,8 +433,16 @@ def weight_precision_penalty(
 #         across training, so penalties are smaller than weight penalties.
 
 ACTIVATION_PRECISION_PENALTIES = {
+    ("attention", "mxfp8"): 0.0015,
+    ("ffn", "mxfp8"):       0.00075,
     ("attention", "fp8"):   0.002,
     ("ffn", "fp8"):         0.001,
+    ("attention", "mxfp6"): 0.003,
+    ("ffn", "mxfp6"):       0.0015,
+    ("attention", "nvfp4"): 0.005,
+    ("ffn", "nvfp4"):       0.0025,
+    ("attention", "mxfp4"): 0.0065,
+    ("ffn", "mxfp4"):       0.00325,
     ("attention", "fp4"):   0.008,  # FP4 activations newer, less validated
     ("ffn", "fp4"):         0.004,
 }

@@ -384,7 +384,10 @@ def _validate_delta_arg_values(name: str, args: Dict[str, Any]) -> List[str]:
     elif name == "scale_n_layers":
         require_int("delta")
     elif name == "change_precision_per_component":
-        valid = {"bf16", "fp16", "fp32", "fp8", "fp4", "int8", "int4", "mxfp4", "mxfp6"}
+        valid = {
+            "bf16", "fp16", "fp32", "fp8", "fp4", "int8", "int4",
+            "mxfp4", "mxfp6", "mxfp8", "nvfp4",
+        }
         for key in ("kv", "weight", "activation"):
             if key in args and str(args[key]).lower() not in valid:
                 errors.append(

@@ -38,7 +38,7 @@ except ImportError:
 _KV_PRECISION_TO_BITS = {
     "bf16": 16, "fp16": 16, "fp32": 32, "tf32": 32,
     "fp8": 8, "int8": 8, "fp4": 4, "int4": 4,
-    "mxfp4": 4, "mxfp6": 6,
+    "mxfp4": 4, "mxfp6": 6, "mxfp8": 8, "nvfp4": 4,
 }
 
 
@@ -174,7 +174,17 @@ def apply_transition(
         decode_kv_len=baseline.seq_len,
         phase="decode",
     )
-    training = training or TrainingConfig(training_tokens=20_000_000_000_000)
+    if training is None:
+        training = TrainingConfig(
+            training_tokens=20_000_000_000_000,
+            hardware=hardware,
+        )
+    elif training.hardware != hardware:
+        # `hardware` is the execution target for this transition. Keeping a
+        # caller-supplied TrainingConfig's default h100 here made valid B200
+        # activation formats trip the quality sentinel in the stress summary
+        # while the evaluator's B200 metric panel called them feasible.
+        training = dc_replace(training, hardware=hardware)
 
     # --- precondition ---
     ok, reason = transformation.precondition(baseline)
@@ -268,6 +278,29 @@ def apply_transition(
                                       arch_name=f"{baseline_name or 'baseline'}+{transformation.name}")
     except Exception:
         pass
+
+    # QualityStressVector preserves the raw residual even though QualityResult
+    # caps its displayed loss at 10x baseline. Fail closed here so direct
+    # transition callers cannot report an unsupported activation precision as
+    # feasible merely because the old predicted-loss sentinel was capped.
+    if c_q is not None and c_q.total_residual >= 1000.0:
+        return Transition(
+            transformation_name=transformation.name,
+            transformation_params=dict(params),
+            baseline_architecture_id=_arch_hash(baseline),
+            candidate_architecture_id=_arch_hash(candidate),
+            hardware_id=hardware,
+            workload_id=workload.workload_id(),
+            baseline_stress=b_stress,
+            candidate_stress=c_stress,
+            baseline_quality=b_q,
+            candidate_quality=c_q,
+            feasible=False,
+            reason_if_infeasible=(
+                "quality_validation_failed: candidate quality model returned "
+                "the INFEASIBLE sentinel; check precision/hardware support"
+            ),
+        )
 
     t = Transition(
         transformation_name=transformation.name,

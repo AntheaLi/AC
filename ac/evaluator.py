@@ -98,8 +98,16 @@ def _infeasibility_check(
     ~-1.96e6 with a misleading "improves" direction. Surface it as a
     real infeasibility instead.
     """
-    base_bad = _loss_is_infeasible_sentinel(getattr(base_ev, "predicted_loss", None))
-    cand_bad = _loss_is_infeasible_sentinel(getattr(cand_ev, "predicted_loss", None))
+    base_bad = bool(getattr(getattr(base_ev, "quality", None),
+                            "quality_sentinel", False))
+    cand_bad = bool(getattr(getattr(cand_ev, "quality", None),
+                            "quality_sentinel", False))
+    # Backward compatibility for externally constructed EvaluatedCandidate
+    # objects that predate QualityResult.quality_sentinel.
+    base_bad = base_bad or _loss_is_infeasible_sentinel(
+        getattr(base_ev, "predicted_loss", None))
+    cand_bad = cand_bad or _loss_is_infeasible_sentinel(
+        getattr(cand_ev, "predicted_loss", None))
     if not (base_bad or cand_bad):
         return None
     parts: List[str] = []

@@ -61,8 +61,12 @@ B200 = HardwareSpec(
     tiles={
         "bf16": TileSpec("bf16", 16, 8, 16, 128, 128, 64),
         "fp8":  TileSpec("fp8",  16, 8, 32, 128, 128, 128),
+        "mxfp8": TileSpec("mxfp8", 16, 8, 32, 128, 128, 128),
+        "mxfp6": TileSpec("mxfp6", 16, 8, 32, 128, 128, 128),
         "int8": TileSpec("int8", 16, 8, 32, 128, 128, 128),
         "fp4":  TileSpec("fp4",  16, 8, 64, 128, 128, 256),
+        "nvfp4": TileSpec("nvfp4", 16, 8, 64, 128, 128, 256),
+        "mxfp4": TileSpec("mxfp4", 16, 8, 64, 128, 128, 256),
     }
 )
 
@@ -113,7 +117,9 @@ TRAINIUM3 = HardwareSpec(
     tiles={
         "bf16": TileSpec("bf16", 128, 128, 64, 128, 128, 64),
         "fp8":  TileSpec("fp8",  128, 128, 128, 128, 128, 128),
+        "mxfp6": TileSpec("mxfp6", 128, 128, 128, 128, 128, 128),
         "fp4":  TileSpec("fp4",  128, 128, 256, 128, 128, 256),
+        "mxfp4": TileSpec("mxfp4", 128, 128, 256, 128, 128, 256),
         "int8": TileSpec("int8", 128, 128, 128, 128, 128, 128),
     }
 )

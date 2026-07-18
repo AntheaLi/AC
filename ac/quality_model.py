@@ -615,24 +615,31 @@ DEFAULT_QUALITY_CONSTANTS = {
         # components). FP4/MXFP4 remain conservative — public training data
         # is still sparse at frontier scale.
         "ffn": {
+            "mxfp8": {"delta": 0.0015, "uncertainty": 0.005, "risk": "low"},
             "fp8": {"delta": 0.002, "uncertainty": 0.005, "risk": "low"},
             "fp4": {"delta": 0.04, "uncertainty": 0.04, "risk": "medium"},
             "mxfp4": {"delta": 0.012, "uncertainty": 0.020, "risk": "low_medium"},
             "mxfp6": {"delta": 0.004, "uncertainty": 0.012, "risk": "low"},
+            "nvfp4": {"delta": 0.008, "uncertainty": 0.016, "risk": "low_medium"},
         },
         "attention_qkv": {
+            "mxfp8": {"delta": 0.003, "uncertainty": 0.008, "risk": "low"},
             "fp8": {"delta": 0.004, "uncertainty": 0.008, "risk": "low_medium"},
             "fp4": {"delta": 0.06, "uncertainty": 0.06, "risk": "medium_high"},
             "mxfp4": {"delta": 0.018, "uncertainty": 0.025, "risk": "medium"},
             "mxfp6": {"delta": 0.006, "uncertainty": 0.015, "risk": "low_medium"},
+            "nvfp4": {"delta": 0.012, "uncertainty": 0.020, "risk": "medium"},
         },
         "attention_o": {
+            "mxfp8": {"delta": 0.0025, "uncertainty": 0.007, "risk": "low"},
             "fp8": {"delta": 0.003, "uncertainty": 0.007, "risk": "low_medium"},
             "fp4": {"delta": 0.05, "uncertainty": 0.05, "risk": "medium_high"},
             "mxfp4": {"delta": 0.015, "uncertainty": 0.025, "risk": "medium"},
             "mxfp6": {"delta": 0.005, "uncertainty": 0.013, "risk": "low_medium"},
+            "nvfp4": {"delta": 0.010, "uncertainty": 0.019, "risk": "medium"},
         },
         "qk_logits": {
+            "mxfp8": {"delta": 0.04, "uncertainty": 0.045, "risk": "medium_high"},
             "fp8": {"delta": 0.05, "uncertainty": 0.05, "risk": "medium_high"},
             "fp32_accum": {"delta": 0.0, "uncertainty": 0.0, "risk": "low"},
             # Wave 40: rows below keep the widening order monotone now that
@@ -640,6 +647,7 @@ DEFAULT_QUALITY_CONSTANTS = {
             # attn_precision["qk"] was never threaded into the quality view).
             # Sub-fp8 logits are speculative; penalties are floors, not fits.
             "mxfp6": {"delta": 0.06, "uncertainty": 0.06, "risk": "high"},
+            "nvfp4": {"delta": 0.07, "uncertainty": 0.07, "risk": "high"},
             "mxfp4": {"delta": 0.08, "uncertainty": 0.08, "risk": "high"},
             "fp4": {"delta": 0.10, "uncertainty": 0.10, "risk": "high"},
         },
@@ -649,7 +657,11 @@ DEFAULT_QUALITY_CONSTANTS = {
         },
         "experts": {
             "int8": {"delta": 0.02, "uncertainty": 0.03, "risk": "medium"},
+            "mxfp8": {"delta": 0.008, "uncertainty": 0.025, "risk": "low_medium"},
             "fp8": {"delta": 0.01, "uncertainty": 0.03, "risk": "medium"},
+            "mxfp6": {"delta": 0.018, "uncertainty": 0.035, "risk": "medium"},
+            "nvfp4": {"delta": 0.035, "uncertainty": 0.045, "risk": "medium"},
+            "mxfp4": {"delta": 0.045, "uncertainty": 0.05, "risk": "medium_high"},
             "fp4": {"delta": 0.06, "uncertainty": 0.06, "risk": "medium_high"},
         },
         "kv_cache": {
@@ -662,6 +674,7 @@ DEFAULT_QUALITY_CONSTANTS = {
         "lm_head": {
             # Fix #12: lm_head FP8 is more sensitive than FFN FP8 but not
             # 30× more. Numbers below match the FP8-LM ablation table.
+            "mxfp8": {"delta": 0.005, "uncertainty": 0.012, "risk": "low"},
             "fp8": {"delta": 0.006, "uncertainty": 0.012, "risk": "low_medium"},
             "fp4": {"delta": 0.05, "uncertainty": 0.06, "risk": "medium_high"},
             "bf16": {"delta": 0.0, "uncertainty": 0.0, "risk": "low"},
@@ -671,6 +684,7 @@ DEFAULT_QUALITY_CONSTANTS = {
             # Values interpolate fp8 -> fp4 using the same mxfp6 ≈ 1.5×fp8 /
             # mxfp4 ≈ 3×fp8 ratios the ffn/qkv/o rows already encode.
             "mxfp6": {"delta": 0.009, "uncertainty": 0.015, "risk": "low_medium"},
+            "nvfp4": {"delta": 0.0135, "uncertainty": 0.020, "risk": "medium"},
             "mxfp4": {"delta": 0.018, "uncertainty": 0.025, "risk": "medium"},
         },
     },
@@ -2300,11 +2314,14 @@ def _component_table_lookup(constants: Dict[str, Any], component: str, precision
 
 def _group_precision(arch: ArchConfig, components: List[str]) -> str:
     values = [arch.get_precision(c) for c in components]
-    if any(v in ("fp4", "int4") for v in values):
-        return "fp4"
-    if any(v in ("fp8", "int8") for v in values):
-        return "fp8"
-    return values[0] if values else arch.weight_precision
+    severity = {
+        "fp32": 0, "tf32": 0, "bf16": 0, "fp16": 0,
+        "mxfp8": 1, "fp8": 2, "int8": 2, "mxfp6": 3,
+        "nvfp4": 4, "mxfp4": 5, "fp4": 6, "int4": 6,
+    }
+    if not values:
+        return arch.weight_precision
+    return max(values, key=lambda value: severity.get(value, 2))
 
 
 def _precision_residual(
@@ -2380,7 +2397,7 @@ def _precision_residual(
         v, u, risk = _component_table_lookup(constants, component, prec)
         weight_total += v
         uncertainty_sq += u ** 2
-        if prec in ("fp4", "int4"):
+        if prec in ("fp4", "int4", "mxfp4", "mxfp6", "nvfp4", "mxfp8"):
             fp4_seen = True
         if v > 0:
             notes.append(f"{component}={prec} risk={risk}")
@@ -2393,7 +2410,7 @@ def _precision_residual(
     else:
         emb_legacy = weight_precision_quality("embedding", embed_prec)
     weight_total += emb_legacy
-    if embed_prec in ("fp4", "int4"):
+    if embed_prec in ("fp4", "int4", "mxfp4", "mxfp6", "nvfp4", "mxfp8"):
         fp4_seen = True
 
     if infeasible:
@@ -2402,7 +2419,7 @@ def _precision_residual(
     penalties["weight_precision"] = _make_penalty_entry(
         "weight_precision", weight_total,
         cfg.get("source", "quality_v1 precision_sensitivity"),
-        caveat="FP4 and mixed-precision entries are placeholders until measured per-component sweeps exist" if fp4_seen else "",
+        caveat="FP4, NVFP4, and MX entries are priors until measured per-component sweeps exist" if fp4_seen else "",
         confidence="low" if fp4_seen or infeasible else ("medium" if weight_total >= 0.01 else "high"),
         hardware_dependent=True,
     )

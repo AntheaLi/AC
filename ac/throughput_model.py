@@ -276,13 +276,7 @@ class ArchConfig:
         For non-MLA/non-NSA, K and V are each stored per-kv-head:
         2 × n_kv_heads × d_head × bpe.
         """
-        bpe_map = {"bf16": 2, "fp16": 2, "fp8": 1, "fp4": 0.5,
-                   "int8": 1, "int4": 0.5, "tf32": 4, "fp32": 4,
-                   # v1-fix microscaling: MX formats include the shared scale
-                   # (1 byte per 32 elements ≈ 0.03 byte/elem) but the elem
-                   # body is the same as E2M1 / E2M3 / E3M2 (4/6 bits).
-                   "mxfp4": 0.53, "mxfp6": 0.78}
-        bpe = bpe_map.get(self.kv_precision, 2)
+        bpe = precision_bytes_per_element(self.kv_precision)
         if self.attention_type == "mla" and self.mla_kv_latent_dim:
             c_kv = int(self.mla_kv_latent_dim)
             d_rope = int(self.mla_rope_head_dim or 0)
@@ -372,10 +366,7 @@ class ArchConfig:
         if self.attention_type == "mla" and self.mla_kv_latent_dim:
             return 0, total
         if self.attention_type == "indexshare" and self.indexshare_top_k_buckets:
-            bpe_map = {"bf16": 2, "fp16": 2, "fp8": 1, "fp4": 0.5,
-                       "int8": 1, "int4": 0.5, "tf32": 4, "fp32": 4,
-                       "mxfp4": 0.53, "mxfp6": 0.78}
-            bpe = bpe_map.get(self.kv_precision, 2)
+            bpe = precision_bytes_per_element(self.kv_precision)
             idx_dim = int(self.indexshare_index_dim or 64)
             replicated = int(2 * idx_dim * bpe)
             return max(0, total - replicated), replicated
@@ -509,15 +500,11 @@ class HardwareConfig:
     # (spec-table lookup). On the gpt-oss-120b anchor this inflated decode
     # TBT by ~2.2x while memory read ~4x small: two panels, two physics.
     # MX formats include the shared scale (1 byte / 32 elems).
-    _CANONICAL_BPE = {"bf16": 2, "fp16": 2, "fp32": 4, "tf32": 4,
-                      "fp8": 1, "int8": 1, "fp4": 0.5, "int4": 0.5,
-                      "mxfp4": 0.53, "mxfp6": 0.78}
-
     def bytes_per_elem(self, precision: str) -> float:
         v = self.bytes_per_element.get(precision)
         if v is not None:
             return v
-        return self._CANONICAL_BPE.get(precision, 2)
+        return precision_bytes_per_element(precision)
 
     def interconnect_bw_bytes_s(self, tp_degree: int) -> float:
         """Effective interconnect bandwidth for TP all-reduce."""
@@ -1250,6 +1237,16 @@ def get_tile_efficiency(
     return tile_util * wave_eff
 
 
+_CALIBRATION_PRECISION_ALIASES = {
+    # These recipes use the same Blackwell tensor-core kernel families; their
+    # block-scale metadata changes storage/numerics, not the CTA geometry.
+    "mxfp8": "fp8",
+    "mxfp6": "fp8",
+    "nvfp4": "fp4",
+    "mxfp4": "fp4",
+}
+
+
 # =============================================================================
 # Per-operation cost functions
 # =============================================================================
@@ -1275,7 +1272,14 @@ def _matmul_cost(
     # Try calibration first, fall back to lattice tile efficiency
     eff = None
     if calibration is not None:
-        eff = calibration.lookup_gemm_efficiency(M, N, K, precision)
+        calibration_precision = precision
+        if precision in hw.supported_precisions:
+            calibration_precision = _CALIBRATION_PRECISION_ALIASES.get(
+                precision, precision
+            )
+        eff = calibration.lookup_gemm_efficiency(
+            M, N, K, calibration_precision
+        )
     if eff is None:
         eff = get_tile_efficiency(M, N, K, precision, lattice_hw)
     eff = max(eff, 0.1)  # floor to avoid division by zero
@@ -2033,9 +2037,9 @@ def compute_crossover_seq_len(
 
     d = arch.d_model
     B = arch.batch_size
-    kv_bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1}.get(arch.kv_precision, 2)
+    kv_bpe = precision_bytes_per_element(arch.kv_precision)
     state_prec = sc.get("state_precision", arch.precision)
-    state_bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1}.get(state_prec, 2)
+    state_bpe = precision_bytes_per_element(state_prec)
 
     d_state = int(sc.get("d_state", 128))
     state_expansion = int(sc.get("state_expansion", 2))
@@ -2071,7 +2075,7 @@ def compute_crossover_seq_len(
     # QKV proj weights: d * (heads_per_gpu + 2*kv_heads_per_gpu) * d_head * bpe
     # Output proj weights: heads_per_gpu * d_head * d * bpe
     attn_heads_per_gpu = arch.n_heads // tp_degree
-    attn_bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1}.get(arch.precision, 2)
+    attn_bpe = precision_bytes_per_element(arch.precision)
     qkv_weight_bytes = d * (attn_heads_per_gpu + 2 * kv_heads_per_gpu) * arch.d_head * attn_bpe
     out_weight_bytes = attn_heads_per_gpu * arch.d_head * d * attn_bpe
     attn_fixed_bytes = qkv_weight_bytes + out_weight_bytes
@@ -2552,7 +2556,7 @@ def compute_layer_time(
     if phase == "decode":
         # Decode attention: query (B,1,nh,dh) × keys (B,L,nkv,dh)
         # This is KV-cache-bandwidth-bound, not compute-bound
-        kv_bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1}.get(arch.kv_precision, 2)
+        kv_bpe = precision_bytes_per_element(arch.kv_precision)
         L = kv_cache_len
 
         # KV cache load per layer: K + V, each (B, nkv_per_gpu, L, dh).

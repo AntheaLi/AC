@@ -358,6 +358,11 @@ _PRECISION_STORAGE_BYTES = {
     # OCP MX formats include one shared scale byte per 32 elements.
     "mxfp4": 0.53,
     "mxfp6": 0.78,
+    # MXFP8: FP8 payload + one E8M0 scale byte per 32 values.
+    "mxfp8": 1.03125,
+    # NVFP4: E2M1 payload + one E4M3 scale byte per 16 values. The
+    # per-tensor FP32 scale is negligible for architecture-level accounting.
+    "nvfp4": 0.5625,
 }
 
 
