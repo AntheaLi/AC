@@ -32,11 +32,16 @@ try:
         compute_throughput_stress, severity_band,
     )
     from .transition import Transition
-    from .delta_engine import apply_transition
+    from .delta_engine import (
+        apply_transition, _structural_execution_error, _training_for_arch,
+    )
+    from .quality_model import TrainingConfig
+    from .quality_stress import compute_quality_stress
     from .deltas import REGISTRY, get as get_transformation
     from .justify_transition import justify
     from .optimizer_bridge import candidate_to_arch, stress_relief_vs
     from .penalties import INFEASIBLE
+    from .architecture import format_state_attention_ratio
 except ImportError:
     from optimizer import (
         CandidateArch, DeploymentConstraints, EvaluatedCandidate,
@@ -49,11 +54,16 @@ except ImportError:
         compute_throughput_stress, severity_band,
     )
     from transition import Transition
-    from delta_engine import apply_transition
+    from delta_engine import (
+        apply_transition, _structural_execution_error, _training_for_arch,
+    )
+    from quality_model import TrainingConfig
+    from quality_stress import compute_quality_stress
     from deltas import REGISTRY, get as get_transformation
     from justify_transition import justify
     from optimizer_bridge import candidate_to_arch, stress_relief_vs
     from penalties import INFEASIBLE
+    from architecture import format_state_attention_ratio
 
 
 # Any predicted_loss at or above this threshold is treated as the
@@ -254,6 +264,20 @@ def arch_to_candidate(arch: TArchConfig, base: CandidateArch) -> CandidateArch:
     not part of CandidateArch; callers must thread overrides through the
     `tp_override` argument to evaluate_delta separately.
     """
+    # Throughput materializes local attention as a third layer tag;
+    # CandidateArch stores locality on n_local_attn_layers/swa_window and
+    # reserves layer_type_list for the attention-vs-state mixer. Normalize
+    # before crossing the boundary so a round-trip has stable identity.
+    normalized_layer_types = [
+        "attention" if kind == "local_attention" else kind
+        for kind in list(arch.layer_type_list or [])
+    ]
+    candidate_layer_types = (
+        normalized_layer_types
+        if any(kind == "state" for kind in normalized_layer_types)
+        else None
+    )
+
     cand = CandidateArch(
         d_model=arch.d_model,
         n_layers=arch.n_layers,
@@ -262,9 +286,15 @@ def arch_to_candidate(arch: TArchConfig, base: CandidateArch) -> CandidateArch:
         n_kv_heads=arch.n_kv_heads,
         ffn_dim=arch.ffn_dim,
         vocab_size=arch.vocab_size,
-        weight_precision=base.weight_precision,
+        weight_precision=str(
+            getattr(arch, "weight_precision", None)
+            or base.weight_precision),
         ffn_precision=arch.precision or base.ffn_precision,
-        attn_precision=copy.deepcopy(base.attn_precision),
+        activation_precision=str(
+            getattr(arch, "activation_precision", None)
+            or getattr(base, "activation_precision", "bf16")),
+        attn_precision=copy.deepcopy(
+            getattr(arch, "attn_precision", None) or base.attn_precision),
         kv_cache_bits=_kv_bits_from_precision(arch.kv_precision),
         moe=copy.deepcopy(arch.moe_config) if arch.moe_config else None,
         # Parallelism identity must survive the arch→candidate round-trip.
@@ -280,12 +310,7 @@ def arch_to_candidate(arch: TArchConfig, base: CandidateArch) -> CandidateArch:
         cp_method=str(getattr(arch, "cp_method", None) or getattr(base, "cp_method", "ring") or "ring"),
         n_dense_ffn_layers=getattr(arch, "n_dense_ffn_layers", 0),
         state_config=copy.deepcopy(arch.state_config) if arch.state_config else None,
-        layer_type_list=(
-            list(arch.layer_type_list)
-            if arch.layer_type_list and any(
-                lt != "attention" for lt in arch.layer_type_list)
-            else None
-        ),
+        layer_type_list=candidate_layer_types,
         # Thread MLA fields through so the throughput model's real MLA
         # branch fires after a swap_attention_to_mla delta. Without this,
         # the candidate evaluator silently saw type=full / latent=0 and the
@@ -314,8 +339,28 @@ def arch_to_candidate(arch: TArchConfig, base: CandidateArch) -> CandidateArch:
         msa_dilated_top_k=int(getattr(arch, "msa_dilated_top_k", 0) or 0),
         msa_global_top_k=int(getattr(arch, "msa_global_top_k", 0) or 0),
         yoco_n_self_attn_layers=int(getattr(arch, "yoco_n_self_attn_layers", 0) or 0),
+        yoco_share_pattern=str(
+            getattr(arch, "yoco_share_pattern", None)
+            or getattr(base, "yoco_share_pattern", "single_source")
+            or "single_source"),
         mtp_n_predict_depths=int(getattr(arch, "mtp_n_predict_depths", 0) or 0),
         mtp_depth_n_layers=int(getattr(arch, "mtp_depth_n_layers", 1) or 1),
+        mtp_train_loss_weight=float(
+            getattr(arch, "mtp_train_loss_weight", None)
+            or getattr(base, "mtp_train_loss_weight", 0.3) or 0.3),
+        rope_scaling_method=str(
+            getattr(arch, "rope_scaling_method", None)
+            or getattr(base, "rope_scaling_method", "none") or "none"),
+        rope_scaling_factor=float(
+            getattr(arch, "rope_scaling_factor", None)
+            or getattr(base, "rope_scaling_factor", 1.0) or 1.0),
+        rope_original_max_position=int(
+            getattr(arch, "rope_original_max_position", None)
+            or getattr(base, "rope_original_max_position", 8192) or 8192),
+        sparsity_2_4=copy.deepcopy(
+            getattr(arch, "sparsity_2_4", None)
+            if getattr(arch, "sparsity_2_4", None) is not None
+            else getattr(base, "sparsity_2_4", None)),
         # SWA: read both the canonical local_window and the sidecar
         # _swa_window so candidates produced either by the delta engine
         # (sidecar) or by a baseline loader that already populated the
@@ -374,6 +419,19 @@ def arch_to_candidate(arch: TArchConfig, base: CandidateArch) -> CandidateArch:
             if lt in ("attention", "local_attention"))
         cand.n_state_layers = sum(
             1 for lt in cand.layer_type_list if lt == "state")
+        cand.hybrid_ratio = format_state_attention_ratio(
+            cand.n_state_layers, cand.n_attention_layers)
+        cand.placement_strategy = str(
+            getattr(arch, "placement_strategy", None)
+            or getattr(base, "placement_strategy", "baseline")
+            or "baseline")
+        cand.derived_d_state = int(
+            getattr(base, "derived_d_state", 0)
+            or cand.state_config.get("d_state", 0)
+            or 0
+        )
+        cand.crossover_seq_len = float(
+            getattr(base, "crossover_seq_len", 0.0) or 0.0)
     if cand.moe is not None:
         cand.moe_style = "fine"   # heuristic; evaluate_candidate doesn't need this
     return cand
@@ -520,6 +578,7 @@ def _arch_changes(baseline: CandidateArch,
     fields_to_diff = (
         "d_model", "n_layers", "n_heads", "d_head", "n_kv_heads",
         "ffn_dim", "vocab_size", "weight_precision", "ffn_precision",
+        "activation_precision",
         "kv_cache_bits", "total_params_b",
     )
     for f in fields_to_diff:
@@ -623,6 +682,16 @@ def _arch_changes(baseline: CandidateArch,
     for src, label in state_layout_fields:
         b = getattr(baseline, src, None)
         c = getattr(candidate, src, None)
+        # CandidateArch uses n_attention_layers=0 as a compact sentinel for
+        # an ordinary all-attention stack. In a field-level report that
+        # sentinel must be expanded to the physical layer count; otherwise
+        # add_state_layers claims an all-attention baseline had zero
+        # attention layers.
+        if src == "n_attention_layers":
+            if b in (0, None) and baseline.state_config is None:
+                b = baseline.n_layers
+            if c in (0, None) and candidate.state_config is None:
+                c = candidate.n_layers
         # The "none" placement_strategy default and 0 attention/state
         # layer counts are dataclass defaults, not user-supplied values.
         # Don't emit ghost diffs when both sides hold the default.
@@ -765,6 +834,13 @@ def _evaluated_metrics(base_ev: EvaluatedCandidate,
     m["memory_per_gpu_gb"] = _metric(
         "memory_per_gpu_gb", base_ev.memory_per_gpu_gb,
         cand_ev.memory_per_gpu_gb, lower_is_better=True)
+    m["training_memory_per_gpu_gb"] = _metric(
+        "training_memory_per_gpu_gb",
+        float(getattr(
+            base_ev.throughput, "training_memory_per_gpu_gb", 0.0) or 0.0),
+        float(getattr(
+            cand_ev.throughput, "training_memory_per_gpu_gb", 0.0) or 0.0),
+        lower_is_better=True)
     m["kv_cache_gb"] = _metric(
         "kv_cache_gb", base_kv_gb, cand_kv_gb, lower_is_better=True)
     m["total_params_b"] = _metric(
@@ -980,6 +1056,7 @@ def evaluate_delta(
         batch_size=base_arch.batch_size,
         prefill_seq_len=int(constraints.prompt_len or constraints.context_length or 2048),
         decode_kv_len=int(constraints.context_length or 2048),
+        training_seq_len=int(constraints.pretraining_context_length),
         phase="decode",
     )
 
@@ -1202,7 +1279,15 @@ def evaluate_delta_sequence(
     base_arch.dp_degree = int(getattr(constraints, "dp", 1) or 1)
     cumulative = base_arch
     for name, args in deltas:
-        xf = get_transformation(name)
+        try:
+            xf = get_transformation(name)
+        except KeyError as exc:
+            return DeltaEvaluation(
+                baseline_name=baseline_name, hardware=hardware,
+                delta_name=name, delta_args=dict(args or {}),
+                feasible=False,
+                reason_if_infeasible=f"unknown_transformation: {exc}",
+            )
         ok, reason = xf.precondition(cumulative)
         if not ok:
             ev = DeltaEvaluation(
@@ -1212,7 +1297,41 @@ def evaluate_delta_sequence(
                 reason_if_infeasible=f"precondition_failed: {reason}",
             )
             return ev
-        cumulative = xf.apply(cumulative, **(args or {}))
+        try:
+            cumulative = xf.apply(cumulative, **(args or {}))
+        except Exception as exc:
+            return DeltaEvaluation(
+                baseline_name=baseline_name, hardware=hardware,
+                delta_name=name, delta_args=dict(args or {}),
+                feasible=False,
+                reason_if_infeasible=(
+                    f"apply_raised: {type(exc).__name__}: {exc}"),
+            )
+
+    cand_tp = int(getattr(cumulative, "_tp_override", constraints.tp))
+    cand_pp = int(getattr(
+        cumulative, "_pp_override", getattr(constraints, "pp", 1) or 1))
+    cand_ep = int(getattr(
+        cumulative, "_ep_override",
+        getattr(baseline_candidate, "ep_degree", 1) or 1))
+    cand_dp = int(getattr(
+        cumulative, "_dp_override", getattr(constraints, "dp", 1) or 1))
+    cand_cp = int(getattr(
+        cumulative, "_cp_override",
+        getattr(cumulative, "cp_degree", getattr(constraints, "cp", 1) or 1)))
+    structural_error = _structural_execution_error(
+        cumulative, tp=cand_tp, pp=cand_pp, ep=cand_ep,
+        dp=cand_dp, cp=cand_cp)
+    if structural_error:
+        return DeltaEvaluation(
+            baseline_name=baseline_name, hardware=hardware,
+            delta_name="+".join(name for name, _ in deltas),
+            delta_args={"sequence": [
+                {"name": n, "args": dict(a or {})} for n, a in deltas]},
+            feasible=False,
+            reason_if_infeasible=(
+                f"structural_validation_failed: {structural_error}"),
+        )
     composed_cand = arch_to_candidate(cumulative, baseline_candidate)
 
     # Re-use evaluate_delta machinery by faking a single "delta" — but that
@@ -1222,6 +1341,7 @@ def evaluate_delta_sequence(
         batch_size=base_arch.batch_size,
         prefill_seq_len=int(constraints.prompt_len or constraints.context_length or 2048),
         decode_kv_len=int(constraints.context_length or 2048),
+        training_seq_len=int(constraints.pretraining_context_length),
         phase="decode",
     )
     base_stress = compute_throughput_stress(
@@ -1230,19 +1350,17 @@ def evaluate_delta_sequence(
         pp_degree=int(getattr(constraints, "pp", 1) or 1),
         ep_degree=int(getattr(baseline_candidate, "ep_degree", 1) or 1),
         dp_degree=int(getattr(constraints, "dp", 1) or 1),
+        cp_degree=int(
+            getattr(baseline_candidate, "cp_degree", 0)
+            or getattr(constraints, "cp", 1)
+            or 1
+        ),
         arch_name=baseline_name,
     )
-    cand_tp = int(getattr(cumulative, "_tp_override", constraints.tp))
-    cand_pp = int(getattr(cumulative, "_pp_override",
-                          getattr(constraints, "pp", 1) or 1))
-    cand_ep = int(getattr(cumulative, "_ep_override",
-                          getattr(baseline_candidate, "ep_degree", 1) or 1))
-    cand_dp = int(getattr(cumulative, "_dp_override",
-                          getattr(constraints, "dp", 1) or 1))
     cand_stress = compute_throughput_stress(
         cumulative, hardware, workload,
         tp_degree=cand_tp, pp_degree=cand_pp, ep_degree=cand_ep,
-        dp_degree=cand_dp,
+        dp_degree=cand_dp, cp_degree=cand_cp,
         arch_name=baseline_name + "+composed",
     )
 
@@ -1290,7 +1408,11 @@ def evaluate_delta_sequence(
     composed_field_changes = _dedupe_field_changes(composed_field_changes)
     # Forward the delta-resolution summary from add_state_layers (if any)
     # through the chained path too.
-    composed_summary = getattr(cumulative, "_state_layer_summary", None)
+    composed_summary = dict(
+        getattr(cumulative, "_state_layer_summary", None) or {})
+    clamp_notes = list(getattr(cumulative, "_delta_notes", None) or [])
+    if clamp_notes:
+        composed_summary.setdefault("clamp_notes", []).extend(clamp_notes)
     ev = DeltaEvaluation(
         baseline_name=baseline_name,
         hardware=hardware,
@@ -1299,7 +1421,7 @@ def evaluate_delta_sequence(
                                    for n, a in deltas]},
         feasible=True,
         field_changes=composed_field_changes,
-        delta_summary=(dict(composed_summary) if composed_summary else None),
+        delta_summary=(composed_summary if composed_summary else None),
         metrics=_evaluated_metrics(base_ev, cand_ev, base_kv, cand_kv),
         stress_baseline=base_stress.as_dict(),
         stress_candidate=cand_stress.as_dict(),
@@ -1311,12 +1433,43 @@ def evaluate_delta_sequence(
     ev.stress_relief_score = float(rel["relief_score"])
     ev.severe_stress_regression = bool(rel["severe_regression"])
 
-    # Build a synthetic Transition just to reuse justify() prose.
+    # Build the same quality-stress pair used by the single-delta path.
+    # Previously composed deltas always emitted quality_delta={} even when
+    # the canonical predicted loss moved, because the synthetic transition
+    # below carried only throughput stress.
+    base_quality = candidate_quality = None
+    try:
+        training = TrainingConfig(
+            training_tokens=int(constraints.training_tokens),
+            sequence_length=int(constraints.pretraining_context_length),
+            hardware=hardware,
+        )
+        workload_spec = {"context_length": int(constraints.context_length)}
+        base_quality = compute_quality_stress(
+            xf.to_quality_arch(base_arch),
+            _training_for_arch(training, base_arch),
+            workload_spec=workload_spec,
+            arch_name=baseline_name,
+        )
+        candidate_quality = compute_quality_stress(
+            xf.to_quality_arch(cumulative),
+            _training_for_arch(training, cumulative),
+            workload_spec=workload_spec,
+            arch_name=baseline_name + "+composed",
+        )
+    except Exception:
+        # The main canonical quality estimate above remains authoritative;
+        # quality-stress decomposition is supplementary.
+        base_quality = candidate_quality = None
+
+    # Build a synthetic Transition to reuse delta bookkeeping and prose.
     syn_transition = Transition(
         transformation_name=ev.delta_name,
         transformation_params=ev.delta_args,
         baseline_stress=base_stress,
         candidate_stress=cand_stress,
+        baseline_quality=base_quality,
+        candidate_quality=candidate_quality,
         feasible=True,
     )
     syn_transition.compute_deltas()

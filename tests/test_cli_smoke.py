@@ -460,8 +460,25 @@ class CliSmokeTests(unittest.TestCase):
             self.assertEqual(
                 predicted["selection_diagnostics"]["selected_pareto_rank"], 1
             )
-            self.assertEqual(config["parallelism"]["expert_parallel"], 4)
-            self.assertEqual(config["architecture"]["layer_configs"][0]["ffn"]["type"], "moe")
+            # Wave 34: under the refined two-stage search the argmin-loss
+            # point at 1B/0.2T is a well-shaped DENSE config (~1.6% below
+            # the best coarse 16x2 MoE — outside the noise band; the Wave
+            # 18h data-sufficiency gate shrinks the MoE bonus at low
+            # tokens-per-total-param). The old "picked is MoE" pin encoded
+            # an under-optimized dense pool, not a model prediction. Keep
+            # this test about SELECTION MECHANICS (rank==selected, argmin
+            # semantics) and pin the MoE plumbing as frontier presence
+            # with the requested EP.
+            import csv as _csv
+            with open(pareto) as f:
+                rows = list(_csv.DictReader(f))
+            moe_rows = [r for r in rows
+                        if (r.get("n_experts") or "").strip() == "16"]
+            self.assertTrue(moe_rows,
+                            "no 16-expert MoE candidates on the frontier")
+            self.assertTrue(any((r.get("ep") or "").strip() == "4"
+                                for r in moe_rows),
+                            "MoE frontier rows do not honor --ep-options 4")
 
     def test_compile_honors_fixed_context_parallel_degree(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -746,6 +763,7 @@ class CliSmokeTests(unittest.TestCase):
         """EP beyond one NVLink domain is modeled on inter-node fabric."""
         good = json.loads((ROOT / "configs" / "gpt_oss_120b.json").read_text())
         good["parallelism"]["expert_parallel"] = 16  # > 8 on H100
+        good["parallelism"]["data_parallel"] = 16
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             broken = tmp_path / "moe_oversize_ep.json"
@@ -756,6 +774,7 @@ class CliSmokeTests(unittest.TestCase):
                 "--baseline-config", str(broken),
                 "--hardware", "h100",
                 "--tp", "8",
+                "--dp", "16",
                 "--apply", "change_moe_topology",
                 "--apply-args", "n_experts=64",
                 "--apply-args", "top_k=4",
@@ -766,6 +785,25 @@ class CliSmokeTests(unittest.TestCase):
             self.assertIn("inter-node fabric", result.stderr)
             ev = json.loads((out_dir / "evaluation.json").read_text())
             self.assertTrue(ev["feasible"])
+
+    def test_modifier_warns_when_non_tp_parallelism_options_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--baseline-config", str(ROOT / "configs" / "mistral_7b.json"),
+                "--hardware", "h100",
+                "--pp-options", "1,2",
+                "--cp-options", "1,2",
+                "--ep-options", "1,2",
+                "--tp-options", "8",
+                "--out", tmp,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("modifier mode searches", result.stderr)
+            self.assertIn("--pp-options", result.stderr)
+            self.assertIn("--cp-options", result.stderr)
+            self.assertIn("--ep-options", result.stderr)
+            self.assertIn("change_parallelism", result.stderr)
 
     def test_delta_eval_models_cross_node_tp(self):
         """TP beyond one NVLink domain is modeled on inter-node fabric."""
@@ -1077,10 +1115,28 @@ class CliSmokeTests(unittest.TestCase):
             self.assertEqual(config["parallelism"]["context_parallel"], 2)
             scaling = config["architecture"]["positional_encoding"]["scaling"]
             self.assertEqual(scaling["method"], "longrope")
-            self.assertEqual(
-                config["architecture"]["layer_configs"][0]["ffn"]["type"],
-                "moe",
-            )
+            # Wave 34: this test pins the cp/rope/EP PLUMBING on an MoE
+            # search, not the family choice. The refined two-stage search
+            # now legitimately picks a well-shaped dense model over the
+            # coarse 16x2 MoE at 1B (dense best-loss sits ~1.6% below the
+            # best MoE — outside the noise band — per the Wave 18h
+            # data-sufficiency gate), so asserting the PICK is MoE baked
+            # in an artifact of the old under-optimized dense pool.
+            # Instead: MoE candidates must exist on the frontier and carry
+            # the requested topology (16 experts, ep=4).
+            import csv as _csv
+            with open(tmp_path / "moe_cp_rope.csv") as f:
+                rows = list(_csv.DictReader(f))
+            moe_rows = [r for r in rows
+                        if (r.get("n_experts") or "").strip() == "16"]
+            self.assertTrue(moe_rows,
+                            "no 16-expert MoE candidates on the frontier")
+            self.assertTrue(any((r.get("ep") or "").strip() == "4"
+                                for r in moe_rows),
+                            "MoE frontier rows do not honor --ep-options 4")
+            self.assertTrue(all((r.get("cp") or "").strip() == "2"
+                                for r in rows if (r.get("cp") or "").strip()),
+                            "frontier rows do not honor --cp 2")
 
     def test_decode_stress_does_not_bind_training_memory(self):
         result = run_cli(
@@ -1369,6 +1425,60 @@ class CliSmokeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("--num-gpus", result.stderr)
 
+    def test_compile_training_cluster_floor_reaches_emitted_parallelism(self):
+        """A public cluster-floor flag must reach evaluation and serialization."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "arch.json"
+            result = run_cli(
+                "ac/cli_compile.py",
+                "--hardware", "h100",
+                "--params", "1",
+                "--tokens", "0.2",
+                "--context", "2048",
+                "--serving-tbt", "100",
+                "--serving-batch", "4",
+                "--tp", "1",
+                "--tp-options", "1,2",
+                "--pp", "1",
+                "--dp", "3",
+                "--training-cluster-gpus", "64",
+                "--max-candidates", "30",
+                "--output-config", str(output),
+                "--output-justification", str(tmp_path / "arch.md"),
+                "--output-pareto", str(tmp_path / "pareto.csv"),
+                "--no-shadow-prices",
+                "--quiet",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("--dp=3 is not a power of two", result.stderr)
+
+            config = json.loads(output.read_text())
+            self.assertEqual(
+                config["metadata"]["input_constraints"]["training_cluster_gpus"],
+                64,
+            )
+            parallelism = config["parallelism"]
+            training_world = (
+                parallelism["tensor_parallel"]
+                * parallelism["pipeline_parallel"]
+                * parallelism["context_parallel"]
+                * parallelism["data_parallel"]
+            )
+            self.assertGreaterEqual(training_world, 64)
+            justification = (tmp_path / "arch.md").read_text()
+            self.assertIn(
+                f"CP={parallelism['context_parallel']} "
+                f"DP={parallelism['data_parallel']} "
+                f"EP={parallelism['expert_parallel']}",
+                justification,
+            )
+            self.assertIn(
+                f"Aggregate training throughput "
+                f"(× DP={parallelism['data_parallel']})",
+                justification,
+            )
+
     def test_swap_attention_to_mla_diff_has_no_duplicate_rows(self):
         """B1 follow-up: the canonical CandidateArch path and the legacy
         sidecar path both used to emit a row for `attention.type` and a
@@ -1593,9 +1703,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("clamped to n_kv_heads=1", result.stdout)
 
     def test_delta_eval_surfaces_gqa_group_size_non_divisible(self):
-        """H3 variant: group_size that doesn't divide n_heads should be
-        surfaced too, so the user knows the resulting GQA layout differs
-        from what they asked for."""
+        """A non-divisor must fail instead of pricing floor-divided GQA."""
         result = run_cli(
             "ac/cli_delta_eval.py",
             "--baseline-config", "configs/mistral_7b.json",
@@ -1606,9 +1714,9 @@ class CliSmokeTests(unittest.TestCase):
             "--apply-args", "group_size=5",
             "--stdout", "--no-pareto",
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(
-            "group_size=5 does not divide n_heads=32", result.stdout)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("group_size=5 must divide n_heads=32", result.stdout)
+        self.assertIn("infeasible", result.stderr.lower())
 
     def test_hardware_specs_document_peak_flops_convention(self):
         """H1: every NVIDIA hardware spec must carry the

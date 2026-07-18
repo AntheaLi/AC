@@ -49,6 +49,7 @@ from report import (  # noqa: E402
     render_markdown_multi,
     render_json,
     render_pareto_csv,
+    strict_json_dumps,
 )
 
 
@@ -83,7 +84,7 @@ _WORKLOAD_PRESETS = {
     },
 }
 
-VALID_HARDWARE = ["h100", "b200", "tpu_v5p", "tpu_v5e",
+VALID_HARDWARE = ["h100", "b200", "gb200_nvl72", "h800", "tpu_v5p", "tpu_v5e",
                   "trainium2", "trn2", "trainium3", "trn3"]
 
 
@@ -352,6 +353,7 @@ def _validate_delta_arg_values(name: str, args: Dict[str, Any]) -> List[str]:
         require_int("group_size", 1)
     elif name == "swap_attention_to_mla":
         require_int("latent_dim", 16)
+        require_int("d_rope", 1)
     elif name == "swap_attention_to_swa":
         require_int("window_size", 64)
     elif name == "add_state_layers":
@@ -729,6 +731,17 @@ def main(argv: List[str] = None) -> int:
         ev.resolved_workload = resolved
 
     # 4) Output
+    infeasible = [ev for ev in results if not ev.feasible]
+
+    def _report_infeasible() -> None:
+        for item in infeasible:
+            print(
+                f"WARNING: delta `{item.delta_name}` was infeasible against "
+                f"baseline `{item.baseline_name}`: "
+                f"{item.reason_if_infeasible}",
+                file=sys.stderr,
+            )
+
     if args.stdout:
         if args.json:
             for ev in results:
@@ -737,6 +750,9 @@ def main(argv: List[str] = None) -> int:
             print(render_markdown_multi(results)
                    if len(results) > 1
                    else render_markdown(results[0]))
+        if infeasible:
+            _report_infeasible()
+            return 2
         return 0
 
     out_dir = args.out
@@ -749,8 +765,9 @@ def main(argv: List[str] = None) -> int:
     # evaluation.json
     with open(os.path.join(out_dir, "evaluation.json"), "w") as f:
         if len(results) > 1:
-            f.write(json.dumps([ev.as_dict() for ev in results],
-                                indent=2, default=str))
+            f.write(strict_json_dumps(
+                [ev.as_dict() for ev in results], indent=2,
+                sort_keys=False))
         else:
             f.write(render_json(results[0]))
 
@@ -771,14 +788,8 @@ def main(argv: List[str] = None) -> int:
     # was a precondition-failed no-op (e.g. densify_first_k on a dense
     # baseline). Previously the CLI exited 0 with "Wrote evaluation to: …"
     # and the user had to open the report to see "Infeasible".
-    infeasible = [ev for ev in results if not ev.feasible]
     if infeasible:
-        for ev in infeasible:
-            print(
-                f"WARNING: delta `{ev.delta_name}` was infeasible against "
-                f"baseline `{ev.baseline_name}`: {ev.reason_if_infeasible}",
-                file=sys.stderr,
-            )
+        _report_infeasible()
         # Exit non-zero so automation pipelines notice that the delta
         # evaluation hit infeasibility (e.g. the INFEASIBLE-sentinel
         # leak from a malformed MoE baseline). The output files are

@@ -44,7 +44,7 @@ try:
     from .sram_derivation import derive_d_state, compute_crossover_seq_len
     from .architecture import (
         architecture_fingerprint, compose_layer_type_list, parameter_ledger,
-        validate_architecture_views,
+        validate_architecture_views, format_state_attention_ratio,
     )
 except ImportError:
     # Direct-file execution remains supported for the legacy CLI entrypoints.
@@ -68,7 +68,7 @@ except ImportError:
     from sram_derivation import derive_d_state, compute_crossover_seq_len
     from architecture import (
         architecture_fingerprint, compose_layer_type_list, parameter_ledger,
-        validate_architecture_views,
+        validate_architecture_views, format_state_attention_ratio,
     )
 
 
@@ -98,12 +98,13 @@ def _filter_ep_options_by_dp(
     post-hoc ``WARNING: picked EP=X exceeds DP=Y`` was leaving fabricated
     TPS numbers on the winning row.
 
-    Filtering here also drops ``EP < 2`` (Wave-3 rule; ``EP=1`` keeps every
-    expert on every rank, which HBM never fits).
+    EP=1 is legal: experts remain TP-sharded and serving-memory feasibility
+    decides whether the full local expert set fits. This keeps greenfield
+    behavior aligned with the throughput, baseline, and delta paths.
 
     Two DP regimes:
 
-    * ``DP >= 2`` — real training layout, ``EP <= DP`` enforced. If the user
+    * ``DP >= 2`` — real training layout, ``EP`` must divide ``DP``. If the user
       explicitly supplied ``--ep-options`` and NOTHING survives, raise;
       silently disabling the MoE search is worse than a loud error.
     * ``DP <= 1`` — matrix-probe / single-cell scoring path. The training
@@ -113,14 +114,17 @@ def _filter_ep_options_by_dp(
     dp_int = max(0, int(dp) if dp is not None else 0)
     raw = list(raw_ep_options or [])
     if dp_int <= 1:
-        return [int(v) for v in raw if int(v) >= 2]
-    survivors = [int(v) for v in raw if int(v) >= 2 and int(v) <= dp_int]
+        return [int(v) for v in raw if int(v) >= 1]
+    survivors = [
+        int(v) for v in raw
+        if int(v) >= 1 and int(v) <= dp_int and dp_int % int(v) == 0
+    ]
     if raw and not survivors and source == "user-supplied ep_options":
         raise ValueError(
             f"--ep-options {sorted(int(v) for v in raw)} incompatible with "
             f"--dp {dp_int}: the training-throughput model requires "
-            f"EP <= DP (each EP rank routes its own microbatch). Increase "
-            f"--dp or lower --ep-options."
+            f"EP must divide DP (EP overlays the DP dimension). Change "
+            f"--dp or --ep-options."
         )
     return survivors
 
@@ -153,6 +157,16 @@ class DeploymentConstraints:
     tp: int = 8
     pp: int = 1
     dp: int = 8
+    # Optional cluster-size floor. When set, candidate DP is derived from
+    # ceil(cluster / (TP x PP x CP)) and rounded up to a multiple of EP.
+    # This keeps TP/CP search from silently buying more GPUs while leaving
+    # a stale scalar DP attached to every candidate.
+    training_cluster_gpus: Optional[int] = None
+    # Optional hard ceiling on the evaluated training world
+    # (TP x PP x CP x DP). Set this equal to training_cluster_gpus when the
+    # deployment has an exact, fixed-size training cluster rather than a
+    # minimum scale target.
+    max_training_cluster_gpus: Optional[int] = None
     # Workload profile (v0-revision enrichment)
     prompt_len: Optional[int] = None         # if set, overrides context_length for prefill
     output_len: int = 512                    # expected generation length
@@ -268,7 +282,8 @@ class DeploymentConstraints:
     # v1-fix CP: Context Parallelism axis. At long context (≥32k), CP enables
     # training that wouldn't fit on a single rank's HBM. Ring Attention
     # streams KV across ranks; Ulysses scatters along the head axis.
-    # CP degree multiplies into the world size: world = TP × PP × DP × CP × EP.
+    # Training world = TP × PP × DP × CP; EP partitions DP. A serving
+    # instance spans TP × PP × CP × EP because serving has no DP replicas.
     cp: int = 1
     cp_method: str = "ring"           # "ring" | "ulysses"
     cp_options: Optional[List[int]] = None     # default [1, 2, 4, 8]
@@ -343,6 +358,14 @@ class DeploymentConstraints:
     # `tests/test_two_stage_evaluation.py` confirms cheap-rank monotonicity
     # against full evaluate; reduce to ~200 in production cells.
     max_full_evaluations: Optional[int] = None
+    # Wave 34: cheap local refinement. After the capped pool is fully
+    # evaluated, the search revisits the UNCAPPED enumeration and
+    # full-evaluates up to this many lattice neighbors of the per-class
+    # Pareto leaders (same structural class, |d_model step| <= 512,
+    # |n_layers delta| <= 3). 0 disables. Only active when the
+    # max_candidates cap actually dropped candidates — with an uncapped
+    # search every neighbor was already evaluated.
+    local_refine_budget: int = 96
 
     def __post_init__(self):
         self._validate_positive_inputs()
@@ -494,6 +517,8 @@ class DeploymentConstraints:
             "max_candidates": self.max_candidates,
             "training_micro_batch": self.training_micro_batch,
             "unique_training_tokens": self.unique_training_tokens,
+            "training_cluster_gpus": self.training_cluster_gpus,
+            "max_training_cluster_gpus": self.max_training_cluster_gpus,
         }
         for name, value in optional_positive.items():
             if value is not None and value <= 0:
@@ -508,6 +533,14 @@ class DeploymentConstraints:
                 and self.unique_training_tokens > self.training_tokens:
             raise ValueError(
                 "unique_training_tokens cannot exceed training_tokens"
+            )
+        if (self.training_cluster_gpus is not None
+                and self.max_training_cluster_gpus is not None
+                and self.training_cluster_gpus
+                > self.max_training_cluster_gpus):
+            raise ValueError(
+                "training_cluster_gpus cannot exceed "
+                "max_training_cluster_gpus"
             )
         if self.quality_model_version not in {
             "effective_capacity_v2",
@@ -528,9 +561,10 @@ class DeploymentConstraints:
         if self.force_yoco:
             if int(self.yoco_n_self_attn_layers) <= 0:
                 raise ValueError("yoco_n_self_attn_layers must be > 0")
-            if self.yoco_share_pattern not in {"single_source", "block_shared"}:
+            if self.yoco_share_pattern != "single_source":
                 raise ValueError(
-                    "yoco_share_pattern must be 'single_source' or 'block_shared'"
+                    "yoco_share_pattern must be 'single_source'; "
+                    "other sharing topologies are not calibrated"
                 )
         for name in ("moe_n_experts_options", "moe_top_k_options",
                      "ep_options", "mla_kv_latent_options",
@@ -562,6 +596,7 @@ class CandidateArch:
     # Precision choices
     weight_precision: str = "bf16"
     ffn_precision: str = "bf16"
+    activation_precision: str = "bf16"
     attn_precision: Dict[str, str] = field(default_factory=lambda: {"qk": "bf16", "v": "bf16", "output": "bf16"})
     kv_cache_bits: int = 16
     # Computed (dense: total = active; MoE: total > active)
@@ -581,7 +616,7 @@ class CandidateArch:
     placement_strategy: str = "none"       # "first_periodic_last"|"interleaved"|"periodic"|"none"
     n_attention_layers: int = 0            # 0 = all attention (v0/v1 dense/MoE)
     n_state_layers: int = 0
-    hybrid_ratio: str = ""                 # e.g. "1:5.4"
+    hybrid_ratio: str = ""                 # exact state:attention ratio
     derived_d_state: int = 0
     crossover_seq_len: float = 0.0
     # v1-fix MLA: when set, this candidate uses MLA attention. The latent
@@ -648,10 +683,67 @@ class CandidateArch:
     # Same semantics as tp_degree: 0 = unset → constraints.pp fallback;
     # generators and the baseline loader set it explicitly.
     pp_degree: int = 0
+    # Effective data-parallel degree used for evaluation. Search generators
+    # leave this at zero; evaluate_candidate derives it from either scalar DP
+    # or DeploymentConstraints.training_cluster_gpus.
+    dp_degree: int = 0
     # v1-fix RoPE scaling
     rope_scaling_method: str = "none"
     rope_scaling_factor: float = 1.0
     rope_original_max_position: int = 8192
+
+    def __post_init__(self) -> None:
+        """Reject YOCO topology labels the evaluator cannot distinguish."""
+        if (int(self.yoco_n_self_attn_layers or 0) > 0
+                and self.yoco_share_pattern != "single_source"):
+            raise ValueError(
+                "yoco_share_pattern must be 'single_source'; "
+                "other sharing topologies are not calibrated"
+            )
+
+
+def _candidate_training_replica_gpus(
+    cand: CandidateArch,
+    constraints: Optional[DeploymentConstraints] = None,
+) -> int:
+    tp = int(getattr(cand, "tp_degree", 0) or 0)
+    if tp <= 0:
+        tp = int(getattr(constraints, "tp", 1) or 1)
+    pp = int(getattr(cand, "pp_degree", 0) or 0)
+    if pp <= 0:
+        pp = int(getattr(constraints, "pp", 1) or 1)
+    cp = max(1, int(getattr(cand, "cp_degree", 1) or 1))
+    return max(1, tp * pp * cp)
+
+
+def _effective_candidate_dp(
+    cand: CandidateArch,
+    constraints: DeploymentConstraints,
+) -> int:
+    """Resolve DP without changing the requested training-cluster floor."""
+    cluster = getattr(constraints, "training_cluster_gpus", None)
+    if cluster is None:
+        return max(1, int(getattr(constraints, "dp", 1) or 1))
+    replica_gpus = _candidate_training_replica_gpus(cand, constraints)
+    minimum_dp = max(1, math.ceil(int(cluster) / replica_gpus))
+    ep = (
+        max(1, int(getattr(cand, "ep_degree", 1) or 1))
+        if getattr(cand, "moe", None) else 1
+    )
+    return max(ep, math.ceil(minimum_dp / ep) * ep)
+
+
+def _evaluated_training_replica_gpus(ev: "EvaluatedCandidate") -> int:
+    return _candidate_training_replica_gpus(ev.arch)
+
+
+def _evaluated_training_tps_per_gpu(ev: "EvaluatedCandidate") -> float:
+    return float(ev.training_tps) / _evaluated_training_replica_gpus(ev)
+
+
+def _evaluated_serving_instance_gpus(ev: "EvaluatedCandidate") -> int:
+    ep = max(1, int(getattr(ev.arch, "ep_degree", 1) or 1))
+    return _evaluated_training_replica_gpus(ev) * ep
 
 
 @dataclass
@@ -750,6 +842,8 @@ class OptimizationResult:
     candidates_generated: int = 0
     candidates_feasible: int = 0
     candidates_evaluated: int = 0
+    evaluation_failures: int = 0
+    evaluation_failure_reasons: Dict[str, int] = field(default_factory=dict)
     # v1-fix Wave 5 follow-up (Jun 2026): raw enumeration size BEFORE the
     # max_candidates cap. Use this as the "did the search space explode"
     # signal — candidates_generated is post-cap and therefore bounded by
@@ -774,13 +868,13 @@ class OptimizationResult:
 # Selection profiles mirror the web UI tradeoff presets. Weights sum to 1.0;
 # lower score is better. `ttft` is deliberately separate from decode TBT.
 OBJECTIVE_PROFILES: Dict[str, Dict[str, float]] = {
-    "balanced":      {"loss": 0.30, "tbt": 0.10, "ttft": 0.05, "e2e": 0.10, "tps": 0.15, "mem": 0.15, "params": 0.15},
+    "balanced":      {"loss": 0.30, "tbt": 0.10, "ttft": 0.05, "e2e": 0.10, "tps": 0.15, "mem": 0.10, "train_mem": 0.05, "params": 0.15},
     "quality":       {"loss": 0.90, "tbt": 0.015, "ttft": 0.005, "e2e": 0.01, "tps": 0.03, "mem": 0.02, "params": 0.02},
     "research_quality": {"loss": 1.00, "tbt": 0.0, "ttft": 0.0, "tps": 0.0, "mem": 0.0, "params": 0.0},
     "loss_only":     {"loss": 1.00, "tbt": 0.0, "ttft": 0.0, "tps": 0.0, "mem": 0.0, "params": 0.0},
     "latency":       {"loss": 0.15, "tbt": 0.20, "ttft": 0.15, "e2e": 0.25, "tps": 0.05, "mem": 0.10, "params": 0.10},
     "serving_cost":  {"loss": 0.15, "tbt": 0.10, "ttft": 0.05, "e2e": 0.15, "tps": 0.05, "mem": 0.30, "params": 0.20},
-    "training_cost": {"loss": 0.20, "tbt": 0.05, "ttft": 0.05, "tps": 0.45, "mem": 0.10, "params": 0.15},
+    "training_cost": {"loss": 0.20, "tbt": 0.05, "ttft": 0.05, "tps": 0.45, "mem": 0.0, "train_mem": 0.10, "params": 0.15},
 }
 
 
@@ -805,9 +899,12 @@ def _candidate_metric(ev: EvaluatedCandidate, key: str) -> float:
     if key == "e2e":
         return ev.serving_request_latency_ms
     if key == "tps":
-        return ev.training_tps
+        return _evaluated_training_tps_per_gpu(ev)
     if key == "mem":
         return ev.memory_per_gpu_gb
+    if key == "train_mem":
+        return float(getattr(
+            ev.throughput, "training_memory_per_gpu_gb", 0.0) or 0.0)
     if key == "params":
         return float(ev.arch.total_params)
     raise KeyError(key)
@@ -996,12 +1093,14 @@ def get_precision_configs_for_hardware(hw_name: str) -> List[str]:
 
     v1-fix Trainium: Trn2 supports BF16/FP8; Trn3 adds FP4 + MX formats.
     """
-    if hw_name == "b200":
+    if hw_name in ("b200", "gb200_nvl72"):
+        # gb200_nvl72 (Gate-2 Task C) is B200 silicon — same precision set.
         return ["all_bf16", "ffn_fp8", "all_fp8",
                 "ffn_fp4", "all_fp4",
                 "ffn_mxfp4", "all_mxfp4",
                 "ffn_mxfp6", "all_mxfp6"]
-    elif hw_name in ("h100",):
+    elif hw_name in ("h100", "h800"):
+        # h800 (Gate-2 Task C) is H100 silicon with reduced NVLink — same set.
         return ["all_bf16", "ffn_fp8", "all_fp8"]
     elif hw_name in ("trainium2", "trn2"):
         return ["all_bf16", "ffn_fp8", "all_fp8"]
@@ -1115,6 +1214,197 @@ def _search_option_lists(constraints: DeploymentConstraints) -> Tuple[List[int],
 # Candidate generation
 # =============================================================================
 
+def _stratified_candidate_cap(candidates: list, cap: int,
+                              constraints: "DeploymentConstraints" = None) -> list:
+    """Deterministic cap that preserves structural-variant representation.
+
+    Wave 32 fix: the previous cap was a plain even-stride over the deduped
+    enumeration ORDER. Variant classes are generated in contiguous blocks
+    (per-generator, per-shape loops), so a class occupying a block shorter
+    than the stride gets skipped almost entirely: with allow_moe +
+    allow_state + compressed attention at 7B/128k, csa/indexshare/msa were
+    47% of the 419k enumeration but got 13 of the 400 capped slots — the
+    grid could then never surface them regardless of merit (the same bug
+    class Wave 8b fixed for max_full_evaluations with family
+    stratification).
+
+    Bucket by the cheap structural class (attention_type, has_moe,
+    has_state), give every bucket an equal share of the cap (remainder to
+    the largest buckets), and select WITHIN each bucket. Deterministic
+    for a fixed enumeration order.
+
+    Wave 34 (two-stage default): when `constraints` is provided, the
+    within-bucket selection is cheap-rank-GUIDED instead of a blind
+    stride — 70% of each bucket's share goes to the best candidates by
+    `_cheap_quality_rank` (O(microseconds) loss proxy over the COMPLETE
+    deduped enumeration, so every supported possibility is scored before
+    anything is dropped), and the remaining 30% is an even stride over
+    the rest of the bucket. The stride tail is deliberate: the cheap
+    rank is a pure loss proxy that knows nothing about throughput or
+    memory, and a bucket selected purely by cheap loss would strip the
+    fast/low-memory end of the Pareto surface that budget-bound picks
+    (--serving-tbt) and the memory tiebreak need. Without constraints
+    the old pure-stride behavior is preserved.
+    """
+    if cap <= 0 or len(candidates) <= cap:
+        return candidates
+    buckets: dict = {}
+    for c in candidates:
+        key = (
+            getattr(c, "attention_type", "full") or "full",
+            bool(getattr(c, "moe", None)),
+            bool(getattr(c, "state_config", None)),
+        )
+        buckets.setdefault(key, []).append(c)
+    # Deterministic bucket order: SMALLEST first (ties by key repr), so a
+    # bucket that can't fill its equal share returns the slack to the
+    # buckets processed after it — the largest buckets absorb the surplus
+    # and the output always reaches min(cap, len(candidates)).
+    ordered = sorted(buckets.items(), key=lambda kv: (len(kv[1]), repr(kv[0])))
+    out: list = []
+    remaining = cap
+    for i, (key, bucket) in enumerate(ordered):
+        slots_left = len(ordered) - i
+        share = max(1, remaining // max(1, slots_left))
+        take = min(len(bucket), share, remaining)
+        if take <= 0:
+            continue
+        if len(bucket) <= take:
+            picked = bucket
+        elif constraints is not None:
+            # Two-stage: cheap-rank the WHOLE bucket (complete coverage —
+            # every candidate is scored before anything is dropped), then
+            # 40% of the share to the cheap-rank top and 60% to an even
+            # stride over the bucket in ENUMERATION order.
+            #
+            # Wave 34 post-probe: the first cut used 70% cheap-rank and
+            # strided only the leftovers. That let the cheap rank make
+            # within-bucket shape decisions it is not qualified to make —
+            # it is blind to MoE granularity (and throughput entirely), so
+            # MoE buckets filled up with capacity-ratio-maximizing shapes
+            # the full evaluator penalizes, and two cli_smoke pins
+            # (dense-vs-MoE argmin picks) flipped. Same lesson as Wave
+            # 8b: cheap signals guarantee REPRESENTATION, they must not
+            # pick winners. The stride now runs over the whole bucket so
+            # the capped pool approximately contains the old stride
+            # sample, and the cheap-rank tranche is additive on top; the
+            # local-refinement stage is where shape optimization happens.
+            try:
+                ranked = sorted(
+                    bucket,
+                    key=lambda c: _cheap_quality_rank(
+                        c, constraints.training_tokens,
+                        constraints.quality_model_version))
+            except Exception:
+                ranked = bucket  # cheap rank must never lose candidates
+            n_top = max(1, int(take * 0.4))
+            n_top = min(n_top, take)
+            picked = list(ranked[:n_top])
+            picked_ids = set(id(c) for c in picked)
+            n_stride = take - len(picked)
+            if n_stride > 0:
+                step = len(bucket) / n_stride
+                for j in range(n_stride):
+                    c = bucket[min(int(j * step), len(bucket) - 1)]
+                    if id(c) in picked_ids:
+                        continue
+                    picked.append(c)
+                    picked_ids.add(id(c))
+                # Backfill collisions from the cheap-rank order.
+                k = n_top
+                while len(picked) < take and k < len(ranked):
+                    c = ranked[k]; k += 1
+                    if id(c) not in picked_ids:
+                        picked.append(c)
+                        picked_ids.add(id(c))
+        else:
+            step = len(bucket) / take
+            picked = [bucket[min(int(j * step), len(bucket) - 1)]
+                      for j in range(take)]
+        out.extend(picked)
+        remaining -= len(picked)
+        if remaining <= 0:
+            break
+    return out
+
+
+def _select_refinement_neighbors(
+    leader_archs: list,
+    precap_pool: list,
+    evaluated: list,
+    budget: int,
+) -> list:
+    """Wave 34: pick unevaluated lattice neighbors of the Pareto leaders.
+
+    A capped search decides each class's shape from a subsample; this
+    second stage densifies the neighborhood of what stage one found. For
+    every leader we admit candidates from the PRE-CAP deduped pool (so
+    every shape came from a real generator and the parameter ledger is
+    trustworthy) that share the leader's structural class and sit within
+    one lattice step (|d_model| <= 512, |n_layers| <= 3), ordered by
+    shape distance, round-robin across leaders, capped at `budget`.
+    """
+    if budget <= 0 or not leader_archs or not precap_pool:
+        return []
+
+    def _class(c):
+        return (
+            getattr(c, "attention_type", "full") or "full",
+            bool(getattr(c, "moe", None)),
+            bool(getattr(c, "state_config", None)),
+        )
+
+    def _ident(c):
+        return (
+            c.d_model, c.n_layers, c.n_heads, c.d_head, c.n_kv_heads,
+            c.ffn_dim, c.vocab_size, c.weight_precision, c.ffn_precision,
+            c.activation_precision,
+            c.kv_cache_bits, _class(c),
+            int(getattr(c, "tp_degree", 0) or 0),
+            int(getattr(c, "cp_degree", 0) or 0),
+            int(getattr(c, "ep_degree", 0) or 0),
+        )
+
+    seen = {_ident(c) for c in evaluated}
+    per_leader: list = []
+    for lead in leader_archs:
+        lc = _class(lead)
+        near = []
+        for c in precap_pool:
+            if _class(c) != lc:
+                continue
+            dd = abs(int(c.d_model) - int(lead.d_model))
+            dl = abs(int(c.n_layers) - int(lead.n_layers))
+            if dd > 512 or dl > 3:
+                continue
+            k = _ident(c)
+            if k in seen:
+                continue
+            near.append(((dd, dl, abs(int(c.ffn_dim) - int(lead.ffn_dim))), c))
+        near.sort(key=lambda t: t[0])
+        per_leader.append([c for _score, c in near])
+
+    out: list = []
+    taken = set()
+    i = 0
+    while len(out) < budget:
+        progressed = False
+        for lst in per_leader:
+            if i < len(lst):
+                c = lst[i]
+                k = _ident(c)
+                if k not in taken:
+                    taken.add(k)
+                    out.append(c)
+                    if len(out) >= budget:
+                        break
+                progressed = True
+        if not progressed:
+            break
+        i += 1
+    return out
+
+
 def _enumeration_pool_cap(constraints: "DeploymentConstraints") -> int:
     """Per-family retention bound for candidate enumeration (Wave 18f).
 
@@ -1122,7 +1412,14 @@ def _enumeration_pool_cap(constraints: "DeploymentConstraints") -> int:
     so enumeration memory and the sampling density stay consistent.
     """
     mc = int(constraints.max_candidates or 0)
-    return max(100_000, 25 * mc) if mc > 0 else 200_000
+    # An explicit final cap is a speed/memory knob. The old 100k floor made
+    # `--max-candidates 400` and `--max-candidates 1000` retain 100k rows PER
+    # family before the final cap, so all-family searches consumed gigabytes
+    # and minutes despite asking for a small search. A 10x deterministic
+    # oversample leaves ample material for stratified cheap-rank selection
+    # while making the requested bound operational. Uncapped searches keep
+    # the historical 200k-per-family retention budget.
+    return max(1_000, 10 * mc) if mc > 0 else 200_000
 
 
 class _BoundedCandidateList(list):
@@ -1204,10 +1501,10 @@ def generate_candidates(
       # the lightest multiplier so its budget is the largest.
       aligned = _filter_lattice_to_budget(
           aligned, constraints.target_params_b,
-          budget=_LATTICE_BUDGET["dense"], family="dense")
+          budget=_generation_lattice_budget(constraints, "dense"), family="dense")
 
       for pt in aligned:
-        gqa_ratios = _gqa_ratios_for_point(pt, constraints, tp_degree=tp_d)
+        gqa_ratios = _generation_gqa_ratios(pt, constraints, tp_degree=tp_d)
 
         for gqa_r in gqa_ratios:
             n_kv_heads = max(1, pt.n_heads // gqa_r)
@@ -1236,7 +1533,10 @@ def generate_candidates(
             if not (1 <= n_layers_raw <= 256):
                 continue
             # Try a few layer counts around the target
-            for n_layers in [max(4, round(n_layers_raw) + delta) for delta in [-2, -1, 0, 1, 2]]:
+            for n_layers in [
+                max(4, round(n_layers_raw) + delta)
+                for delta in _generation_layer_deltas(constraints)
+            ]:
                 total = estimate_params(
                     pt.d_model, pt.n_heads, pt.d_head, pt.ffn_dim_swiglu,
                     n_layers, n_kv_heads, constraints.vocab_size
@@ -1337,7 +1637,7 @@ def generate_candidates(
                                     n_layers_mla_raw = (target - embed_p) / per_layer_mla
                                     if not (1 <= n_layers_mla_raw <= 256):
                                         continue
-                                    for dL in (-2, -1, 0, 1, 2):
+                                    for dL in _generation_layer_deltas(constraints):
                                         n_layers_mla = max(4, round(n_layers_mla_raw) + dL)
                                         if min(constraints.pp_options) > 1 and n_layers_mla % min(constraints.pp_options) != 0:
                                             continue
@@ -1601,6 +1901,215 @@ def _stride_sample(items, target):
     return [items[min(int(i * step), len(items) - 1)] for i in range(target)]
 
 
+def _endpoint_sample(items, target):
+    """Deterministically sample a sequence while retaining both endpoints."""
+    values = list(items)
+    if target is None or len(values) <= target:
+        return values
+    if target <= 0:
+        return []
+    if target == 1:
+        return [values[len(values) // 2]]
+    return [
+        values[round(i * (len(values) - 1) / (target - 1))]
+        for i in range(target)
+    ]
+
+
+def _generation_lattice_budget(
+    constraints: DeploymentConstraints,
+    family: str,
+) -> int:
+    """Return the lattice budget, honoring a private bounded-search hint."""
+    requested = int(getattr(constraints, "_source_lattice_budget", 0) or 0)
+    return min(_LATTICE_BUDGET[family], requested) if requested else _LATTICE_BUDGET[family]
+
+
+def _generation_gqa_ratios(
+    pt: LatticePoint,
+    constraints: DeploymentConstraints,
+    tp_degree: int,
+) -> List[int]:
+    ratios = _gqa_ratios_for_point(pt, constraints, tp_degree=tp_degree)
+    cap = int(getattr(constraints, "_source_gqa_cap", 0) or 0)
+    return _endpoint_sample(ratios, cap) if cap else ratios
+
+
+def _generation_layer_deltas(constraints: DeploymentConstraints) -> List[int]:
+    deltas = [-2, -1, 0, 1, 2]
+    cap = int(getattr(constraints, "_source_layer_delta_cap", 0) or 0)
+    return _endpoint_sample(deltas, cap) if cap else deltas
+
+
+def _generation_moe_options(
+    options: List[MoEOption],
+    constraints: DeploymentConstraints,
+    family: str,
+    baseline_ffn_dim: int,
+) -> List[MoEOption]:
+    """Bound MoE source work without silently deleting a requested axis.
+
+    The initial endpoint sample controls cardinality. Coverage repair then
+    guarantees that every emitted style, EP degree, expert count, top-k, and
+    fine-grained active-capacity ratio still reaches candidate construction.
+    The repaired set can exceed the nominal target by a few rows; that is
+    intentional because a hard cap that erases an axis is a worse contract.
+    """
+    target = _INNER_LOOP_TARGET[family]
+    source_target = int(getattr(constraints, "_source_moe_option_cap", 0) or 0)
+    if source_target:
+        target = min(int(target or source_target), source_target)
+    if target is None or len(options) <= target:
+        return list(options)
+
+    selected = _endpoint_sample(options, target)
+    selected_ids = {id(opt) for opt in selected}
+
+    def _granularity(opt: MoEOption):
+        if opt.style != "fine":
+            return None
+        return round(opt.active_ffn_equivalent / max(1, baseline_ffn_dim), 3)
+
+    projections = (
+        lambda opt: opt.style,
+        lambda opt: opt.ep_degree,
+        lambda opt: opt.n_experts,
+        lambda opt: opt.top_k,
+        _granularity,
+    )
+    for project in projections:
+        represented = {project(opt) for opt in selected}
+        for value in dict.fromkeys(project(opt) for opt in options):
+            if value in represented:
+                continue
+            match = next(opt for opt in options if project(opt) == value)
+            if id(match) not in selected_ids:
+                selected.append(match)
+                selected_ids.add(id(match))
+            represented.add(value)
+    return selected
+
+
+def _source_generation_slices(
+    hw_name: str,
+    constraints: DeploymentConstraints,
+) -> Tuple[List[DeploymentConstraints], bool]:
+    """Build coverage-preserving common-axis slices for a capped search.
+
+    Candidate retention alone does not bound runtime: the generators still
+    construct every member of TP x precision x KV x MTP x CP x RoPE before
+    the bounded list discards rows. When that common product is large and the
+    caller supplied ``max_candidates``, sample deterministic Latin-style
+    tuples at the source. Every individual value on every axis occurs in at
+    least one tuple. Small products and uncapped searches retain the historic
+    exhaustive behavior.
+    """
+    vocabs = [
+        int(v)
+        for v in dict.fromkeys(
+            constraints.vocab_options or [constraints.vocab_size]
+        )
+    ]
+    mc = int(constraints.max_candidates or 0)
+
+    def _vocab_only_slices() -> List[DeploymentConstraints]:
+        return [
+            constraints
+            if vocab == constraints.vocab_size
+            else _dc_replace(constraints, vocab_size=vocab)
+            for vocab in vocabs
+        ]
+
+    if mc <= 0:
+        return _vocab_only_slices(), False
+
+    hw_precisions = get_precision_configs_for_hardware(hw_name)
+    precisions = [
+        p for p in (constraints.precision_configs or []) if p in hw_precisions
+    ]
+    if not precisions:
+        precisions = hw_precisions[:3]
+    mtp_opts, cp_opts, rope_opts, _ = _search_option_lists(constraints)
+    axes = [
+        vocabs,
+        list(constraints.tp_options or [constraints.tp]),
+        precisions,
+        list(constraints.kv_bits_options),
+        mtp_opts,
+        cp_opts,
+        rope_opts,
+    ]
+    total = math.prod(len(axis) for axis in axes)
+    max_axis = max(len(axis) for axis in axes)
+    # A source tuple still expands over shapes, GQA, depth, and architecture
+    # families. Budget roughly one tuple per 64 requested final candidates.
+    budget = min(total, max(max_axis, math.ceil(mc / 64)))
+    if total <= max(32, budget):
+        return _vocab_only_slices(), False
+
+    def _combo_at(flat_index: int) -> tuple:
+        values = [None] * len(axes)
+        remainder = int(flat_index)
+        for axis_index in range(len(axes) - 1, -1, -1):
+            axis = axes[axis_index]
+            values[axis_index] = axis[remainder % len(axis)]
+            remainder //= len(axis)
+        return tuple(values)
+
+    # The rotated tuples cover every value of every axis in max_axis rows.
+    combos: List[tuple] = []
+    seen = set()
+    for i in range(max_axis):
+        combo = tuple(
+            axis[(i + axis_index) % len(axis)]
+            for axis_index, axis in enumerate(axes)
+        )
+        if combo not in seen:
+            seen.add(combo)
+            combos.append(combo)
+
+    # Fill the remaining budget with an even traversal of the full product.
+    for i in range(budget):
+        combo = _combo_at(min(int(i * total / budget), total - 1))
+        if combo not in seen:
+            seen.add(combo)
+            combos.append(combo)
+        if len(combos) >= budget:
+            break
+    if len(combos) < budget:
+        for flat_index in range(total):
+            combo = _combo_at(flat_index)
+            if combo not in seen:
+                seen.add(combo)
+                combos.append(combo)
+            if len(combos) >= budget:
+                break
+
+    slices: List[DeploymentConstraints] = []
+    for vocab, tp, precision, kv_bits, mtp, cp, rope in combos:
+        sliced = _dc_replace(
+            constraints,
+            vocab_size=int(vocab),
+            vocab_options=[int(vocab)],
+            tp=int(tp),
+            tp_options=[int(tp)],
+            precision_configs=[str(precision)],
+            kv_bits_options=[int(kv_bits)],
+            mtp_depth_options=[int(mtp)],
+            cp=int(cp),
+            cp_options=[int(cp)],
+            rope_scaling_methods=[str(rope)],
+        )
+        # Private generation hints deliberately do not change the public
+        # constraint schema or serialized recipe identity.
+        sliced._source_lattice_budget = 4
+        sliced._source_gqa_cap = 3
+        sliced._source_layer_delta_cap = 3
+        sliced._source_moe_option_cap = 8
+        slices.append(sliced)
+    return slices, True
+
+
 # Wave 8 follow-up — family-aware Chinchilla anchor (Jun 2026).
 #
 # Empirical multipliers per architecture family vs the dense baseline:
@@ -1754,7 +2263,8 @@ def generate_moe_candidates(
     # violated assumption. Filtering here makes the guard unreachable.
     ep_opts = _filter_ep_options_by_dp(
         constraints.ep_options or default_ep_options(hw_name, for_moe=True),
-        dp=constraints.dp,
+        dp=(1 if constraints.training_cluster_gpus is not None
+            else constraints.dp),
         source=("user-supplied ep_options"
                 if constraints.ep_options is not None
                 else "hardware default"),
@@ -1785,11 +2295,11 @@ def generate_moe_candidates(
       # always include the ones a sane Pareto would survive on.
       aligned = _filter_lattice_to_budget(
           aligned, constraints.target_params_b,
-          budget=_LATTICE_BUDGET["moe"], family="moe")
+          budget=_generation_lattice_budget(constraints, "moe"), family="moe")
 
       for pt in aligned:
         # Use the dense lattice's GQA shape sweep (mirrors dense path).
-        gqa_ratios = _gqa_ratios_for_point(pt, constraints, tp_degree=tp_d)
+        gqa_ratios = _generation_gqa_ratios(pt, constraints, tp_degree=tp_d)
 
         # MoE options for this lattice point's d_model and ffn_dim baseline.
         moe_opts = compute_moe_options(
@@ -1806,7 +2316,9 @@ def generate_moe_candidates(
         # to _INNER_LOOP_TARGET["moe"] so MoE doesn't blow past its
         # generator-cap on total cardinality. Stride preserves diversity
         # in n_experts × top_k × expert_dim × ep ordering.
-        moe_opts = _stride_sample(moe_opts, _INNER_LOOP_TARGET["moe"])
+        moe_opts = _generation_moe_options(
+            moe_opts, constraints, "moe", pt.ffn_dim_swiglu,
+        )
 
         for gqa_r in gqa_ratios:
             n_kv_heads = max(1, pt.n_heads // gqa_r)
@@ -1840,7 +2352,10 @@ def generate_moe_candidates(
                 )
                 dense_per_layer = attn_params_per_layer + dense_ffn_params
 
-                for n_layers in [max(4, round(n_layers_raw) + d) for d in (-2, -1, 0, 1, 2)]:
+                for n_layers in [
+                    max(4, round(n_layers_raw) + d)
+                    for d in _generation_layer_deltas(constraints)
+                ]:
                     if min(constraints.pp_options) > 1 and n_layers % min(constraints.pp_options) != 0:
                         continue
 
@@ -2111,11 +2626,11 @@ def generate_state_candidates(
       # always include the ones a sane Pareto would survive on.
       aligned = _filter_lattice_to_budget(
           aligned, constraints.target_params_b,
-          budget=_LATTICE_BUDGET["state"], family="state")
+          budget=_generation_lattice_budget(constraints, "state"), family="state")
 
       for pt in aligned:
         # GQA sweep (same as dense path)
-        gqa_ratios = _gqa_ratios_for_point(pt, constraints, tp_degree=tp_d)
+        gqa_ratios = _generation_gqa_ratios(pt, constraints, tp_degree=tp_d)
 
         for gqa_r in gqa_ratios:
             n_kv_heads = max(1, pt.n_heads // gqa_r)
@@ -2135,7 +2650,10 @@ def generate_state_candidates(
             if not (1 <= n_layers_raw <= 256):
                 continue
 
-            for n_layers in [max(4, round(n_layers_raw) + delta) for delta in [-2, -1, 0, 1, 2]]:
+            for n_layers in [
+                max(4, round(n_layers_raw) + delta)
+                for delta in _generation_layer_deltas(constraints)
+            ]:
                 total = estimate_params(
                     pt.d_model, pt.n_heads, pt.d_head, pt.ffn_dim_swiglu,
                     n_layers, n_kv_heads, constraints.vocab_size
@@ -2192,7 +2710,13 @@ def generate_state_candidates(
                     for n_attn in n_attn_values:
                         n_state = n_layers - n_attn
 
-                        for strategy in strategies:
+                        # Placement, RoPE, KV layout, and attention-style CP
+                        # are undefined for a pure-state stack. Canonicalize
+                        # those axes instead of generating duplicate Mamba
+                        # candidates that claim benefits from LongRoPE or
+                        # Ulysses despite having zero attention layers.
+                        strategy_choices = strategies if n_attn > 0 else ["none"]
+                        for strategy in strategy_choices:
                             attn_indices = place_attention_layers(n_layers, n_attn, strategy)
                             actual_n_attn = len(attn_indices)
                             actual_n_state = n_layers - actual_n_attn
@@ -2205,13 +2729,8 @@ def generate_state_candidates(
                             ]
 
                             # Hybrid ratio string
-                            if actual_n_attn > 0 and actual_n_state > 0:
-                                ratio = actual_n_state / actual_n_attn
-                                hybrid_ratio = f"1:{ratio:.1f}"
-                            elif actual_n_attn == 0:
-                                hybrid_ratio = "pure_state"
-                            else:
-                                hybrid_ratio = "pure_attention"
+                            hybrid_ratio = format_state_attention_ratio(
+                                actual_n_state, actual_n_attn)
 
                             state_cfg = {
                                 "d_state": d_state,
@@ -2232,20 +2751,26 @@ def generate_state_candidates(
                                 prec = PRECISION_CONFIGS[prec_name]
                                 for kv_bits in constraints.kv_bits_options:
                                     for mtp_k in mtp_opts:
-                                        for cp_d in cp_opts:
-                                            for rope_m in rope_opts:
+                                        state_cp_opts = cp_opts if actual_n_attn > 0 else [1]
+                                        state_rope_opts = rope_opts if actual_n_attn > 0 else ["none"]
+                                        for cp_d in state_cp_opts:
+                                            for rope_m in state_rope_opts:
                                                 candidates.append(CandidateArch(
                                                     d_model=pt.d_model,
                                                     n_layers=n_layers,
                                                     n_heads=pt.n_heads,
                                                     d_head=pt.d_head,
-                                                    n_kv_heads=n_kv_heads,
+                                                    n_kv_heads=(
+                                                        n_kv_heads if actual_n_attn > 0
+                                                        else pt.n_heads),
                                                     ffn_dim=pt.ffn_dim_swiglu,
                                                     vocab_size=constraints.vocab_size,
                                                     weight_precision=prec["weight_precision"],
                                                     ffn_precision=prec["ffn_precision"],
                                                     attn_precision=dict(prec["attn_precision"]),
-                                                    kv_cache_bits=kv_bits,
+                                                    kv_cache_bits=(
+                                                        kv_bits if actual_n_attn > 0
+                                                        else 16),
                                                     total_params=total,
                                                     total_params_b=round(total / 1e9, 2),
                                                     mtp_n_predict_depths=int(mtp_k),
@@ -2342,7 +2867,8 @@ def generate_moe_hybrid_candidates(
     # Wave 24: EP <= DP cap — see MoE-only path for full rationale.
     ep_opts = _filter_ep_options_by_dp(
         constraints.ep_options or default_ep_options(hw_name, for_moe=True),
-        dp=constraints.dp,
+        dp=(1 if constraints.training_cluster_gpus is not None
+            else constraints.dp),
         source=("user-supplied ep_options"
                 if constraints.ep_options is not None
                 else "hardware default"),
@@ -2379,11 +2905,11 @@ def generate_moe_hybrid_candidates(
       # multiplies both the MoE and state cross-products per lattice point.
       aligned = _filter_lattice_to_budget(
           aligned, constraints.target_params_b,
-          budget=_LATTICE_BUDGET["moe_hybrid"], family="moe_hybrid")
+          budget=_generation_lattice_budget(constraints, "moe_hybrid"), family="moe_hybrid")
 
       for pt in aligned:
         # GQA sweep
-        gqa_ratios = _gqa_ratios_for_point(pt, constraints, tp_degree=tp_d)
+        gqa_ratios = _generation_gqa_ratios(pt, constraints, tp_degree=tp_d)
 
         # MoE options
         moe_opts = compute_moe_options(
@@ -2398,7 +2924,9 @@ def generate_moe_hybrid_candidates(
         )
         # Wave 5 fairness redesign: tighter cap for moe_hybrid (40 vs MoE's 80)
         # because moe_hybrid multiplies state inner cross-product.
-        moe_opts = _stride_sample(moe_opts, _INNER_LOOP_TARGET["moe_hybrid"])
+        moe_opts = _generation_moe_options(
+            moe_opts, constraints, "moe_hybrid", pt.ffn_dim_swiglu,
+        )
 
         for gqa_r in gqa_ratios:
             n_kv_heads = max(1, pt.n_heads // gqa_r)
@@ -2496,7 +3024,8 @@ def generate_moe_hybrid_candidates(
                             if total_total > max_total:
                                 continue
 
-                            for strategy in strategies:
+                            strategy_choices = strategies if n_attn > 0 else ["none"]
+                            for strategy in strategy_choices:
                                 attn_indices = place_attention_layers(n_layers, n_attn, strategy)
                                 actual_n_attn = len(attn_indices)
                                 actual_n_state = n_layers - actual_n_attn
@@ -2506,12 +3035,8 @@ def generate_moe_hybrid_candidates(
                                     "attention" if i in attn_set else "state"
                                     for i in range(n_layers)
                                 ]
-                                if actual_n_attn > 0 and actual_n_state > 0:
-                                    hybrid_ratio = f"1:{actual_n_state / actual_n_attn:.1f}"
-                                elif actual_n_attn == 0:
-                                    hybrid_ratio = "pure_state"
-                                else:
-                                    hybrid_ratio = "pure_attention"
+                                hybrid_ratio = format_state_attention_ratio(
+                                    actual_n_state, actual_n_attn)
 
                                 state_cfg = {
                                     "d_state": d_state,
@@ -2527,8 +3052,10 @@ def generate_moe_hybrid_candidates(
                                     prec = PRECISION_CONFIGS[prec_name]
                                     for kv_bits in constraints.kv_bits_options:
                                         for mtp_k in mtp_opts:
-                                            for cp_d in cp_opts:
-                                                for rope_m in rope_opts:
+                                            state_cp_opts = cp_opts if actual_n_attn > 0 else [1]
+                                            state_rope_opts = rope_opts if actual_n_attn > 0 else ["none"]
+                                            for cp_d in state_cp_opts:
+                                                for rope_m in state_rope_opts:
                                                     local_shared = None
                                                     if shared_block is not None:
                                                         local_shared = {
@@ -2555,13 +3082,17 @@ def generate_moe_hybrid_candidates(
                                                         n_layers=n_layers,
                                                         n_heads=pt.n_heads,
                                                         d_head=pt.d_head,
-                                                        n_kv_heads=n_kv_heads,
+                                                        n_kv_heads=(
+                                                            n_kv_heads if actual_n_attn > 0
+                                                            else pt.n_heads),
                                                         ffn_dim=pt.ffn_dim_swiglu,
                                                         vocab_size=constraints.vocab_size,
                                                         weight_precision=prec["weight_precision"],
                                                         ffn_precision=prec["ffn_precision"],
                                                         attn_precision=dict(prec["attn_precision"]),
-                                                        kv_cache_bits=kv_bits,
+                                                        kv_cache_bits=(
+                                                            kv_bits if actual_n_attn > 0
+                                                            else 16),
                                                         total_params=total_total,
                                                         total_params_b=round(total_total / 1e9, 2),
                                                         mtp_n_predict_depths=int(mtp_k),
@@ -2589,7 +3120,8 @@ def generate_moe_hybrid_candidates(
                                                         derived_d_state=d_state,
                                                         crossover_seq_len=L_star,
                                                     ))
-                                                    if getattr(constraints, "allow_mla", False):
+                                                    if (actual_n_attn > 0
+                                                            and getattr(constraints, "allow_mla", False)):
                                                         for c_kv in constraints.mla_kv_latent_options:
                                                             for c_q in constraints.mla_q_latent_options:
                                                                 uncompressed = 2 * pt.n_heads * pt.d_head
@@ -2789,6 +3321,19 @@ def evaluate_candidate(
 ) -> EvaluatedCandidate:
     """Evaluate a single candidate with throughput and quality models."""
 
+    # Canonicalize public parameter counts before any objective/report reads
+    # them. Generators use fast family-specific estimates for pruning, but
+    # state/MLA/MoE compositions can differ by several percent from those
+    # approximations. The shared ledger is already the source of truth for
+    # quality and throughput views; CandidateArch must expose the same totals.
+    ledger = parameter_ledger(cand)
+    cand.total_params = int(ledger.total_params)
+    cand.active_params = int(ledger.active_params)
+    cand.total_params_b = round(cand.total_params / 1e9, 6)
+    cand.active_params_b = round(cand.active_params / 1e9, 6)
+    effective_dp = _effective_candidate_dp(cand, constraints)
+    cand.dp_degree = effective_dp
+
     # --- Throughput ---
     prefill_len = max(1, int(constraints.prompt_len or constraints.context_length))
     # Scheduler-aware effective decode batch. AC models service time rather
@@ -2807,12 +3352,15 @@ def evaluate_candidate(
         batch_size=effective_serving_batch,
         seq_len=max(1, int(constraints.context_length)),
         precision=cand.ffn_precision,  # dominant precision for throughput
+        weight_precision=cand.weight_precision,
+        activation_precision=cand.activation_precision,
+        attn_precision=_copy.deepcopy(cand.attn_precision),
         kv_precision=kv_bits_to_precision(cand.kv_cache_bits),
         # v1: MoE branch fires when moe_config is set on the throughput's ArchConfig
         moe_config=cand.moe,
         # v1-fix Part B: first-K-dense prefix
         n_dense_ffn_layers=cand.n_dense_ffn_layers,
-        dp_degree=int(constraints.dp),
+        dp_degree=effective_dp,
         training_micro_batch=int(
             constraints.training_micro_batch
             if constraints.training_micro_batch is not None else 8
@@ -2869,6 +3417,19 @@ def evaluate_candidate(
     elif swa_window > 0:
         tput_arch.local_window = swa_window
         tput_arch.attention_type = "swa"
+        # Wave 40: whole-model SWA is priced through the same per-layer
+        # local-attention path the Wave-18g interleave uses (prefill
+        # attention S x min(S, W), windowed KV) instead of the legacy
+        # O(N^2) prefill upper bound. Before this, the SAME physical model
+        # cost 15x more TTFT expressed as attention_type="swa" than as a
+        # 32/32 local interleave (64.4s vs 4.2s at 512k/window 4096) —
+        # the optimizer compared the two encodings on inconsistent bases.
+        # compose_layer_type_list preserves state layers and clamps the
+        # local count to the available attention slots.
+        tput_arch.n_local_attn_layers = cand.n_layers
+        tput_arch.layer_type_list = compose_layer_type_list(
+            cand.layer_type_list, cand.n_layers, cand.n_layers
+        )
 
     # Wave 9 (Jun 2026): compressed-attention variants. Wire each variant's
     # config to the throughput model so the kv_bytes_per_token_per_layer
@@ -2922,10 +3483,10 @@ def evaluate_candidate(
     # window. We deliberately do NOT cap prefill_seq_len: prefill compute
     # is dominated by the FFN term (linear in seq) at short prompts, and
     # capping seq_len would shrink the FFN cost as well as the attention
-    # cost. The net effect is that SWA's decode wins and KV-cache wins
-    # are booked correctly, while prefill TTFT is left as a conservative
-    # upper bound (real SWA prefill is O(N·W) instead of O(N²); we model
-    # it as O(N²)). Caveat surfaced in the report's topology notes.
+    # cost. Wave 40: whole-model SWA prefill is no longer the legacy
+    # O(N^2) upper bound — it routes through the per-layer local-attention
+    # path (S x min(S, W)) via the all-local layer_type_list composed
+    # above, identical to the Wave-18g interleave pricing.
     effective_decode_len = prefill_len
     # Wave 18g: only whole-model SWA caps the decode length globally. In a
     # local:global interleave the global layers still read the full KV; the
@@ -2958,9 +3519,11 @@ def evaluate_candidate(
         tp_degree=_cand_tp,
         pp_degree=_cand_pp,
         microbatches=int(constraints.pipeline_microbatches),
-        dp_degree=int(constraints.dp),
+        dp_degree=effective_dp,
         decode_kv_len=effective_decode_len,
         prefill_seq_len=prefill_len,
+        training_seq_len=max(
+            1, int(constraints.pretraining_context_length)),
         ep_degree=cand.ep_degree,
         ep_topology=constraints.ep_topology,
     )
@@ -2971,9 +3534,27 @@ def evaluate_candidate(
     if cand.ffn_precision != cand.weight_precision:
         for comp in ("ffn_up", "ffn_down", "ffn_gate"):
             component_precs[comp] = cand.ffn_precision
-    if cand.attn_precision.get("v", "bf16") != "bf16":
-        component_precs["qkv_proj"] = cand.attn_precision.get("v", "bf16")
-        component_precs["output_proj"] = cand.attn_precision.get("output", "bf16")
+    # Wave 40: each attn_precision key is read independently. Previously
+    # "output" was consumed only when "v" was quantized, and "qk" was never
+    # consumed at all — fp8 qk-logits or a lone fp8 output projection were
+    # silent quality no-ops (same class as the Wave-38 sparsity_2_4 bug).
+    # Both key schemas are accepted ({qk,v,output} canonical; {q,k,v,o} as
+    # used by docs/invariant-probing-playbook.md) instead of silently
+    # dropping unknown keys.
+    _ap = cand.attn_precision or {}
+    _attn_v = _ap.get("v", "bf16")
+    _attn_out = _ap.get("output", _ap.get("o", "bf16"))
+    # qk logits are quantized if ANY of qk/q/k is quantized ("bf16" is
+    # truthy, so an `or` chain would let {"q": "bf16", "k": "fp8"} slip
+    # through as bf16).
+    _attn_qk = next((v for v in (_ap.get("qk"), _ap.get("q"), _ap.get("k"))
+                     if v and v != "bf16"), "bf16")
+    if _attn_v != "bf16":
+        component_precs["qkv_proj"] = _attn_v
+    if _attn_out != "bf16":
+        component_precs["output_proj"] = _attn_out
+    if _attn_qk != "bf16":
+        component_precs["qk_logits"] = _attn_qk
 
     # Determine model_type
     if cand.state_config is not None:
@@ -2999,6 +3580,14 @@ def evaluate_candidate(
                 cand.state_config.get("state_precision", "mamba2"),
             ),
             "d_state": cand.state_config["d_state"],
+            # Keep the state projection shape in the quality view. The
+            # canonical parameter ledger reads these fields; omitting them
+            # silently substituted d_head=64 and made otherwise-valid
+            # hybrids fail the architecture-view invariant whenever their
+            # state head width differed from that default.
+            "state_expansion": cand.state_config.get("state_expansion", 2),
+            "n_heads": cand.state_config.get("n_heads", cand.n_heads),
+            "d_head": cand.state_config.get("d_head", cand.d_head),
             "state_layers": cand.n_state_layers,
             "attention_layers": cand.n_attention_layers,
             "pattern": cand.placement_strategy,
@@ -3013,6 +3602,7 @@ def evaluate_candidate(
         ffn_dim=cand.ffn_dim,
         vocab_size=cand.vocab_size,
         weight_precision=cand.weight_precision,
+        activation_precision=cand.activation_precision,
         component_precisions=component_precs if component_precs else None,
         # v1: MoE fires the quality model's _moe_residual hook.
         moe_config=cand.moe,
@@ -3074,6 +3664,15 @@ def evaluate_candidate(
         rope_scaling_factor=float(cand.rope_scaling_factor),
         rope_original_max_position=int(cand.rope_original_max_position),
         yoco_n_self_attn_layers=int(cand.yoco_n_self_attn_layers),
+        # Wave 38: sparsity_2_4 was carried on CandidateArch and read
+        # inside _architecture_residual (line ~2127) but never threaded
+        # into the QualArch view — so the FFN/attn 2:4 sparsity quality
+        # penalty (0.015 x sparse_param_share, ~1% loss for full-FFN
+        # 2:4) was a silent no-op. The throughput model's 2x speedup
+        # WAS wired via ArchConfig, so recommending 2:4 sparsity gave
+        # a "free" 2x TPS with zero quality cost. Property test: see
+        # docs/invariant-probing-playbook.md #E.
+        sparsity_2_4=getattr(cand, "sparsity_2_4", None),
     )
     validate_architecture_views(cand, tput_arch, qual_arch)
 
@@ -3130,6 +3729,23 @@ def evaluate_candidate(
     # via throughput_model.py's hbm_spill / spill_tier fields.
     violations = []
     meets = True
+
+    # A minimum training-cluster target and a maximum are deliberately
+    # separate constraints. The former derives candidate-specific DP and may
+    # round upward for a legal EP overlay; the latter is a hard physical cap.
+    # Keeping this guard in the shared evaluator prevents generator, Python,
+    # and future CLI entry points from disagreeing about the same topology.
+    _training_replica_gpus = _candidate_training_replica_gpus(cand, constraints)
+    _training_world_gpus = _training_replica_gpus * effective_dp
+    _max_training_world = getattr(
+        constraints, "max_training_cluster_gpus", None)
+    if (_max_training_world is not None
+            and _training_world_gpus > int(_max_training_world)):
+        violations.append(
+            f"Training world {_training_world_gpus} GPUs > "
+            f"hard cap {int(_max_training_world)} GPUs"
+        )
+        meets = False
 
     # Keep TBT/TTFT budgets as *soft warnings* if the user explicitly set
     # them (so opting back into the v0 behavior is possible from Python),
@@ -3208,6 +3824,30 @@ def evaluate_candidate(
             metric_value=qual.predicted_loss,
             threshold=1e4,
         ),
+        "training_cluster_cap": GuardResult(
+            name="training_cluster_cap",
+            triggered=(
+                _max_training_world is not None
+                and _training_world_gpus > int(_max_training_world)
+            ),
+            fails_feasibility=(
+                _max_training_world is not None
+                and _training_world_gpus > int(_max_training_world)
+            ),
+            is_warning=False,
+            message=(
+                f"Training world {_training_world_gpus} GPUs exceeds hard "
+                f"cap {int(_max_training_world)} GPUs"
+                if (_max_training_world is not None
+                    and _training_world_gpus > int(_max_training_world))
+                else ""
+            ),
+            metric_value=float(_training_world_gpus),
+            threshold=(
+                float(_max_training_world)
+                if _max_training_world is not None else None
+            ),
+        ),
         "tbt_budget_warning": GuardResult(
             name="tbt_budget_warning",
             triggered=(constraints.serving_tbt_ms is not None
@@ -3273,7 +3913,9 @@ def _get_hbm_gb(hw_name: str) -> float:
     """Get HBM capacity for a hardware target."""
     hbm_map = {
         "h100": 80,
+        "h800": 80,             # Gate-2 Task C: H100 silicon, same 80 GB HBM3
         "b200": 192,
+        "gb200_nvl72": 192,     # Gate-2 Task C: B200 silicon, 192 GB HBM3e
         "tpu_v5e": 16,
         "tpu_v5p": 95,
         "trainium2": 96,
@@ -3282,6 +3924,27 @@ def _get_hbm_gb(hw_name: str) -> float:
         "trn3": 192,
     }
     return hbm_map.get(hw_name, 80)
+
+
+def _prefer_training_fit(
+    candidates: List[EvaluatedCandidate], hw_name: str,
+) -> List[EvaluatedCandidate]:
+    """Prefer physically trainable plans, falling back only if none fit.
+
+    Serving spill is explicitly modeled, but AC has no training-spill or
+    optimizer-offload model. A candidate whose training memory exceeds HBM
+    therefore cannot honestly beat a fitting candidate on a tiny loss prior.
+    Keep best-effort behavior for genuinely impossible cells by returning the
+    original pool when every candidate overflows.
+    """
+    hbm = float(_get_hbm_gb(hw_name))
+    fitting = [
+        ev for ev in candidates
+        if float(getattr(
+            ev.throughput, "training_memory_per_gpu_gb", 0.0) or 0.0)
+        <= hbm + 1e-9
+    ]
+    return fitting or candidates
 
 
 # =============================================================================
@@ -3309,12 +3972,16 @@ def is_dominated(a: EvaluatedCandidate, b: EvaluatedCandidate) -> bool:
     # neutral on the axis.
     train_mem_a = float(getattr(a.throughput, "training_memory_per_gpu_gb", 0.0) or 0.0)
     train_mem_b = float(getattr(b.throughput, "training_memory_per_gpu_gb", 0.0) or 0.0)
-    objs_a = (a.predicted_loss, -a.training_tps, a.serving_tbt_ms,
+    objs_a = (a.predicted_loss, -_evaluated_training_tps_per_gpu(a),
+              a.serving_tbt_ms,
               a.throughput.prefill_time_ms, a.memory_per_gpu_gb,
-              train_mem_a, a.arch.total_params)
-    objs_b = (b.predicted_loss, -b.training_tps, b.serving_tbt_ms,
+              train_mem_a, a.arch.total_params,
+              _evaluated_serving_instance_gpus(a))
+    objs_b = (b.predicted_loss, -_evaluated_training_tps_per_gpu(b),
+              b.serving_tbt_ms,
               b.throughput.prefill_time_ms, b.memory_per_gpu_gb,
-              train_mem_b, b.arch.total_params)
+              train_mem_b, b.arch.total_params,
+              _evaluated_serving_instance_gpus(b))
 
     at_least_one_better = False
     for oa, ob in zip(objs_a, objs_b):
@@ -3413,6 +4080,82 @@ def _identify_binding_constraints(
     return binding
 
 
+def _expand_compressed_variants(
+    candidates: List["CandidateArch"],
+    constraints: "DeploymentConstraints",
+    max_expansion_per_type: int = 25_000,
+) -> List["CandidateArch"]:
+    """Wave 33 (Jul 2026): compressed-attention x MoE / state composition.
+
+    The Wave 9 CSA/IndexShare/MSA emissions live only in the dense
+    generator, so an allow_csa search could never produce a
+    "sparse-attention MoE" or a "sparse-global hybrid" — the exact stacks
+    that compete with MLA+MoE+state at long context. The evaluator
+    already scores the combinations correctly (throughput branches per
+    attention_type independently of FFN/state; the quality model fires
+    the compression residual alongside moe/state residuals), so the gap
+    was pure enumeration.
+
+    This expander runs at the family-combine point: for every
+    full-attention candidate that carries MoE and/or state layers, emit
+    one copy per allowed compressed family at that family's DEFAULT
+    config (first option of each list). One config per type keeps the
+    expansion at <=3x the eligible subset; an even-stride subsample caps
+    the eligible base at `max_expansion_per_type` so enumeration memory
+    stays bounded. Compressed attention leaves the parameter ledger
+    unchanged (same convention as the Wave 9 dense emissions), so
+    dataclasses.replace preserves ledger consistency.
+    """
+    want_csa = bool(getattr(constraints, "allow_csa", False))
+    want_idx = bool(getattr(constraints, "allow_indexshare", False))
+    want_msa = bool(getattr(constraints, "allow_msa", False))
+    if not (want_csa or want_idx or want_msa):
+        return candidates
+
+    eligible = [
+        c for c in candidates
+        if (getattr(c, "attention_type", "full") or "full") == "full"
+        and (getattr(c, "moe", None) or getattr(c, "state_config", None))
+        # Local:global interleave candidates already mix attention spans;
+        # stacking a second sparse pattern on their global layers is not
+        # a modeled composition.
+        and not int(getattr(c, "n_local_attn_layers", 0) or 0)
+    ]
+    if not eligible:
+        return candidates
+    if len(eligible) > max_expansion_per_type:
+        step = len(eligible) / max_expansion_per_type
+        eligible = [eligible[min(int(i * step), len(eligible) - 1)]
+                    for i in range(max_expansion_per_type)]
+
+    from dataclasses import replace as _dr
+    out = list(candidates)
+    if want_csa:
+        _bs = int((constraints.csa_block_size_options or [64])[0])
+        _tk = int((constraints.csa_top_k_options or [16])[0])
+        _cd = int(getattr(constraints, "csa_compression_dim", 64) or 64)
+        for c in eligible:
+            out.append(_dr(c, attention_type="csa", csa_block_size=_bs,
+                           csa_top_k_blocks=_tk, csa_compression_dim=_cd))
+    if want_idx:
+        _nb = int((constraints.indexshare_num_buckets_options or [64])[0])
+        _tk = int((constraints.indexshare_top_k_options or [4])[0])
+        _id = int(getattr(constraints, "indexshare_index_dim", 64) or 64)
+        for c in eligible:
+            out.append(_dr(c, attention_type="indexshare",
+                           indexshare_num_buckets=_nb,
+                           indexshare_top_k_buckets=_tk,
+                           indexshare_index_dim=_id))
+    if want_msa:
+        _w = int((constraints.msa_window_options or [512])[0])
+        _dk = int((constraints.msa_dilated_top_k_options or [64])[0])
+        _gk = int((constraints.msa_global_top_k_options or [16])[0])
+        for c in eligible:
+            out.append(_dr(c, attention_type="msa", msa_window_size=_w,
+                           msa_dilated_top_k=_dk, msa_global_top_k=_gk))
+    return out
+
+
 def _apply_forced_architecture_features(
     candidates: List[CandidateArch],
     constraints: DeploymentConstraints,
@@ -3466,6 +4209,16 @@ def optimize(
     feasible candidates meeting all deployment constraints).
     """
     t0 = time.time()
+    evaluation_failure_reasons: Dict[str, int] = {}
+
+    def _record_evaluation_failure(exc: Exception) -> None:
+        message = " ".join(str(exc).split())
+        key = f"{type(exc).__name__}: {message or '<no message>'}"
+        if len(key) > 240:
+            key = key[:237] + "..."
+        evaluation_failure_reasons[key] = (
+            evaluation_failure_reasons.get(key, 0) + 1
+        )
 
     # 1. Generate candidates (dense + optional MoE + optional state/hybrid +
     #    optional combined MoE×state when both flags are on).
@@ -3482,7 +4235,7 @@ def optimize(
     # crowded out of the pool by a combinatorially larger sibling, which
     # matches the Wave 8b stratified-prune philosophy.
     _mc = int(constraints.max_candidates or 0)
-    _family_pool_cap = max(100_000, 25 * _mc) if _mc > 0 else 200_000
+    _family_pool_cap = _enumeration_pool_cap(constraints)
 
     def _expand_local_global(fam: List["CandidateArch"]) -> List["CandidateArch"]:
         """Wave 18g: stream local:global interleave variants into a bounded
@@ -3516,22 +4269,11 @@ def optimize(
         return list(out)
 
     def _bounded_family(gen_fn) -> List["CandidateArch"]:
-        # Wave 18h: vocab sweep — run the generator once per vocab option.
-        # Generators read constraints.vocab_size for the parameter ledger,
-        # so a shallow dataclass copy per vocab is the single wiring point.
-        _vocabs = [
-            int(v)
-            for v in dict.fromkeys(
-                constraints.vocab_options or [constraints.vocab_size]
-            )
-        ]
+        generation_slices, _source_sliced = _source_generation_slices(
+            hw_name, constraints,
+        )
         fam: List["CandidateArch"] = []
-        for _vocab in _vocabs:
-            vc = (
-                constraints
-                if _vocab == constraints.vocab_size
-                else _dc_replace(constraints, vocab_size=_vocab)
-            )
+        for vc in generation_slices:
             fam = fam + gen_fn(hw_name, vc)
         if len(fam) > _family_pool_cap:
             step = len(fam) / _family_pool_cap
@@ -3550,6 +4292,8 @@ def optimize(
         # ones so the Pareto frontier compares all four families on equal
         # footing.
         candidates = candidates + _bounded_family(generate_moe_hybrid_candidates)
+    # Wave 33: compressed-attention x MoE / state composition.
+    candidates = _expand_compressed_variants(candidates, constraints)
     candidates = _apply_forced_architecture_features(candidates, constraints)
 
     # 2. Deduplicate (same arch dimensions + precision can appear from multiple lattice points)
@@ -3577,21 +4321,46 @@ def optimize(
         # throughput kernel) and must not collide.
         if c.state_config is not None:
             state_key = (
-                c.state_config.get("type"),
+                c.state_config.get(
+                    "state_type", c.state_config.get("type")),
                 c.state_config.get("d_state"),
-                c.state_config.get("precision"),
+                c.state_config.get("state_expansion"),
+                c.state_config.get("n_heads"),
+                c.state_config.get("d_head"),
+                c.state_config.get(
+                    "state_precision", c.state_config.get("precision")),
+                tuple(c.layer_type_list or ()),
                 c.n_attention_layers,
                 c.n_state_layers,
                 c.placement_strategy,
             )
         else:
             state_key = None
+        # Wave 37 (probe-caught): the key must carry EVERY attention-variant
+        # config field. Without the compressed/NSA fields, sweeping
+        # --csa-block-sizes 64,128 x --csa-top-k-blocks 8,16 emitted four
+        # configs per shape and dedupe silently collapsed them to one —
+        # the sweep flags were dead on arrival.
         attn_key = (
             c.attention_type,
             c.mla_kv_latent_dim,
             c.mla_q_latent_dim,
             c.mla_rope_head_dim,
             c.mla_nope_head_dim,
+            int(getattr(c, "csa_block_size", 0) or 0),
+            int(getattr(c, "csa_top_k_blocks", 0) or 0),
+            int(getattr(c, "csa_compression_dim", 0) or 0),
+            int(getattr(c, "indexshare_num_buckets", 0) or 0),
+            int(getattr(c, "indexshare_top_k_buckets", 0) or 0),
+            int(getattr(c, "indexshare_index_dim", 0) or 0),
+            int(getattr(c, "msa_window_size", 0) or 0),
+            int(getattr(c, "msa_dilated_top_k", 0) or 0),
+            int(getattr(c, "msa_global_top_k", 0) or 0),
+            int(getattr(c, "nsa_compress_block_size", 0) or 0),
+            int(getattr(c, "nsa_compress_block_stride", 0) or 0),
+            int(getattr(c, "nsa_select_block_size", 0) or 0),
+            int(getattr(c, "nsa_select_top_k", 0) or 0),
+            int(getattr(c, "nsa_window_size", 0) or 0),
         )
         long_context_key = (
             c.cp_degree,
@@ -3640,12 +4409,13 @@ def optimize(
         key = (
             c.d_model, c.n_layers, c.n_heads, c.d_head, c.n_kv_heads,
             c.ffn_dim, c.vocab_size,
-            c.weight_precision, c.ffn_precision,
+            c.weight_precision, c.ffn_precision, c.activation_precision,
             tuple(sorted((c.attn_precision or {}).items())),
             c.kv_cache_bits,
             moe_key, state_key, attn_key, long_context_key, mtp_key,
             sparsity_key, yoco_key, swa_key,
             int(getattr(c, "tp_degree", 0) or 0),
+            int(getattr(c, "pp_degree", 0) or 0),
             int(getattr(c, "ep_degree", 0) or 0),
         )
         if key not in seen:
@@ -3658,12 +4428,11 @@ def optimize(
     # per-cell pick is structurally unreliable" — candidates_generated
     # alone is bounded by the cap and so can't answer the question.
     _candidates_enumerated_raw = len(candidates)
+    _precap_candidates = candidates  # Wave 34: kept for local refinement
     if constraints.max_candidates is not None and constraints.max_candidates > 0:
-        cap = int(constraints.max_candidates)
-        if len(candidates) > cap:
-            step = len(candidates) / cap
-            candidates = [candidates[min(int(i * step), len(candidates) - 1)]
-                          for i in range(cap)]
+        # Wave 32/34: stratified + cheap-rank-guided — see _stratified_candidate_cap.
+        candidates = _stratified_candidate_cap(
+            candidates, int(constraints.max_candidates), constraints)
 
     # Wave 8b (Jun 2026, stratified-by-family post-probe): Two-stage prune.
     # Cap full evaluations to `constraints.max_full_evaluations` while
@@ -3690,18 +4459,25 @@ def optimize(
             # dict (e.g. empty or top_k=1) correctly buckets as `dense` here.
             from ac.architecture import architecture_signature as _arch_sig
             def _family_key(c):
+                # Wave 34: stratify by (family, attention_type), not family
+                # alone. Compressed-attention variants (csa/indexshare/msa)
+                # all classify as family "dense"; with family-only buckets
+                # the attention-blind cheap rank ties them against their
+                # full-attention siblings and sort stability drops whole
+                # variant classes (msa vanished from an allow_msa search).
+                _at = getattr(c, "attention_type", "full") or "full"
                 try:
-                    return _arch_sig(c).legacy_family
+                    return (_arch_sig(c).legacy_family, _at)
                 except Exception:
                     # Defensive fallback: architecture_signature raises on
                     # missing shape fields; keep the search running rather
                     # than dropping the candidate entirely.
                     has_moe = bool(getattr(c, "moe", None))
                     has_state = bool(getattr(c, "state_config", None))
-                    if has_moe and has_state: return "moe_hybrid"
-                    if has_moe:                return "moe"
-                    if has_state:              return "hybrid"
-                    return "dense"
+                    if has_moe and has_state: return ("moe_hybrid", _at)
+                    if has_moe:                return ("moe", _at)
+                    if has_state:              return ("hybrid", _at)
+                    return ("dense", _at)
             buckets: dict = {}
             for c in candidates:
                 buckets.setdefault(_family_key(c), []).append(c)
@@ -3737,12 +4513,25 @@ def optimize(
     # 3. Evaluate all candidates
     evaluated = []
     total = len(candidates)
+    # Wave 47: name the search size up front when it is large enough that
+    # the user will be waiting on it, and say which knobs make it faster.
+    # Keyed on progress_every so --quiet (progress_every=0) suppresses it.
+    if constraints.progress_every and total >= 2 * constraints.progress_every:
+        _uncapped = (constraints.max_candidates is None
+                     and constraints.max_full_evaluations is None)
+        _hint = (" (uncapped search; --max-candidates or "
+                 "--max-full-evaluations trades coverage for speed)"
+                 if _uncapped else "")
+        print(
+            f"[arch-compiler] {total:,} candidates to fully evaluate{_hint}",
+            file=sys.stderr,
+        )
     for idx, cand in enumerate(candidates, start=1):
         try:
             ev = evaluate_candidate(cand, hw_name, constraints)
             evaluated.append(ev)
-        except Exception:
-            # Skip candidates that cause errors (e.g., missing hardware spec)
+        except Exception as exc:
+            _record_evaluation_failure(exc)
             continue
         if constraints.progress_every and idx % constraints.progress_every == 0:
             print(
@@ -3751,11 +4540,59 @@ def optimize(
                 file=sys.stderr,
             )
 
+    # 3b. Wave 34: cheap local refinement. When the cap dropped candidates,
+    # densify the lattice neighborhood of the provisional per-class leaders
+    # with shapes from the PRE-CAP pool, then fold them into the same
+    # evaluated set. No-op for uncapped searches.
+    _refine_budget = int(getattr(constraints, "local_refine_budget", 0) or 0)
+    # max_full_evaluations is a HARD contract on total full evaluations
+    # (pinned by test_two_stage_evaluation): refinement must fit in the
+    # remaining headroom, which after stage one fills the cap is zero —
+    # raise the cap if you want refinement under two-stage pruning.
+    if constraints.max_full_evaluations is not None             and constraints.max_full_evaluations > 0:
+        _refine_budget = min(
+            _refine_budget,
+            max(0, int(constraints.max_full_evaluations) - len(evaluated)))
+    if (_refine_budget > 0 and evaluated
+            and len(_precap_candidates) > len(candidates)):
+        _by_class: dict = {}
+        for e in evaluated:
+            k = (getattr(e.arch, "attention_type", "full") or "full",
+                 bool(getattr(e.arch, "moe", None)),
+                 bool(getattr(e.arch, "state_config", None)))
+            cur = _by_class.get(k)
+            if cur is None or e.predicted_loss < cur.predicted_loss:
+                _by_class[k] = e
+        _leaders = [e.arch for e in _by_class.values()]
+        _extra = _select_refinement_neighbors(
+            _leaders, _precap_candidates,
+            [e.arch for e in evaluated], _refine_budget)
+        for cand in _extra:
+            try:
+                evaluated.append(evaluate_candidate(cand, hw_name, constraints))
+            except Exception as exc:
+                _record_evaluation_failure(exc)
+                continue
+
+    evaluation_failures = sum(evaluation_failure_reasons.values())
+    if candidates and not evaluated and evaluation_failures:
+        dominant, count = max(
+            evaluation_failure_reasons.items(), key=lambda item: item[1]
+        )
+        raise ValueError(
+            f"all {evaluation_failures} candidate evaluation(s) failed; "
+            f"most common ({count}x): {dominant}"
+        )
+
     # 4. Filter to feasible
     feasible = [e for e in evaluated if e.meets_constraints]
 
-    # 5. Pareto frontier (over feasible only)
-    pareto = compute_pareto_frontier(feasible)
+    # 5. Pareto frontier. When at least one candidate fits training HBM,
+    # exclude overflow plans from winner selection: training spill/offload is
+    # not modeled. If every plan overflows, retain the best-effort frontier
+    # and let the CLI's explicit no-fit warning carry the result.
+    selection_feasible = _prefer_training_fit(feasible, hw_name)
+    pareto = compute_pareto_frontier(selection_feasible)
 
     # 6. Pick the displayed optimum from the Pareto surface using the selected
     # tradeoff preset. This keeps "optimal" aligned with latency/cost profiles
@@ -3769,8 +4606,8 @@ def optimize(
     # config that was statistically indistinguishable from a much cheaper
     # neighbour purely because it had the absolute argmin loss.
     optimal = None
-    if feasible:
-        scoring_pool = pareto if pareto else feasible
+    if selection_feasible:
+        scoring_pool = pareto if pareto else selection_feasible
         # Build the SAME sort key used by both the picker and the CSV
         # writer. Anchoring both paths to one builder is what guarantees
         # that `rank=1` in pareto.csv always agrees with `selected=True`.
@@ -3821,7 +4658,7 @@ def optimize(
         # excluded infeasible candidates upstream. Pass the Pareto-selected
         # subset first so the assessment focuses on the operating-point
         # contenders, falling back to feasible if Pareto is empty.
-        _decision_pool = pareto if pareto else feasible
+        _decision_pool = pareto if pareto else selection_feasible
         _decision = _assess_decision(_decision_pool)
     except Exception:
         _decision = None
@@ -3833,6 +4670,8 @@ def optimize(
         candidates_generated=len(candidates),
         candidates_feasible=len(feasible),
         candidates_evaluated=len(evaluated),
+        evaluation_failures=evaluation_failures,
+        evaluation_failure_reasons=dict(evaluation_failure_reasons),
         candidates_enumerated_raw=_candidates_enumerated_raw,
         search_time_sec=round(elapsed, 2),
         hardware=hw_name,
@@ -3904,6 +4743,8 @@ class MultiCtxResult:
     per_ctx_all_evaluated: Dict[int, List["EvaluatedCandidate"]] = field(default_factory=dict)
     candidates_enumerated_raw: int = 0
     candidates_feasible_per_ctx: Dict[int, int] = field(default_factory=dict)
+    evaluation_failures: int = 0
+    evaluation_failure_reasons: Dict[str, int] = field(default_factory=dict)
     search_time_sec: float = 0.0
     hardware: str = ""
     constraints: Optional[DeploymentConstraints] = None
@@ -3940,6 +4781,8 @@ def _enumerate_and_dedupe(
             candidates = candidates + generate_state_candidates(hw_name, vc)
         if vc.allow_moe and vc.allow_state:
             candidates = candidates + generate_moe_hybrid_candidates(hw_name, vc)
+    # Wave 33: compressed-attention x MoE / state composition.
+    candidates = _expand_compressed_variants(candidates, constraints)
     candidates = _apply_forced_architecture_features(candidates, constraints)
 
     # Dedupe (same key shape as in optimize())
@@ -3957,15 +4800,38 @@ def _enumerate_and_dedupe(
         else:
             moe_key = None
         if c.state_config is not None:
-            state_key = (c.state_config.get("type"),
+            state_key = (c.state_config.get(
+                             "state_type", c.state_config.get("type")),
                          c.state_config.get("d_state"),
-                         c.state_config.get("precision"),
+                         c.state_config.get("state_expansion"),
+                         c.state_config.get("n_heads"),
+                         c.state_config.get("d_head"),
+                         c.state_config.get(
+                             "state_precision", c.state_config.get("precision")),
+                         tuple(c.layer_type_list or ()),
                          c.n_attention_layers,
                          c.n_state_layers, c.placement_strategy)
         else:
             state_key = None
-        attn_key = (c.attention_type, c.mla_kv_latent_dim, c.mla_q_latent_dim,
-                    c.mla_rope_head_dim, c.mla_nope_head_dim)
+        # Wave 37: same attention-variant completeness as optimize()'s key.
+        attn_key = (
+            c.attention_type, c.mla_kv_latent_dim, c.mla_q_latent_dim,
+            c.mla_rope_head_dim, c.mla_nope_head_dim,
+            int(getattr(c, "csa_block_size", 0) or 0),
+            int(getattr(c, "csa_top_k_blocks", 0) or 0),
+            int(getattr(c, "csa_compression_dim", 0) or 0),
+            int(getattr(c, "indexshare_num_buckets", 0) or 0),
+            int(getattr(c, "indexshare_top_k_buckets", 0) or 0),
+            int(getattr(c, "indexshare_index_dim", 0) or 0),
+            int(getattr(c, "msa_window_size", 0) or 0),
+            int(getattr(c, "msa_dilated_top_k", 0) or 0),
+            int(getattr(c, "msa_global_top_k", 0) or 0),
+            int(getattr(c, "nsa_compress_block_size", 0) or 0),
+            int(getattr(c, "nsa_compress_block_stride", 0) or 0),
+            int(getattr(c, "nsa_select_block_size", 0) or 0),
+            int(getattr(c, "nsa_select_top_k", 0) or 0),
+            int(getattr(c, "nsa_window_size", 0) or 0),
+        )
         long_context_key = (c.cp_degree, c.cp_method, c.rope_scaling_method,
                             round(float(c.rope_scaling_factor), 6),
                             c.rope_original_max_position)
@@ -3985,12 +4851,13 @@ def _enumerate_and_dedupe(
         key = (
             c.d_model, c.n_layers, c.n_heads, c.d_head, c.n_kv_heads,
             c.ffn_dim, c.vocab_size,
-            c.weight_precision, c.ffn_precision,
+            c.weight_precision, c.ffn_precision, c.activation_precision,
             tuple(sorted((c.attn_precision or {}).items())),
             c.kv_cache_bits,
             moe_key, state_key, attn_key, long_context_key, mtp_key,
             sparsity_key, yoco_key, swa_key,
             int(getattr(c, "tp_degree", 0) or 0),
+            int(getattr(c, "pp_degree", 0) or 0),
             int(getattr(c, "ep_degree", 0) or 0),
         )
         if key not in seen:
@@ -3998,14 +4865,13 @@ def _enumerate_and_dedupe(
             unique.append(c)
     raw_count = len(unique)
 
-    # Apply max_candidates cap (same logic as optimize())
+    # Apply max_candidates cap (same logic as optimize()).
+    # Wave 32/34: stratified + cheap-rank-guided — see _stratified_candidate_cap.
+    precap = unique
     if constraints.max_candidates is not None and constraints.max_candidates > 0:
-        cap = int(constraints.max_candidates)
-        if len(unique) > cap:
-            step = len(unique) / cap
-            unique = [unique[min(int(i * step), len(unique) - 1)]
-                      for i in range(cap)]
-    return unique, raw_count
+        unique = _stratified_candidate_cap(
+            unique, int(constraints.max_candidates), constraints)
+    return unique, raw_count, precap
 
 
 def _is_jointly_dominated(
@@ -4017,14 +4883,20 @@ def _is_jointly_dominated(
     at_least_one_strictly_better = False
     for ev_a, ev_b in zip(a_evals, b_evals):
         # Same 6 objectives as is_dominated()
-        obj_a = (ev_a.predicted_loss, -ev_a.training_tps, ev_a.serving_tbt_ms,
+        obj_a = (ev_a.predicted_loss,
+                 -_evaluated_training_tps_per_gpu(ev_a),
+                 ev_a.serving_tbt_ms,
                  ev_a.throughput.prefill_time_ms, ev_a.memory_per_gpu_gb,
                  float(getattr(ev_a.throughput, "training_memory_per_gpu_gb", 0.0) or 0.0),
-                 ev_a.arch.total_params)
-        obj_b = (ev_b.predicted_loss, -ev_b.training_tps, ev_b.serving_tbt_ms,
+                 ev_a.arch.total_params,
+                 _evaluated_serving_instance_gpus(ev_a))
+        obj_b = (ev_b.predicted_loss,
+                 -_evaluated_training_tps_per_gpu(ev_b),
+                 ev_b.serving_tbt_ms,
                  ev_b.throughput.prefill_time_ms, ev_b.memory_per_gpu_gb,
                  float(getattr(ev_b.throughput, "training_memory_per_gpu_gb", 0.0) or 0.0),
-                 ev_b.arch.total_params)
+                 ev_b.arch.total_params,
+                 _evaluated_serving_instance_gpus(ev_b))
         for oa, ob in zip(obj_a, obj_b):
             if ob > oa:
                 return False  # b worse than a on this objective at this ctx
@@ -4055,18 +4927,52 @@ def _compute_joint_pareto(
     return frontier
 
 
+def _meets_declared_budgets(ev: "EvaluatedCandidate",
+                            constraints: "DeploymentConstraints") -> bool:
+    """True iff the candidate satisfies every serving budget the user
+    actually declared (TBT / TTFT). Budgets are soft guards by design
+    (fails_feasibility=False — extreme corners should degrade to a
+    marked best-effort answer, not an empty one), but Wave 33 makes them
+    binding at PICK time: a candidate violating a declared budget loses
+    to any candidate that meets it, and only if every candidate violates
+    do we fall back to ranking among violators."""
+    tbt = getattr(constraints, "serving_tbt_ms", None)
+    if tbt is not None and float(ev.serving_tbt_ms) > float(tbt):
+        return False
+    ttft = getattr(constraints, "serving_ttft_ms", None)
+    if ttft is not None and float(ev.throughput.prefill_time_ms) > float(ttft):
+        return False
+    return True
+
+
 def _pick_joint_optimum(
     pareto_indices: List[int],
     per_cand_per_ctx: List[List["EvaluatedCandidate"]],
     ctx_list: List[int],
     ctx_weights: Dict[int, float],
+    constraints: Optional["DeploymentConstraints"] = None,
 ) -> Optional[int]:
     """Score each Pareto candidate by weighted-sum of normalized per-ctx losses.
     Returns the index of the picked candidate (an index into the original
     candidates list, NOT into pareto_indices).
+
+    Wave 33: when serving budgets are declared, candidates that meet them
+    at the reference ctx (index 0 weight ordering aside — we check every
+    ctx and require a majority) outrank all violators regardless of loss;
+    ranking falls back to all candidates when nobody meets the budgets.
     """
     if not pareto_indices:
         return None
+
+    if constraints is not None and (
+            getattr(constraints, "serving_tbt_ms", None) is not None
+            or getattr(constraints, "serving_ttft_ms", None) is not None):
+        ok = [i for i in pareto_indices
+              if sum(1 for ev in per_cand_per_ctx[i]
+                     if _meets_declared_budgets(ev, constraints))
+              > len(per_cand_per_ctx[i]) // 2]
+        if ok:
+            pareto_indices = ok
 
     # Normalize losses per-ctx: divide by the min loss at that ctx so each ctx
     # contributes on the same scale.
@@ -4078,18 +4984,37 @@ def _pick_joint_optimum(
     weights = [ctx_weights.get(ctx, 1.0) for ctx in ctx_list]
     total_w = sum(weights) or 1.0
 
-    best_score = float("inf")
-    best_idx = None
+    scores = {}
     for i in pareto_indices:
         score = 0.0
         for k, ctx in enumerate(ctx_list):
             min_l = per_ctx_min_loss[k] or 1.0
             score += weights[k] * (per_cand_per_ctx[i][k].predicted_loss / min_l)
-        score /= total_w
-        if score < best_score:
-            best_score = score
-            best_idx = i
-    return best_idx
+        scores[i] = score / total_w
+    best_score = min(scores.values())
+
+    # Wave 34: candidates whose weighted score sits inside the same noise
+    # band as the best are quality-equivalent; break the tie with the
+    # canonical display sort key at the reference ctx (heaviest-weighted
+    # ctx when weights differ) instead of raw argmin. This keeps the
+    # multi-ctx pick consistent with optimize()'s picker — the two paths
+    # used to diverge on kv-bits/memory once the pool got dense enough
+    # for exact-loss near-ties to appear. Band = 0.5% relative, matching
+    # the uncalibrated tiebreak cap in build_display_sort_key.
+    _BAND_REL = 0.005 * 0.25 * 2.0  # 0.25 x capped 2% uncertainty
+    in_band = [i for i in pareto_indices
+               if scores[i] <= best_score * (1.0 + _BAND_REL)]
+    if len(in_band) == 1:
+        return in_band[0]
+    ref_k = max(range(len(ctx_list)),
+                key=lambda k: ctx_weights.get(ctx_list[k], 1.0))
+    pool = [per_cand_per_ctx[i][ref_k] for i in in_band]
+    try:
+        key = build_display_sort_key(pool, constraints)
+        ranked = sorted(zip(pool, in_band), key=lambda t: key(t[0]))
+        return ranked[0][1]
+    except Exception:
+        return min(in_band, key=lambda i: scores[i])
 
 
 def optimize_across_contexts(
@@ -4123,6 +5048,16 @@ def optimize_across_contexts(
       MultiCtxResult with one `optimal` architecture and per-ctx metrics.
     """
     t0 = time.time()
+    evaluation_failure_reasons: Dict[str, int] = {}
+
+    def _record_evaluation_failure(exc: Exception) -> None:
+        message = " ".join(str(exc).split())
+        key = f"{type(exc).__name__}: {message or '<no message>'}"
+        if len(key) > 240:
+            key = key[:237] + "..."
+        evaluation_failure_reasons[key] = (
+            evaluation_failure_reasons.get(key, 0) + 1
+        )
 
     # Reference ctx selection.
     if reference_ctx is None:
@@ -4138,12 +5073,42 @@ def optimize_across_contexts(
     if ctx_weights is None:
         ctx_weights = {ctx: 1.0 for ctx in ctx_list}
 
+    # A one-cell multi-context request has no joint trade-off to solve. Route
+    # it through the canonical optimizer so candidate pruning, Pareto
+    # selection, uncertainty tiebreaks, and evaluator-failure reporting cannot
+    # drift between two public entry points for the same problem.
+    if len(ctx_list) == 1:
+        only_ctx = int(ctx_list[0])
+        single_constraints = _copy.copy(constraints)
+        single_constraints.context_length = only_ctx
+        single = optimize(hw_name, single_constraints)
+        per_ctx_metrics = (
+            {only_ctx: single.optimal} if single.optimal is not None else {}
+        )
+        return MultiCtxResult(
+            optimal=single.optimal,
+            pareto_frontier=list(single.pareto_frontier),
+            per_ctx_metrics=per_ctx_metrics,
+            per_ctx_all_evaluated={only_ctx: list(single.all_evaluated)},
+            candidates_enumerated_raw=single.candidates_enumerated_raw,
+            candidates_feasible_per_ctx={
+                only_ctx: single.candidates_feasible},
+            evaluation_failures=single.evaluation_failures,
+            evaluation_failure_reasons=dict(
+                single.evaluation_failure_reasons),
+            search_time_sec=single.search_time_sec,
+            hardware=hw_name,
+            constraints=single_constraints,
+            reference_ctx=only_ctx,
+            ctx_weights=dict(ctx_weights),
+        )
+
     # Step 1: enumerate candidates ONCE at the reference ctx. The lattice
     # filter (in each generator) and the dedup logic both run inside
     # _enumerate_and_dedupe.
     ref_constraints = _copy.copy(constraints)
     ref_constraints.context_length = int(reference_ctx)
-    candidates, raw_count = _enumerate_and_dedupe(hw_name, ref_constraints)
+    candidates, raw_count, _precap_pool = _enumerate_and_dedupe(hw_name, ref_constraints)
 
     # Wave 8b (Jun 2026, stratified-by-family): same fairness rule as
     # `optimize()` — bucket by family, take top per-family by cheap rank,
@@ -4161,18 +5126,25 @@ def optimize_across_contexts(
             # dict (e.g. empty or top_k=1) correctly buckets as `dense` here.
             from ac.architecture import architecture_signature as _arch_sig
             def _family_key(c):
+                # Wave 34: stratify by (family, attention_type), not family
+                # alone. Compressed-attention variants (csa/indexshare/msa)
+                # all classify as family "dense"; with family-only buckets
+                # the attention-blind cheap rank ties them against their
+                # full-attention siblings and sort stability drops whole
+                # variant classes (msa vanished from an allow_msa search).
+                _at = getattr(c, "attention_type", "full") or "full"
                 try:
-                    return _arch_sig(c).legacy_family
+                    return (_arch_sig(c).legacy_family, _at)
                 except Exception:
                     # Defensive fallback: architecture_signature raises on
                     # missing shape fields; keep the search running rather
                     # than dropping the candidate entirely.
                     has_moe = bool(getattr(c, "moe", None))
                     has_state = bool(getattr(c, "state_config", None))
-                    if has_moe and has_state: return "moe_hybrid"
-                    if has_moe:                return "moe"
-                    if has_state:              return "hybrid"
-                    return "dense"
+                    if has_moe and has_state: return ("moe_hybrid", _at)
+                    if has_moe:                return ("moe", _at)
+                    if has_state:              return ("hybrid", _at)
+                    return ("dense", _at)
             buckets: dict = {}
             for c in candidates:
                 buckets.setdefault(_family_key(c), []).append(c)
@@ -4205,24 +5177,69 @@ def optimize_across_contexts(
     # EvaluatedCandidate, in ctx_list order.
     per_cand_per_ctx: List[List["EvaluatedCandidate"]] = []
     per_ctx_all_evaluated: Dict[int, List["EvaluatedCandidate"]] = {ctx: [] for ctx in ctx_list}
-    for cand in candidates:
+
+    def _eval_row(cand) -> None:
         cand_evals = []
         for ctx in ctx_list:
             ctx_constraints = _copy.copy(constraints)
             ctx_constraints.context_length = int(ctx)
             try:
                 ev = evaluate_candidate(cand, hw_name, ctx_constraints)
-            except Exception:
+            except Exception as exc:
+                _record_evaluation_failure(exc)
                 ev = None
             if ev is None:
                 # Skip candidates that fail to evaluate at any ctx — they're
                 # not row-comparable.
-                cand_evals = None
-                break
+                return
             cand_evals.append(ev)
-            per_ctx_all_evaluated[ctx].append(ev)
-        if cand_evals is not None:
-            per_cand_per_ctx.append(cand_evals)
+        for k, ctx in enumerate(ctx_list):
+            per_ctx_all_evaluated[ctx].append(cand_evals[k])
+        per_cand_per_ctx.append(cand_evals)
+
+    for cand in candidates:
+        _eval_row(cand)
+
+    evaluation_failures = sum(evaluation_failure_reasons.values())
+    if candidates and not per_cand_per_ctx and evaluation_failures:
+        dominant, count = max(
+            evaluation_failure_reasons.items(), key=lambda item: item[1]
+        )
+        raise ValueError(
+            f"all multi-context candidate rows failed evaluation; "
+            f"{evaluation_failures} cell failure(s), most common "
+            f"({count}x): {dominant}"
+        )
+
+    # Step 2b: Wave 34 cheap local refinement (same design as optimize()):
+    # when the cap dropped candidates, densify the lattice neighborhood of
+    # the provisional per-class leaders — leaders judged at the REFERENCE
+    # ctx — with shapes from the pre-cap pool, evaluated at every ctx.
+    _refine_budget = int(getattr(constraints, "local_refine_budget", 0) or 0)
+    # Same hard-contract rule as optimize(): max_full_evaluations bounds
+    # TOTAL full evaluations per ctx, refinement included.
+    if constraints.max_full_evaluations is not None             and constraints.max_full_evaluations > 0:
+        _refine_budget = min(
+            _refine_budget,
+            max(0, int(constraints.max_full_evaluations)
+                - len(per_cand_per_ctx)))
+    _ref_k = ctx_list.index(reference_ctx)
+    if (_refine_budget > 0 and per_cand_per_ctx
+            and len(_precap_pool) > len(candidates)):
+        _by_class: dict = {}
+        for cand_evals in per_cand_per_ctx:
+            ev = cand_evals[_ref_k]
+            k = (getattr(ev.arch, "attention_type", "full") or "full",
+                 bool(getattr(ev.arch, "moe", None)),
+                 bool(getattr(ev.arch, "state_config", None)))
+            cur = _by_class.get(k)
+            if cur is None or ev.predicted_loss < cur.predicted_loss:
+                _by_class[k] = ev
+        _extra = _select_refinement_neighbors(
+            [e.arch for e in _by_class.values()], _precap_pool,
+            [row[_ref_k].arch for row in per_cand_per_ctx], _refine_budget)
+        for cand in _extra:
+            _eval_row(cand)
 
     # Step 3: joint feasibility. A candidate is row-feasible iff feasible at
     # the reference ctx AND at >= joint_feasibility_min_ratio of the ctxs.
@@ -4249,7 +5266,8 @@ def optimize_across_contexts(
 
     # Step 5: pick the displayed optimum via weighted scoring.
     optimal_idx = _pick_joint_optimum(
-        pareto_global_idx, per_cand_per_ctx, ctx_list, ctx_weights)
+        pareto_global_idx, per_cand_per_ctx, ctx_list, ctx_weights,
+        constraints=constraints)
 
     optimal_ev_per_ctx: Dict[int, "EvaluatedCandidate"] = {}
     if optimal_idx is not None:
@@ -4281,6 +5299,8 @@ def optimize_across_contexts(
         per_ctx_all_evaluated=per_ctx_all_evaluated,
         candidates_enumerated_raw=raw_count,
         candidates_feasible_per_ctx=per_ctx_feasible_count,
+        evaluation_failures=evaluation_failures,
+        evaluation_failure_reasons=dict(evaluation_failure_reasons),
         search_time_sec=round(time.time() - t0, 2),
         hardware=hw_name,
         constraints=constraints,
@@ -4322,6 +5342,43 @@ def build_display_sort_key(scoring_pool, constraints):
     # loss still strictly dominant via the bucket index.
     profile_name = constraints.objective_profile if constraints else "balanced"
     strict = bool(getattr(constraints, "strict_quality", False)) if constraints else False
+
+    # Wave 33: declared serving budgets are BOUNDS — a candidate that
+    # violates --serving-tbt / --serving-ttft must lose to any candidate
+    # that meets them, regardless of loss. Budgets stay soft at the
+    # feasibility layer (extreme corners degrade to a marked best-effort
+    # answer instead of an empty one), so the bound is enforced here at
+    # ranking time. If NO candidate in the pool meets the budgets the
+    # bucket is constant and ranking proceeds among violators unchanged.
+    _budgets_declared = constraints is not None and (
+        getattr(constraints, "serving_tbt_ms", None) is not None
+        or getattr(constraints, "serving_ttft_ms", None) is not None)
+    if _budgets_declared:
+        _any_ok = any(_meets_declared_budgets(x, constraints)
+                      for x in scoring_pool)
+        if _any_ok:
+            def _budget_bucket(x) -> int:
+                return 0 if _meets_declared_budgets(x, constraints) else 1
+        else:
+            def _budget_bucket(x) -> int:
+                return 0
+    else:
+        def _budget_bucket(x) -> int:
+            return 0
+    _any_no_spill = any(
+        getattr(getattr(x, "throughput", None), "spill_tier", "fits")
+        == "fits"
+        for x in scoring_pool
+    )
+
+    def _spill_bucket(x) -> int:
+        if not _any_no_spill:
+            return 0
+        tier = getattr(
+            getattr(x, "throughput", None), "spill_tier", "fits"
+        )
+        return 0 if tier == "fits" else 1
+
     if profile_name in ("research_quality", "loss_only"):
         pool_size = len(scoring_pool)
         # Wave 18h --strict-quality: no noise-band bucketing. Rank by the
@@ -4332,10 +5389,13 @@ def build_display_sort_key(scoring_pool, constraints):
                 prior = _aspect_ratio_prior_penalty(x, pool_size=pool_size)
                 adj_loss = x.predicted_loss * (1.0 + prior)
                 return (
+                    _budget_bucket(x),
                     round(adj_loss, 9),
+                    _spill_bucket(x),
+                    _evaluated_serving_instance_gpus(x),
                     x.memory_per_gpu_gb,
                     x.serving_tbt_ms,
-                    -x.training_tps,
+                    -_evaluated_training_tps_per_gpu(x),
                     float(x.arch.total_params),
                 )
             return _strict_loss_key
@@ -4385,10 +5445,13 @@ def build_display_sort_key(scoring_pool, constraints):
                 if _BAND > 0 else 0
             )
             return (
+                _budget_bucket(x),
                 bucket,
+                _spill_bucket(x),
+                _evaluated_serving_instance_gpus(x),
                 _mem_bucket(x),
                 x.serving_tbt_ms,
-                -x.training_tps,
+                -_evaluated_training_tps_per_gpu(x),
                 x.memory_per_gpu_gb,
                 round(adj_loss, 6),
                 float(x.arch.total_params),
@@ -4449,21 +5512,27 @@ def build_display_sort_key(scoring_pool, constraints):
         if strict:
             # Wave 18h --strict-quality: exact score/loss ordering, no bands.
             return (
+                _budget_bucket(x),
                 round(_pool_scores.get(id(x), 0.0), 12),
                 x.predicted_loss,
+                _spill_bucket(x),
+                _evaluated_serving_instance_gpus(x),
                 x.memory_per_gpu_gb,
                 x.serving_tbt_ms,
                 x.throughput.prefill_time_ms,
-                -x.training_tps,
+                -_evaluated_training_tps_per_gpu(x),
             )
         return (
+            _budget_bucket(x),
             _score_bucket(x),
             _quality_bucket(x),
+            _spill_bucket(x),
+            _evaluated_serving_instance_gpus(x),
             # Within a quality bucket, prefer faster, smaller, cheaper.
             x.memory_per_gpu_gb,
             x.serving_tbt_ms,
             x.throughput.prefill_time_ms,
-            -x.training_tps,
+            -_evaluated_training_tps_per_gpu(x),
             # Deterministic final tiebreak on raw loss.
             x.predicted_loss,
         )
@@ -4484,7 +5553,9 @@ def _candidate_summary(ev: EvaluatedCandidate) -> Dict[str, Any]:
         "d_head": c.d_head,
         "n_kv_heads": c.n_kv_heads,
         "attention_type": c.attention_type,
+        "weight_precision": c.weight_precision,
         "ffn_precision": c.ffn_precision,
+        "activation_precision": c.activation_precision,
         "kv_bits": c.kv_cache_bits,
         "moe_style": c.moe_style,
         "ep_degree": c.ep_degree,
@@ -4508,7 +5579,8 @@ def _loss_interval(ev: EvaluatedCandidate) -> Tuple[float, float]:
 
 _FAMILY_AXES = (
     "d_model", "n_layers", "n_heads", "d_head", "n_kv_heads",
-    "ffn_dim", "ffn_precision", "kv_cache_bits", "attention_type",
+    "ffn_dim", "weight_precision", "ffn_precision", "activation_precision",
+    "kv_cache_bits", "attention_type",
     "moe_style",
 )
 
@@ -4529,7 +5601,9 @@ def _contender_summary(ev: EvaluatedCandidate) -> Dict[str, Any]:
         "d_head": getattr(arch, "d_head", None),
         "n_kv_heads": getattr(arch, "n_kv_heads", None),
         "ffn_dim": getattr(arch, "ffn_dim", None),
+        "weight_precision": getattr(arch, "weight_precision", None),
         "ffn_precision": getattr(arch, "ffn_precision", None),
+        "activation_precision": getattr(arch, "activation_precision", None),
         "kv_cache_bits": getattr(arch, "kv_cache_bits", None),
         "attention_type": getattr(arch, "attention_type",
                                     getattr(arch, "attn_type", "full")),
@@ -4592,12 +5666,17 @@ def _throughput_intervals(ev: EvaluatedCandidate, k: float = 1.0) -> Dict[str, t
     candidate. Pulls the propagated sigmas from the ThroughputResult; falls
     back to 0-width intervals when sigma isn't available."""
     t = ev.throughput
-    sig_tps = float(getattr(t, "training_throughput_sigma_tps", 0.0) or 0.0)
+    replica_gpus = _evaluated_training_replica_gpus(ev)
+    tps_per_gpu = _evaluated_training_tps_per_gpu(ev)
+    sig_tps = (
+        float(getattr(t, "training_throughput_sigma_tps", 0.0) or 0.0)
+        / replica_gpus
+    )
     sig_tbt = float(getattr(t, "decode_time_sigma_ms", 0.0) or 0.0)
     sig_pre = float(getattr(t, "prefill_time_sigma_ms", 0.0) or 0.0)
     return {
-        "training_tps": (ev.training_tps - k * sig_tps,
-                          ev.training_tps + k * sig_tps),
+        "training_tps": (tps_per_gpu - k * sig_tps,
+                          tps_per_gpu + k * sig_tps),
         "serving_tbt_ms": (ev.serving_tbt_ms - k * sig_tbt,
                             ev.serving_tbt_ms + k * sig_tbt),
         "prefill_time_ms": (t.prefill_time_ms - k * sig_pre,
@@ -4702,11 +5781,16 @@ def _collect_contenders(
         delta = abs(float(ev.predicted_loss) - float(opt.predicted_loss))
         return delta <= sig
 
+    eligible = [
+        ev for ev in result.all_evaluated
+        if getattr(ev, "meets_constraints", False)
+    ]
+    eligible = _prefer_training_fit(eligible, result.hardware)
     contenders: List[EvaluatedCandidate] = []
     contender_reasons: Dict[int, str] = {}
     best_other_low: Optional[float] = None
-    for ev in result.all_evaluated:
-        if ev is opt or not ev.meets_constraints:
+    for ev in eligible:
+        if ev is opt:
             continue
         low, _high = _loss_interval(ev)
         loss_contender = _is_loss_contender(ev)
@@ -4925,6 +6009,33 @@ def result_to_config(
         )
     nsa = evaluated_nsa
     yoco = evaluated_yoco
+    # Wave 35: emit the evaluated compressed/indexer attention block.
+    # Before this, a csa/indexshare/msa winner was emitted as
+    # attention.type="full" — the config a user would train did not match
+    # the candidate the search evaluated (same bug class as the Wave 19
+    # local:global finding).
+    evaluated_compressed = None
+    if c.attention_type == "csa":
+        evaluated_compressed = {
+            "type": "csa",
+            "csa_block_size": int(c.csa_block_size or 64),
+            "csa_top_k_blocks": int(c.csa_top_k_blocks or 16),
+            "csa_compression_dim": int(c.csa_compression_dim or 64),
+        }
+    elif c.attention_type == "indexshare":
+        evaluated_compressed = {
+            "type": "indexshare",
+            "indexshare_num_buckets": int(c.indexshare_num_buckets or 64),
+            "indexshare_top_k_buckets": int(c.indexshare_top_k_buckets or 4),
+            "indexshare_index_dim": int(c.indexshare_index_dim or 64),
+        }
+    elif c.attention_type == "msa":
+        evaluated_compressed = {
+            "type": "msa",
+            "msa_window_size": int(c.msa_window_size or 512),
+            "msa_dilated_top_k": int(c.msa_dilated_top_k or 64),
+            "msa_global_top_k": int(c.msa_global_top_k or 16),
+        }
     terms = getattr(opt.quality, "terms", {})
     arch_term = terms.get("architecture_residual")
     precision_term = terms.get("precision_residual")
@@ -4949,13 +6060,22 @@ def result_to_config(
     # optimizer was given.
     _tp_for_emit = int(getattr(c, "tp_degree", 0) or 0) or int(result.constraints.tp)
     _pp_for_emit = max(1, int(getattr(c, "pp_degree", 1) or 1))
+    _dp_for_emit = max(
+        1,
+        int(getattr(c, "dp_degree", 0) or 0)
+        or int(result.constraints.dp),
+    )
     input_constraints = {
         "hardware": result.hardware,
         "tp": _tp_for_emit,
         "tp_options": list(result.constraints.tp_options or [result.constraints.tp]),
         "pp": _pp_for_emit,
         "pp_options": list(result.constraints.pp_options or [result.constraints.pp]),
-        "dp": result.constraints.dp,
+        "dp": _dp_for_emit,
+        "training_cluster_gpus": result.constraints.training_cluster_gpus,
+        "max_training_cluster_gpus": (
+            result.constraints.max_training_cluster_gpus
+        ),
         "ep": int(getattr(c, "ep_degree", 1) or 1),
         "ep_options": list(result.constraints.ep_options or []),
         "cp": int(getattr(c, "cp_degree", 1) or 1),
@@ -4998,7 +6118,7 @@ def result_to_config(
     # `× dp_degree` aggregation below honest — at dp=1024 the per-replica
     # TPS is materially lower than at dp=1 for the same shape, so the
     # cluster number isn't inflated.
-    dp_degree = max(1, int(getattr(result.constraints, "dp", 1) or 1))
+    dp_degree = _dp_for_emit
     pp_degree = max(1, _pp_for_emit)
     # Wave 4: TP is per-candidate. Fall back to constraints.tp for
     # back-compat when the candidate didn't record one.
@@ -5190,10 +6310,54 @@ def result_to_config(
 
     search_stats = {
         "candidates_generated": result.candidates_generated,
+        "candidates_evaluated": result.candidates_evaluated,
+        "evaluation_failures": int(
+            getattr(result, "evaluation_failures", 0) or 0),
+        "evaluation_failure_reasons": dict(
+            getattr(result, "evaluation_failure_reasons", {}) or {}),
+        "candidates_enumerated_raw": result.candidates_enumerated_raw,
         "candidates_feasible": result.candidates_feasible,
         "pareto_size": len(result.pareto_frontier),
         "search_time_sec": result.search_time_sec,
     }
+
+    # Build feature blocks before choosing the dense vs hybrid schema path.
+    # Both paths must serialize the exact architecture that was evaluated.
+    mla_kw = None
+    if c.attention_type == "mla":
+        mla_kw = {
+            "kv_latent_dim": c.mla_kv_latent_dim,
+            "q_latent_dim": c.mla_q_latent_dim,
+            "rope_head_dim": c.mla_rope_head_dim,
+            "nope_head_dim": c.mla_nope_head_dim,
+        }
+    mtp_kw = None
+    if c.mtp_n_predict_depths > 0:
+        mtp_kw = {
+            "enabled": True,
+            "n_predict_depths": int(c.mtp_n_predict_depths),
+            "depth_n_layers": int(c.mtp_depth_n_layers),
+            "share_embeddings": True,
+            "share_lm_head": True,
+            "train_loss_weight": float(c.mtp_train_loss_weight),
+            "inference_mode": "drop",
+        }
+    local_global_kw = (
+        {
+            "n_local_layers": int(
+                getattr(c, "n_local_attn_layers", 0) or 0),
+            "window_size": int(getattr(c, "swa_window", 0) or 0),
+        }
+        if (int(getattr(c, "n_local_attn_layers", 0) or 0) > 0
+            and int(getattr(c, "swa_window", 0) or 0) > 0)
+        else None
+    )
+    swa_kw = (
+        {"window_size": int(getattr(c, "swa_window", 0) or 0)}
+        if (int(getattr(c, "swa_window", 0) or 0) > 0
+            and int(getattr(c, "n_local_attn_layers", 0) or 0) == 0)
+        else None
+    )
 
     # v2: use build_hybrid_config when the winner is a hybrid/state candidate
     if c.state_config is not None and c.layer_type_list is not None:
@@ -5215,47 +6379,40 @@ def result_to_config(
             # without the field still fall back to mamba2.
             state_type=c.state_config.get("state_type", "mamba2"),
             state_d_state=c.state_config["d_state"],
+            state_expansion=c.state_config.get("state_expansion", 2),
             state_n_heads=c.state_config.get("n_heads", c.n_heads),
             state_d_head=c.state_config.get("d_head", c.d_head),
+            state_precision=c.state_config.get("state_precision", "bf16"),
+            placement_strategy=c.placement_strategy,
+            hybrid_ratio=c.hybrid_ratio,
             ffn_dim=c.ffn_dim,
             ffn_precision=c.ffn_precision,
             weight_precision=c.weight_precision,
+            activation_precision=c.activation_precision,
             moe=c.moe,
             tp=tp_degree,
             pp=pp_degree,
-            dp=result.constraints.dp,
+            dp=dp_degree,
             ep=c.ep_degree,
+            cp=cp_degree,
+            cp_method=str(c.cp_method),
+            rope_scaling_method=str(c.rope_scaling_method),
+            rope_scaling_factor=float(c.rope_scaling_factor),
+            rope_original_max_position=int(c.rope_original_max_position),
             hardware_name=result.hardware,
             input_constraints=input_constraints,
             predicted=predicted,
             search_stats=search_stats,
+            n_dense_ffn_layers=c.n_dense_ffn_layers,
+            mla=mla_kw,
+            swa=swa_kw,
             nsa=nsa,
+            compressed=evaluated_compressed,
             yoco=yoco,
+            mtp=mtp_kw,
+            local_global=local_global_kw,
         )
 
-    # v1-fix MLA: pass the MLA block to build_config when the winning
-    # candidate is MLA. build_config(mla=…) emits attention.type="mla" +
-    # latent fields.
-    mla_kw = None
-    if c.attention_type == "mla":
-        mla_kw = {
-            "kv_latent_dim":  c.mla_kv_latent_dim,
-            "q_latent_dim":   c.mla_q_latent_dim,
-            "rope_head_dim":  c.mla_rope_head_dim,
-            "nope_head_dim":  c.mla_nope_head_dim,
-        }
-    # v1-fix MTP: pass the MTP block when the candidate has prediction depths.
-    mtp_kw = None
-    if c.mtp_n_predict_depths > 0:
-        mtp_kw = {
-            "enabled": True,
-            "n_predict_depths": int(c.mtp_n_predict_depths),
-            "depth_n_layers": int(c.mtp_depth_n_layers),
-            "share_embeddings": True,
-            "share_lm_head": True,
-            "train_loss_weight": float(c.mtp_train_loss_weight),
-            "inference_mode": "drop",
-        }
     return build_config(
         d_model=c.d_model,
         n_layers=c.n_layers,
@@ -5267,10 +6424,11 @@ def result_to_config(
         weight_precision=c.weight_precision,
         attn_precision=c.attn_precision,
         ffn_precision=c.ffn_precision,
+        activation_precision=c.activation_precision,
         kv_cache_bits=c.kv_cache_bits,
         tp=tp_degree,
         pp=pp_degree,
-        dp=result.constraints.dp,
+        dp=dp_degree,
         ep=c.ep_degree,
         cp=int(c.cp_degree),
         cp_method=str(c.cp_method),
@@ -5280,18 +6438,14 @@ def result_to_config(
         moe=c.moe,
         n_dense_ffn_layers=c.n_dense_ffn_layers,
         mla=mla_kw,
+        swa=swa_kw,
         nsa=nsa,
+        compressed=evaluated_compressed,
         yoco=yoco,
         mtp=mtp_kw,
         # Wave 19 (L1): emit the searched local:global interleave. Without
         # this the emitted config silently trained pure full attention.
-        local_global=(
-            {"n_local_layers": int(getattr(c, "n_local_attn_layers", 0) or 0),
-             "window_size": int(getattr(c, "swa_window", 0) or 0)}
-            if (int(getattr(c, "n_local_attn_layers", 0) or 0) > 0
-                and int(getattr(c, "swa_window", 0) or 0) > 0)
-            else None
-        ),
+        local_global=local_global_kw,
         hardware_name=result.hardware,
         input_constraints=input_constraints,
         predicted=predicted,
@@ -5306,14 +6460,19 @@ def result_to_pareto_csv(result: OptimizationResult) -> str:
     # the picked TP are distinguishable in the emitted CSV.
     lines = [
         "rank,selected,objective_profile,objective_score,d_model,n_layers,n_heads,d_head,n_kv_heads,ffn_dim,"
-        "weight_prec,ffn_prec,kv_bits,active_params_B,total_params_B,"
-        "attention_type,mla_kv_latent,mla_q_latent,cp,cp_method,rope_method,rope_factor,mtp_depth,tp,"
+        "weight_prec,ffn_prec,activation_prec,kv_bits,active_params_B,total_params_B,architecture_family,"
+        "attention_type,mla_kv_latent,mla_q_latent,"
+        "nsa_select_top_k,nsa_window,csa_block,csa_top_k,csa_dim,"
+        "indexshare_buckets,indexshare_top_k,indexshare_dim,"
+        "msa_window,msa_dilated_top_k,msa_global_top_k,"
+        "yoco_self_attn_layers,yoco_share_pattern,"
+        "cp,cp_method,rope_method,rope_factor,mtp_depth,tp,pp,dp,"
         "state_layers,attention_layers,placement_strategy,"
         "local_attn_layers,local_window,"
         "moe_style,n_experts,top_k,expert_dim,ep,vocab_size,"
         "predicted_loss,loss_ci_low,loss_ci_high,uncertainty_total_pct,"
         "training_tps,training_tps_per_gpu,serving_tbt_ms,serving_ttft_ms,"
-        "memory_gb,confidence"
+        "training_memory_gb,memory_gb,confidence"
     ]
     # Use the *exact* same sort key the picker used to choose `selected`.
     # This is the only way to guarantee rank=1 == selected=True. See
@@ -5325,6 +6484,14 @@ def result_to_pareto_csv(result: OptimizationResult) -> str:
         sorted_frontier = list(result.pareto_frontier)
     for i, ev in enumerate(sorted_frontier):
         c = ev.arch
+        if c.moe is not None and c.state_config is not None:
+            architecture_family = "moe_hybrid"
+        elif c.moe is not None:
+            architecture_family = "moe"
+        elif c.state_config is not None:
+            architecture_family = "hybrid"
+        else:
+            architecture_family = "dense"
         if c.moe is not None:
             n_experts = c.moe["n_experts"]
             top_k = c.moe["top_k"]
@@ -5342,13 +6509,29 @@ def result_to_pareto_csv(result: OptimizationResult) -> str:
             f"{result.constraints.objective_profile if result.constraints else ''},"
             f"{objective_score:.8f},"
             f"{c.d_model},{c.n_layers},{c.n_heads},{c.d_head},{c.n_kv_heads},"
-            f"{c.ffn_dim},{c.weight_precision},{c.ffn_precision},{c.kv_cache_bits},"
-            f"{active},{c.total_params_b},"
+            f"{c.ffn_dim},{c.weight_precision},{c.ffn_precision},"
+            f"{c.activation_precision},{c.kv_cache_bits},"
+            f"{active},{c.total_params_b},{architecture_family},"
             f"{c.attention_type},{c.mla_kv_latent_dim},{c.mla_q_latent_dim},"
+            f"{int(getattr(c, 'nsa_select_top_k', 0) or 0)},"
+            f"{int(getattr(c, 'nsa_window_size', 0) or 0)},"
+            f"{int(getattr(c, 'csa_block_size', 0) or 0)},"
+            f"{int(getattr(c, 'csa_top_k_blocks', 0) or 0)},"
+            f"{int(getattr(c, 'csa_compression_dim', 0) or 0)},"
+            f"{int(getattr(c, 'indexshare_num_buckets', 0) or 0)},"
+            f"{int(getattr(c, 'indexshare_top_k_buckets', 0) or 0)},"
+            f"{int(getattr(c, 'indexshare_index_dim', 0) or 0)},"
+            f"{int(getattr(c, 'msa_window_size', 0) or 0)},"
+            f"{int(getattr(c, 'msa_dilated_top_k', 0) or 0)},"
+            f"{int(getattr(c, 'msa_global_top_k', 0) or 0)},"
+            f"{int(getattr(c, 'yoco_n_self_attn_layers', 0) or 0)},"
+            f"{str(getattr(c, 'yoco_share_pattern', '') or '')},"
             f"{c.cp_degree},{c.cp_method},{c.rope_scaling_method},"
             f"{c.rope_scaling_factor:.4f},{c.mtp_n_predict_depths},"
             f"{int(getattr(c, 'tp_degree', 1) or 1)},"
-            f"{c.n_state_layers},{c.n_attention_layers},{c.placement_strategy},"
+            f"{int(getattr(c, 'pp_degree', 1) or 1)},"
+            f"{int(getattr(c, 'dp_degree', 0) or 0) or int(getattr(result.constraints, 'dp', 1) or 1)},"
+            f"{c.n_state_layers},{(c.n_layers if c.state_config is None and c.n_attention_layers == 0 else c.n_attention_layers)},{c.placement_strategy},"
             f"{int(getattr(c, 'n_local_attn_layers', 0) or 0)},"
             f"{int(getattr(c, 'swa_window', 0) or 0)},"
             f"{c.moe_style},{n_experts},{top_k},{expert_dim},{c.ep_degree},"
@@ -5360,6 +6543,7 @@ def result_to_pareto_csv(result: OptimizationResult) -> str:
             # EP lays over DP) — the only cross-family-comparable number.
             f"{ev.training_tps / max(1, (int(getattr(c, 'tp_degree', 1) or 1) * max(1, int(getattr(c, 'pp_degree', 1) or 1)) * max(1, int(getattr(c, 'cp_degree', 1) or 1)))):.0f},"
             f"{ev.serving_tbt_ms:.1f},{ev.throughput.prefill_time_ms:.1f},"
+            f"{float(getattr(ev.throughput, 'training_memory_per_gpu_gb', 0.0) or 0.0):.1f},"
             f"{ev.memory_per_gpu_gb:.1f},{ev.quality.confidence}"
         )
     return "\n".join(lines)

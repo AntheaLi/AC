@@ -23,6 +23,7 @@ def _mock_ev(loss, tps, tbt, ttft, mem, train_mem, total_params):
     ev.training_tps = tps
     ev.serving_tbt_ms = tbt
     ev.throughput.prefill_time_ms = ttft
+    ev.serving_request_latency_ms = ttft + tbt * 512
     ev.memory_per_gpu_gb = mem
     ev.throughput.training_memory_per_gpu_gb = train_mem
     ev.arch.total_params = total_params
@@ -92,6 +93,19 @@ class TrainingMemoryParetoAxisTests(unittest.TestCase):
             is_dominated(a, b)
         except AttributeError:
             self.fail("is_dominated should handle missing training_memory_per_gpu_gb")
+
+    def test_training_cost_objective_prices_training_memory(self):
+        from ac.optimizer import _objective_score
+
+        high = _mock_ev(loss=1.8, tps=1000, tbt=20, ttft=200, mem=40,
+                        train_mem=120, total_params=70e9)
+        low = _mock_ev(loss=1.8, tps=1000, tbt=20, ttft=200, mem=40,
+                       train_mem=60, total_params=70e9)
+        pool = [high, low]
+        self.assertLess(
+            _objective_score(low, pool, "training_cost"),
+            _objective_score(high, pool, "training_cost"),
+        )
 
 
 if __name__ == "__main__":

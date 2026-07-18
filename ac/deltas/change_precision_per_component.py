@@ -18,28 +18,31 @@ class ChangePrecisionPerComponent(Transformation):
               activation: str = None):
         """Override per-component precision.
 
-        Throughput model carries `precision` and `kv_precision` at the
-        top level; quality model carries finer per-component overrides
-        via component_precisions. We set both consistently.
+        `precision` is the throughput model's dominant matmul tier while
+        `weight_precision` preserves the global quality/config identity.
+        Activation precision controls activation and communication bytes.
         """
         out = _copy_arch(arch)
         if weight is not None:
             out.precision = weight
+            out.weight_precision = weight
         if kv is not None:
             out.kv_precision = kv
-        # Activation precision currently has no throughput-side knob — it
-        # lives on the quality side, set via to_quality_arch override.
-        out._target_activation_precision = activation  # type: ignore[attr-defined]
+        if activation is not None:
+            out.activation_precision = activation
+            # Backward-compatible sidecar for older callers that inspect it.
+            out._target_activation_precision = activation  # type: ignore[attr-defined]
         _record_applied(out, self.name)
         return out
 
     def to_quality_arch(self, arch):
         qa = super().to_quality_arch(arch)
-        if arch.precision:
-            qa.weight_precision = arch.precision
+        if getattr(arch, "weight_precision", None):
+            qa.weight_precision = arch.weight_precision
         if arch.kv_precision:
             qa.kv_precision = arch.kv_precision
-        act = getattr(arch, "_target_activation_precision", None)
+        act = (getattr(arch, "activation_precision", None)
+               or getattr(arch, "_target_activation_precision", None))
         if act:
             qa.activation_precision = act
         return qa

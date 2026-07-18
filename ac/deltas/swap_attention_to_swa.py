@@ -1,9 +1,8 @@
 """swap_attention_to_swa — sliding-window attention.
 
-Modeled at the stress level by capping the effective KV-cache length at
-window_size. The throughput model doesn't have a native SWA branch, so we
-override the decode KV length via a sidecar attribute; the stress reporter
-reads it when computing kv_footprint and hbm_bw_decode.
+Modeled by preserving the served sequence length and capping each local
+layer's attended span at window_size. The sidecar is materialized into the
+throughput model's native local-attention layer layout by the bridges.
 """
 
 from .base import (
@@ -11,6 +10,7 @@ from .base import (
     _copy_arch,
     _record_applied,
     _attention_already_swapped,
+    _has_attention_layers,
 )
 
 
@@ -23,8 +23,16 @@ class SwapAttentionToSWA(Transformation):
     }
 
     def precondition(self, arch):
+        if not _has_attention_layers(arch):
+            return False, "pure-state baseline has no attention layers to window"
+        attention_type = str(getattr(arch, "attention_type", "full") or "full")
+        if attention_type != "full":
+            return False, (
+                f"baseline attention.type={attention_type!r}; whole-model SWA "
+                "cannot be stacked over another attention family")
         prior = _attention_already_swapped(arch)
-        if prior is not None and prior != self.name:
+        if prior is not None and prior not in (
+                self.name, "swap_attention_to_gqa"):
             return False, (
                 f"attention block was already swapped by '{prior}'; "
                 f"chaining {self.name} on top would silently overwrite it. "
@@ -36,9 +44,12 @@ class SwapAttentionToSWA(Transformation):
         if window_size < 64:
             raise ValueError("window_size must be >= 64")
         out = _copy_arch(arch)
-        # Cap the seq_len used for KV bookkeeping. If the workload's
-        # decode_kv_len is smaller than the window, the cap has no effect.
+        # Record the retained attention window. The served context remains
+        # unchanged; downstream bridges materialize all attention layers as
+        # local and apply min(context, window) per layer.
         out._swa_window = window_size  # type: ignore[attr-defined]
+        out.local_window = window_size
+        out.attention_type = "swa"
         # Clear any prior MLA sidecar so the two flags don't silently coexist.
         if hasattr(out, "_mla_latent_dim"):
             try:

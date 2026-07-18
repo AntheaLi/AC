@@ -193,7 +193,16 @@ class ArchitectureFeatureWiringTests(unittest.TestCase):
         yoco_cand.yoco_n_self_attn_layers = 4
         yoco = evaluate_candidate(yoco_cand, "h100", constraints)
         self.assertLess(yoco.memory_per_gpu_gb, full.memory_per_gpu_gb)
-        self.assertLess(yoco.serving_tbt_ms, full.serving_tbt_ms)
+        # Wave 35: the old pin (yoco TBT < full TBT) encoded a physics
+        # error — each cross-decoder layer still streams the shared cache
+        # from HBM every decode step, so decode bandwidth is unchanged.
+        # YOCO's serving wins are capacity (above) and prefill early-exit
+        # (below); TBT stays within noise of the full baseline.
+        self.assertAlmostEqual(
+            yoco.serving_tbt_ms, full.serving_tbt_ms,
+            delta=0.05 * full.serving_tbt_ms)
+        self.assertLess(yoco.throughput.prefill_time_ms,
+                        0.5 * full.throughput.prefill_time_ms)
 
     def test_phase_view_contract_fails_on_mismatched_architecture(self):
         source = _candidate()

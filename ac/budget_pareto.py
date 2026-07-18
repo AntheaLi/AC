@@ -133,7 +133,9 @@ class CandidateMetrics:
     prefill_gpu_seconds: float = 0.0
     decode_gpu_seconds: float = 0.0
     serving_gpu_seconds_per_request: float = 0.0
+    training_replica_gpus: int = 1
     replica_gpus: int = 1
+    serving_replicas: int = 1
     aggregate_output_tokens_per_second: float = 0.0
     requests_per_second: float = 0.0
 
@@ -224,16 +226,23 @@ def extract_metrics(
     pp = max(1, int(getattr(arch, "pp_degree", 1) or 1))
     ep = max(1, int(getattr(arch, "ep_degree", 1) or 1))
     cp = max(1, int(getattr(arch, "cp_degree", 1) or 1))
-    dp = max(1, int(getattr(constraints, "dp", 1) or 1))
+    dp = max(
+        1,
+        int(getattr(arch, "dp_degree", 0) or 0)
+        or int(getattr(constraints, "dp", 1) or 1),
+    )
     serving_batch = max(1, int(getattr(constraints, "serving_batch", 1) or 1))
     output_len = max(1, int(getattr(constraints, "output_len", 512) or 512))
     training_tokens = max(1, int(getattr(constraints, "training_tokens", 0) or 0))
 
-    # A "replica" is the set of GPUs that jointly serve one inference
-    # request. TP × PP × CP is the canonical serving replica size. EP is
-    # co-located with MoE FFN parallelism inside the replica for MoE
-    # (rank shares TP × PP GPUs); it does not multiply serving_gpus/req.
-    replica_gpus = tp * pp * cp
+    # EP overlays DP during training but is an additional model-sharding axis
+    # for serving. Keep both resource units explicit: one training DP rank
+    # spans TP×PP×CP GPUs, while one serving instance holding the full expert
+    # set spans TP×PP×CP×EP GPUs. A fixed training-world DP axis therefore
+    # contains DP/EP independent serving instances for MoE.
+    training_replica_gpus = tp * pp * cp
+    replica_gpus = training_replica_gpus * ep
+    serving_replicas = max(1, dp // ep)
 
     predicted_loss = float(getattr(ev, "predicted_loss", 0.0) or 0.0)
     ttft_ms = float(getattr(ev, "serving_ttft_ms", 0.0) or 0.0)
@@ -250,9 +259,9 @@ def extract_metrics(
     # training_gpu_seconds is what a physical training cluster would bill:
     # (training_time_per_step_s × n_steps) × cluster_gpus, but since
     # training_tps is the per-replica tokens/sec, we can shortcut to
-    # (training_tokens / train_tps) × (replica_gpus × dp).
+    # (training_tokens / train_tps) × (training_replica_gpus × dp).
     training_wall_s = training_tokens / train_tps if train_tps > 0 else 0.0
-    training_gpu_seconds = training_wall_s * replica_gpus * dp
+    training_gpu_seconds = training_wall_s * training_replica_gpus * dp
 
     prefill_s = ttft_ms / 1000.0
     decode_s = (tbt_ms / 1000.0) * output_len
@@ -266,9 +275,9 @@ def extract_metrics(
         per_request_wall_s * replica_gpus / max(1, serving_batch)
     )
 
-    # Aggregate output tokens/sec across all DP replicas.
+    # Aggregate output tokens/sec across the DP/EP serving instances.
     per_replica_output_tps = (1000.0 / tbt_ms * serving_batch) if tbt_ms > 0 else 0.0
-    aggregate_output_tps = per_replica_output_tps * dp
+    aggregate_output_tps = per_replica_output_tps * serving_replicas
     requests_per_second = (
         aggregate_output_tps / output_len if output_len > 0 else 0.0
     )
@@ -303,7 +312,9 @@ def extract_metrics(
         prefill_gpu_seconds=prefill_gpu_seconds,
         decode_gpu_seconds=decode_gpu_seconds,
         serving_gpu_seconds_per_request=serving_gpu_seconds_per_request,
+        training_replica_gpus=training_replica_gpus,
         replica_gpus=replica_gpus,
+        serving_replicas=serving_replicas,
         aggregate_output_tokens_per_second=aggregate_output_tps,
         requests_per_second=requests_per_second,
         predicted_loss=predicted_loss,

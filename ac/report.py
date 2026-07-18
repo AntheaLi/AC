@@ -27,6 +27,7 @@ _METRIC_PRETTY = {
     "prefill_time_ms":   "Prefill / TTFT (ms)",
     "training_tps":      "Training TPS (tok/s)",
     "memory_per_gpu_gb": "Memory / GPU (GB)",
+    "training_memory_per_gpu_gb": "Training memory / GPU (GB)",
     # Wave 18h: this figure is computed for ONE concurrent request (batch=1)
     # per GPU. Label it as such — an unlabeled "KV cache (GB)" was being
     # read as the steady-state serving footprint and understated batch-N
@@ -148,6 +149,7 @@ def render_metric_table(metrics: Dict[str, MetricDelta],
         "serving_tbt_ms",
         "prefill_time_ms",
         "training_tps",
+        "training_memory_per_gpu_gb",
         "memory_per_gpu_gb",
         "kv_cache_gb",
         "total_params_b",
@@ -437,6 +439,7 @@ def render_topology_notes(ev: DeltaEvaluation) -> str:
         "serving_tbt_ms",
         "prefill_time_ms",
         "training_tps",
+        "training_memory_per_gpu_gb",
         "memory_per_gpu_gb",
         "kv_cache_gb",
         "total_params_b",
@@ -471,12 +474,98 @@ def render_topology_notes(ev: DeltaEvaluation) -> str:
         # moved. With the B1 fix to `_arch_changes` this should be very
         # rare; emit a softer note so the user knows the delta did
         # something even if the per-field rendering is empty.
-        notes.append(
-            f"Delta `{ev.delta_name}` moved evaluated metrics but the "
-            "field-level diff above is empty — the change lives inside a "
-            "sub-field the report does not surface. Inspect the raw "
-            "evaluation JSON if you need the exact shape change."
-        )
+        # Wave 45: when the diff table above DOES show rows (parallelism /
+        # applied_deltas echoes), saying "the diff above is empty" is a
+        # self-contradiction — say what is actually true.
+        if ev.field_changes:
+            notes.append(
+                f"Delta `{ev.delta_name}` changes no architectural shape "
+                "fields — the rows above are runtime/parallelism echoes. "
+                "The metric moves come from those runtime changes, not from "
+                "a model-shape change."
+            )
+        else:
+            notes.append(
+                f"Delta `{ev.delta_name}` moved evaluated metrics but the "
+                "field-level diff above is empty — the change lives inside a "
+                "sub-field the report does not surface. Inspect the raw "
+                "evaluation JSON if you need the exact shape change."
+            )
+
+    # Wave 45: Training TPS is per TP×PP×CP replica. When a delta changes
+    # the replica size (change_parallelism pp/tp/cp), the row silently
+    # changes denominator — pp 1→4 showed "+193% improves" while per-GPU
+    # throughput actually FELL 27% (the replica quietly grew 8→32 GPUs).
+    # State the basis and give the per-GPU numbers whenever replica size
+    # moves.
+    _par_field_map = {
+        "tp_degree": "tp", "pp_degree": "pp", "cp_degree": "cp",
+        "parallelism.tensor_parallel": "tp",
+        "parallelism.pipeline_parallel": "pp",
+        "parallelism.context_parallel": "cp",
+    }
+    _par_changes = {}
+    for ch in ev.field_changes:
+        _short = _par_field_map.get(ch.get("field"))
+        if _short is not None:
+            _par_changes[_short] = ch
+    _tps_metric = ev.metrics.get("training_tps")
+    if _par_changes and _tps_metric is not None:
+        _rw = ev.resolved_workload or {}
+
+        def _replica_gpus(side_idx: int) -> int:
+            total = 1
+            for short in ("tp", "pp", "cp"):
+                ch = _par_changes.get(short)
+                if ch is not None:
+                    raw = ch.get("baseline") if side_idx == 0 else ch.get("candidate")
+                else:
+                    raw = _rw.get(short, 1)
+                try:
+                    val = int(str(raw).strip("`") or 1)
+                except (TypeError, ValueError):
+                    val = 1
+                total *= max(1, val)
+            return total
+
+        _g_base, _g_cand = _replica_gpus(0), _replica_gpus(1)
+        if _g_base != _g_cand and _tps_metric.baseline > 0:
+            _pg_base = _tps_metric.baseline / _g_base
+            _pg_cand = _tps_metric.candidate / _g_cand
+            _rel = (_pg_cand / _pg_base - 1.0) if _pg_base > 0 else 0.0
+            notes.append(
+                f"Training TPS above is per TP×PP×CP replica, and this delta "
+                f"changes the replica size from {_g_base} to {_g_cand} GPUs — "
+                f"the row's Δ% is not a like-for-like throughput change. "
+                f"Per-GPU: {_pg_base:,.0f} → {_pg_cand:,.0f} tok/s/GPU "
+                f"({_rel:+.1%})."
+            )
+
+    # Wave 45: EP-over-DP physicality guard on the DELTA path. The Wave-24
+    # fix made the greenfield enumerator filter EP > DP (the training math
+    # prices EP laying over DP — each EP rank routes its own microbatch),
+    # but change_parallelism:ep=N happily priced EP=16 over DP=4 with no
+    # warning, emitting training numbers computed under the violated
+    # assumption.
+    _ep_change = next(
+        (ch for ch in ev.field_changes
+         if ch.get("field") == "parallelism.expert_parallel"), None)
+    if _ep_change is not None:
+        _rw2 = ev.resolved_workload or {}
+        try:
+            _cand_ep = int(_ep_change.get("candidate") or 1)
+            _dp_res = int(_rw2.get("dp") or 1)
+        except (TypeError, ValueError):
+            _cand_ep, _dp_res = 1, 1
+        if _cand_ep > _dp_res > 0:
+            notes.append(
+                f"EP={_cand_ep} exceeds DP={_dp_res}. Training throughput "
+                f"assumes EP-over-DP (each EP rank routes its own "
+                f"microbatch), which requires EP <= DP — the candidate's "
+                f"training numbers are computed under a violated assumption. "
+                f"Serving predictions are unaffected (a serving instance "
+                f"spans TP*PP*CP*EP GPUs)."
+            )
 
     kv_change = next(
         (ch for ch in ev.field_changes if ch.get("field") == "n_kv_heads"),
@@ -689,6 +778,8 @@ def render_family_comparison(
             name = "picked"
         else:
             name = _pretty_arch(f.get("arch_mode", "?"), f.get("state_type"))
+        if f.get("arch_mode") == "picked":
+            name += " (picked)"
         loss = float(f.get("loss", 0.0))
         tbt = float(f.get("tbt_ms", 0.0))
         ttft = float(f.get("ttft_ms", 0.0))
@@ -730,8 +821,11 @@ def render_family_comparison(
         )
     footnote = ""
     if any_selected:
-        footnote = ("  (rows are per-family best-loss candidates; "
-                    "←picked marks the selected config)\n")
+        footnote = (
+            "  (rows are per-family best-loss candidates; an extra "
+            "`(picked)` row appears when the objective selected a different "
+            "member of that family)\n"
+        )
     if any_tbt_floored:
         # Wave 21: no hard-coded bias numbers here — they went stale the
         # first time family_bias_v1.json was regenerated. The per-row
@@ -848,9 +942,33 @@ def render_markdown(ev: DeltaEvaluation) -> str:
 # JSON
 # =============================================================================
 
+def strict_json_dumps(value: Any, *, indent: int = 2,
+                      sort_keys: bool = True) -> str:
+    """Serialize nested report data as RFC-compliant JSON.
+
+    Stress diagnostics use infinity for unavailable link bandwidth. Python's
+    default encoder emits that as the non-standard token ``Infinity``; map all
+    non-finite floats to null before encoding so browsers and strict parsers
+    can consume delta reports.
+    """
+    def _json_ready(item: Any) -> Any:
+        if isinstance(item, float):
+            return item if math.isfinite(item) else None
+        if isinstance(item, dict):
+            return {key: _json_ready(val) for key, val in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [_json_ready(val) for val in item]
+        return item
+
+    return json.dumps(
+        _json_ready(value), indent=indent, sort_keys=sort_keys,
+        default=str, allow_nan=False,
+    )
+
+
 def render_json(ev: DeltaEvaluation, *, indent: int = 2) -> str:
     """Stable JSON dump of the full DeltaEvaluation."""
-    return json.dumps(ev.as_dict(), indent=indent, sort_keys=True, default=str)
+    return strict_json_dumps(ev.as_dict(), indent=indent, sort_keys=True)
 
 
 # =============================================================================
@@ -869,7 +987,8 @@ def render_pareto_csv(ev: DeltaEvaluation) -> str:
     columns = [
         "row", "kind",
         "predicted_loss", "serving_tbt_ms", "prefill_time_ms",
-        "training_tps", "memory_per_gpu_gb", "kv_cache_gb",
+        "training_tps", "training_memory_per_gpu_gb",
+        "memory_per_gpu_gb", "kv_cache_gb",
         "total_params_b",
         # stress axes (5 representative ones — same selection as
         # modifier_pareto_to_csv)
@@ -895,7 +1014,8 @@ def render_pareto_csv(ev: DeltaEvaluation) -> str:
     delta_row = ["3", "delta"]
 
     for key in ("predicted_loss", "serving_tbt_ms", "prefill_time_ms",
-                "training_tps", "memory_per_gpu_gb", "kv_cache_gb",
+                "training_tps", "training_memory_per_gpu_gb",
+                "memory_per_gpu_gb", "kv_cache_gb",
                 "total_params_b"):
         b, c = _metric_pair(key)
         base_row.append(round(b, 4))

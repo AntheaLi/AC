@@ -264,6 +264,9 @@ _LOGICAL_GROUPS: Dict[str, List[str]] = {
     "rope": ["--allow-rope-scaling", "--rope-"],
     "nsa": ["--nsa"],
     "yoco": ["--yoco"],
+    # Wave 32: compressed / indexer attention families.
+    "compressed": ["--allow-csa", "--csa-", "--allow-indexshare",
+                   "--indexshare-", "--allow-msa", "--msa-"],
     "modifier": [
         "--baseline-config", "--out", "--quality-risk-budget-pct",
         "--allow-quality-spending", "--top-modifications",

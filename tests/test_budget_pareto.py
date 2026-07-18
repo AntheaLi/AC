@@ -308,7 +308,7 @@ class MetricExtractionTests(unittest.TestCase):
     """Sanity checks on extract_metrics — derived metrics come from the
     surrounding EvaluatedCandidate + DeploymentConstraints pair."""
 
-    def _mkev(self, *, tp=8, pp=1, ep=1, cp=1, ffn=14336, d=4096, L=32,
+    def _mkev(self, *, tp=8, pp=1, ep=1, cp=1, dp=0, ffn=14336, d=4096, L=32,
               tbt=20.0, ttft=200.0, mem=40.0, train_tps=5000.0, loss=1.9,
               moe=None):
         # Minimal synthetic EvaluatedCandidate-shaped object.
@@ -329,6 +329,7 @@ class MetricExtractionTests(unittest.TestCase):
         arch.pp_degree = pp
         arch.ep_degree = ep
         arch.cp_degree = cp
+        arch.dp_degree = dp
 
         class Throughput:
             def __init__(self):
@@ -374,6 +375,26 @@ class MetricExtractionTests(unittest.TestCase):
         self.assertEqual(m.topology.tp, 8)
         self.assertEqual(m.topology.pp, 2)
         self.assertEqual(m.topology.cp, 2)
+
+    def test_ep_expands_serving_instance_but_partitions_dp_replicas(self):
+        ev = self._mkev(tp=8, pp=2, ep=4, cp=2, tbt=20.0)
+        c = self._mkconstraints(dp=8, serving_batch=16)
+        m = extract_metrics(ev, c)
+        self.assertEqual(m.training_replica_gpus, 8 * 2 * 2)
+        self.assertEqual(m.replica_gpus, 8 * 2 * 2 * 4)
+        self.assertEqual(m.serving_replicas, 2)
+        self.assertEqual(
+            m.aggregate_output_tokens_per_second,
+            (1000.0 / 20.0 * 16) * 2,
+        )
+
+    def test_candidate_specific_dp_overrides_stale_scalar_constraint(self):
+        ev = self._mkev(tp=4, pp=2, cp=4, dp=2, train_tps=1000.0)
+        c = self._mkconstraints(dp=8, training_tokens=1_000_000)
+        m = extract_metrics(ev, c)
+        expected_gpu_seconds = (1_000_000 / 1000.0) * (4 * 2 * 4) * 2
+        self.assertEqual(m.training_gpu_seconds, expected_gpu_seconds)
+        self.assertEqual(m.topology.dp, 2)
 
     def test_topology_carries_serving_batch(self):
         ev = self._mkev()

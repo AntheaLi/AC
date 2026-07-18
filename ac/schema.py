@@ -285,6 +285,7 @@ def build_config(
     weight_precision: str = "bf16",
     attn_precision: Optional[Dict[str, str]] = None,
     ffn_precision: str = "bf16",
+    activation_precision: str = "bf16",
     kv_cache_bits: int = 16,
     # Parallelism
     tp: int = 1,
@@ -322,10 +323,23 @@ def build_config(
     # block has type="mla" and carries the latent dimensions. When None,
     # the legacy "full" / GQA / MQA block is emitted.
     mla: Optional[Dict[str, Any]] = None,
+    # Whole-model sliding-window attention. Distinct from `local_global`,
+    # which windows only a subset of attention layers.
+    swa: Optional[Dict[str, Any]] = None,
     # v1-fix NSA: optional Native Sparse Attention block (DeepSeek 2025).
     # Shape: {compress_block_size, compress_block_stride, select_block_size,
     # select_top_k, window_size}.
     nsa: Optional[Dict[str, Any]] = None,
+    # Wave 35: compressed / indexer attention block (CSA | IndexShare | MSA).
+    # Shape: {"type": "csa"|"indexshare"|"msa", <family params>} using the
+    # same field names as AttentionConfig (csa_block_size, csa_top_k_blocks,
+    # csa_compression_dim, indexshare_num_buckets, indexshare_top_k_buckets,
+    # indexshare_index_dim, msa_window_size, msa_dilated_top_k,
+    # msa_global_top_k). Before this, a search that SELECTED a
+    # csa/indexshare/msa candidate emitted attention.type="full" — the
+    # config a user would train did not match the candidate the search
+    # evaluated (same class of bug as the Wave 19 local:global finding).
+    compressed: Optional[Dict[str, Any]] = None,
     # v1-fix YOCO: cross-layer KV sharing (Microsoft 2024). Distinct from
     # MLA: MLA *compresses* the per-layer KV; YOCO *shares* KV across
     # layers. Shape: {n_self_attn_layers, share_pattern}. The first K
@@ -372,9 +386,16 @@ def build_config(
         "precision": ffn_precision,
     }
 
+    # Wave 35: route through the compressed-attention block when provided.
+    if compressed is not None:
+        attention_block = _compressed_attention_block(
+            compressed, n_heads=n_heads, n_kv_heads=n_kv_heads,
+            d_head=d_head, kv_cache_bits=kv_cache_bits,
+            attn_precision=attn_precision,
+        )
     # v1-fix NSA: route through NSA when `nsa` kwarg is provided. Takes
     # precedence over `mla` in the unlikely case both are passed.
-    if nsa is not None:
+    elif nsa is not None:
         cbs = int(nsa.get("compress_block_size", NSA_DEFAULTS["compress_block_size"]))
         cbst = int(nsa.get("compress_block_stride", NSA_DEFAULTS["compress_block_stride"]))
         sbs = int(nsa.get("select_block_size", NSA_DEFAULTS["select_block_size"]))
@@ -415,6 +436,20 @@ def build_config(
             "rope_head_dim": d_rope,
             "nope_head_dim": d_nope,
         }
+    elif swa is not None:
+        window_size = int(swa.get("window_size", 0) or 0)
+        if window_size <= 0:
+            raise ValueError("swa.window_size must be > 0")
+        attention_block = {
+            "type": "swa",
+            "n_heads": n_heads,
+            "n_kv_heads": n_kv_heads,
+            "d_head": d_head,
+            "rope": True,
+            "kv_cache_bits": kv_cache_bits,
+            "precision": attn_precision,
+            "window_size": window_size,
+        }
     else:
         attention_block = {
             "type": "full",
@@ -443,7 +478,7 @@ def build_config(
                 "attention": attention_block,
                 "ffn": dense_ffn_block,           # first-K layers: dense FFN
                 "normalization": norm_block,
-                "residual_dtype": "bf16",
+                "residual_dtype": activation_precision,
                 "state": None,
             },
             {
@@ -452,7 +487,7 @@ def build_config(
                 "attention": attention_block,
                 "ffn": moe_ffn_block,             # remainder: MoE FFN
                 "normalization": norm_block,
-                "residual_dtype": "bf16",
+                "residual_dtype": activation_precision,
                 "state": None,
             },
         ]
@@ -471,7 +506,7 @@ def build_config(
             "attention": attention_block,
             "ffn": ffn_block,
             "normalization": norm_block,
-            "residual_dtype": "bf16",
+            "residual_dtype": activation_precision,
             "state": None,
         }
         layer_configs = [layer_config]
@@ -547,6 +582,11 @@ def build_config(
         "architecture": {
             "d_model": d_model,
             "n_layers": n_layers,
+            # Preserve the dense FFN reference width even when every main
+            # layer uses MoE. MTP blocks and future dense-prefix deltas still
+            # need this value; it cannot be recovered from expert_dim.
+            "ffn_dim": ffn_dim,
+            "weight_precision": weight_precision,
             "vocab_size": vocab_size,
             "tied_embeddings": False,
             "positional_encoding": {
@@ -686,6 +726,16 @@ def validate_config(config: dict) -> List[str]:
         if akey not in arch:
             errors.append(f"Missing architecture.{akey}")
 
+    n_layers = arch.get("n_layers")
+    pp = par.get("pipeline_parallel")
+    if (isinstance(n_layers, int) and n_layers > 0
+            and isinstance(pp, int) and pp > 0
+            and n_layers % pp != 0):
+        errors.append(
+            f"parallelism.pipeline_parallel ({pp}) must divide "
+            f"architecture.n_layers ({n_layers})"
+        )
+
     # v1-fix MTP: validate Multi-Token Prediction block when present.
     errors.extend(_validate_mtp(arch, "architecture"))
     # v1-fix YOCO: validate cross-layer KV-sharing block when present.
@@ -737,10 +787,15 @@ def validate_config(config: dict) -> List[str]:
                                 errors.append(
                                     f"{pfx}.attention (swa): window_size must "
                                     f"be a positive integer")
+                        elif attn_type in ("csa", "indexshare", "msa"):
+                            # Wave 35: compressed / indexer attention blocks.
+                            errors.extend(
+                                _validate_compressed_attention(attn, pfx))
                         elif attn_type not in ("full", "gqa", "mqa", "mha"):
                             errors.append(
                                 f"{pfx}.attention.type={attn_type!r} not recognized "
-                                f"(expected one of full | mha | gqa | mqa | mla | nsa | swa)"
+                                f"(expected one of full | mha | gqa | mqa | mla | nsa "
+                                f"| swa | csa | indexshare | msa)"
                             )
 
                     if "ffn" not in lc or lc["ffn"] is None:
@@ -788,6 +843,14 @@ def validate_config(config: dict) -> List[str]:
     if ep > 1 and not any_moe_layer:
         errors.append(
             f"parallelism.expert_parallel={ep} > 1 but no layer has ffn.type == 'moe'"
+        )
+    dp = par.get("data_parallel", 1)
+    if (any_moe_layer and isinstance(ep, int) and ep > 0
+            and isinstance(dp, int) and dp > 1
+            and (ep > dp or dp % ep != 0)):
+        errors.append(
+            f"parallelism.expert_parallel ({ep}) must divide "
+            f"parallelism.data_parallel ({dp}) for an MoE training layout"
         )
 
     # Dimension checks (only for transformer_block layers with attention)
@@ -899,6 +962,7 @@ def _validate_moe_ffn(ffn: Dict[str, Any], pfx: str, parallelism: Dict[str, Any]
 #   delta_net, gated_delta, kda           → family `gated_delta_or_kda_linear`
 #   gla                                   → family `gated_delta_or_kda_linear`
 #   rwkv7, linear_attention, retnet       → family `generic_linear_attention`
+#   parallel_heads, moh, hydra            → family `parallel_hybrid_heads`
 #   sliding_window                        → family `recurrent_local_attention`
 #                                           (d_state field interpreted as window size)
 #
@@ -917,6 +981,8 @@ _SUPPORTED_STATE_TYPES = {
     "gla", "gated_linear_attention",
     # Generic linear attention
     "rwkv7", "rwkv", "linear_attention", "retnet",
+    # Parallel channel/head hybrids
+    "parallel_heads", "moh", "hydra",
 }
 
 
@@ -961,13 +1027,14 @@ def _validate_mtp(arch: Dict[str, Any], pfx: str) -> List[str]:
 
 
 # v1-fix YOCO: You Only Cache Once defaults (Sun et al., Microsoft 2024).
-# The first `n_self_attn_layers` layers each have their own KV; the
-# remaining N - n_self_attn_layers layers share the K-th layer's KV cache
-# via cross-attention. Cuts KV cache by ~N / K compared to dense.
+# The first `n_self_attn_layers` layers produce the shared representation;
+# later cross-decoder layers reuse that single source through cross-attention.
+# AC currently calibrates this topology only; do not serialize alternative
+# sharing labels as though they changed a modeled cost or quality term.
 YOCO_DEFAULTS = {
     "enabled": True,
     "n_self_attn_layers": 1,        # only the FIRST layer keeps its own KV
-    "share_pattern": "single_source",  # "single_source" | "block_shared"
+    "share_pattern": "single_source",
 }
 
 
@@ -990,9 +1057,10 @@ def _validate_yoco(arch: Dict[str, Any], pfx: str) -> List[str]:
                 f"(at least one layer must share)"
             )
         pat = yoco.get("share_pattern", "single_source")
-        if pat not in ("single_source", "block_shared"):
+        if pat != "single_source":
             errors.append(
-                f"{pfx}.yoco.share_pattern must be 'single_source' or 'block_shared'"
+                f"{pfx}.yoco.share_pattern must be 'single_source'; "
+                "other sharing topologies are not calibrated"
             )
     return errors
 
@@ -1008,6 +1076,64 @@ NSA_DEFAULTS = {
     "select_top_k": 16,
     "window_size": 512,
 }
+
+# Wave 35: per-family defaults for the compressed / indexer attention block.
+# Mirrors the throughput-model fallbacks so an under-specified emit still
+# round-trips to the same evaluated architecture.
+COMPRESSED_DEFAULTS = {
+    "csa": {"csa_block_size": 64, "csa_top_k_blocks": 16,
+            "csa_compression_dim": 64},
+    "indexshare": {"indexshare_num_buckets": 64,
+                   "indexshare_top_k_buckets": 4,
+                   "indexshare_index_dim": 64},
+    "msa": {"msa_window_size": 512, "msa_dilated_top_k": 64,
+            "msa_global_top_k": 16},
+}
+
+
+def _compressed_attention_block(
+    compressed: Dict[str, Any],
+    n_heads: int,
+    n_kv_heads: int,
+    d_head: int,
+    kv_cache_bits: int,
+    attn_precision: Dict[str, str],
+) -> Dict[str, Any]:
+    """Wave 35: build the attention block for a csa/indexshare/msa layer."""
+    ctype = str(compressed.get("type", "")).strip().lower()
+    if ctype not in COMPRESSED_DEFAULTS:
+        raise ValueError(
+            f"compressed attention type must be one of "
+            f"{sorted(COMPRESSED_DEFAULTS)}, got {ctype!r}"
+        )
+    block = {
+        "type": ctype,
+        "n_heads": n_heads,
+        "n_kv_heads": n_kv_heads,
+        "d_head": d_head,
+        "rope": True,
+        "kv_cache_bits": kv_cache_bits,
+        "precision": attn_precision,
+    }
+    for field, default in COMPRESSED_DEFAULTS[ctype].items():
+        block[field] = int(compressed.get(field, default))
+    return block
+
+
+def _validate_compressed_attention(attn: Dict[str, Any], pfx: str) -> List[str]:
+    """Wave 35: validate csa / indexshare / msa attention fields. Missing
+    fields are legal (round-trip fills family defaults); present fields
+    must be positive integers."""
+    errors: List[str] = []
+    ctype = attn.get("type")
+    for field in COMPRESSED_DEFAULTS.get(str(ctype), {}):
+        if field in attn:
+            v = attn[field]
+            if not isinstance(v, int) or v <= 0:
+                errors.append(
+                    f"{pfx}.attention ({ctype}): {field} must be a "
+                    f"positive integer, got {v!r}")
+    return errors
 
 
 def _validate_nsa_attention(attn: Dict[str, Any], pfx: str) -> List[str]:
@@ -1164,17 +1290,31 @@ def build_hybrid_config(
     state_layer_indices: Optional[List[int]] = None,
     state_type: str = "mamba2",
     state_d_state: int = 128,
+    state_expansion: int = 2,
     state_n_heads: int = 32,
     state_d_head: int = 64,
+    state_precision: str = "bf16",
+    placement_strategy: str = "baseline",
+    hybrid_ratio: str = "",
     # FFN params (shared by both attention and state layers)
     ffn_dim: int = 14336,
     ffn_type: str = "swiglu",
     ffn_precision: str = "bf16",
     weight_precision: str = "bf16",
-    # MoE override (if not None, used as FFN for all layers)
+    activation_precision: str = "bf16",
+    # MoE override (if not None, used after any first-K dense prefix)
     moe: Optional[Dict[str, Any]] = None,
+    n_dense_ffn_layers: int = 0,
+    mla: Optional[Dict[str, Any]] = None,
+    swa: Optional[Dict[str, Any]] = None,
     nsa: Optional[Dict[str, Any]] = None,
+    # Wave 35: compressed / indexer attention for the hybrid's attention
+    # layers ({"type": "csa"|"indexshare"|"msa", <params>}), so sparse ×
+    # state compositions (Wave 33) emit what the search evaluated.
+    compressed: Optional[Dict[str, Any]] = None,
     yoco: Optional[Dict[str, Any]] = None,
+    mtp: Optional[Dict[str, Any]] = None,
+    local_global: Optional[Dict[str, Any]] = None,
     # Parallelism
     tp: int = 1,
     pp: int = 1,
@@ -1230,91 +1370,180 @@ def build_hybrid_config(
     if attn_precision is None:
         attn_precision = {"qk": "bf16", "v": weight_precision, "output": weight_precision}
 
-    # Build FFN block (shared between attention and state layers)
+    # Build FFN blocks. A hybrid may still use the common first-K-dense
+    # stabilization prefix before switching both attention and state layers
+    # to MoE FFNs.
     if moe is not None:
-        ffn_block = _normalize_moe_ffn(moe, default_precision=ffn_precision)
+        moe_ffn_block = _normalize_moe_ffn(
+            moe, default_precision=ffn_precision)
     else:
-        ffn_block = {
-            "type": ffn_type,
-            "ffn_dim": ffn_dim,
-            "precision": ffn_precision,
+        moe_ffn_block = None
+    dense_ffn_block = {
+        "type": ffn_type,
+        "ffn_dim": ffn_dim,
+        "precision": ffn_precision,
+    }
+
+    # Build the attention used by global attention layers. This precedence
+    # matches build_config(), and therefore the evaluator: compressed/NSA
+    # patterns supersede MLA's projection when explicitly selected.
+    if compressed is not None:
+        attention_block = _compressed_attention_block(
+            compressed, n_heads=n_heads, n_kv_heads=n_kv_heads,
+            d_head=d_head, kv_cache_bits=kv_cache_bits,
+            attn_precision=attn_precision,
+        )
+    elif nsa is not None:
+        attention_block = {
+            "type": "nsa",
+            "n_heads": n_heads,
+            "n_kv_heads": n_kv_heads,
+            "d_head": d_head,
+            "rope": True,
+            "kv_cache_bits": kv_cache_bits,
+            "precision": attn_precision,
+            "nsa_compress_block_size": int(
+                nsa.get("compress_block_size", NSA_DEFAULTS["compress_block_size"])
+            ),
+            "nsa_compress_block_stride": int(
+                nsa.get("compress_block_stride", NSA_DEFAULTS["compress_block_stride"])
+            ),
+            "nsa_select_block_size": int(
+                nsa.get("select_block_size", NSA_DEFAULTS["select_block_size"])
+            ),
+            "nsa_select_top_k": int(
+                nsa.get("select_top_k", NSA_DEFAULTS["select_top_k"])
+            ),
+            "nsa_window_size": int(
+                nsa.get("window_size", NSA_DEFAULTS["window_size"])
+            ),
+        }
+    elif mla is not None:
+        attention_block = {
+            "type": "mla",
+            "n_heads": n_heads,
+            "n_kv_heads": n_kv_heads,
+            "d_head": d_head,
+            "rope": True,
+            "kv_cache_bits": kv_cache_bits,
+            "precision": attn_precision,
+            "kv_latent_dim": int(mla.get(
+                "kv_latent_dim", MLA_DEFAULTS["kv_latent_dim"])),
+            "q_latent_dim": int(mla.get(
+                "q_latent_dim", MLA_DEFAULTS["q_latent_dim"])),
+            "rope_head_dim": int(mla.get(
+                "rope_head_dim", MLA_DEFAULTS["rope_head_dim"])),
+            "nope_head_dim": int(mla.get(
+                "nope_head_dim", MLA_DEFAULTS["nope_head_dim"])),
+        }
+    elif swa is not None:
+        window_size = int(swa.get("window_size", 0) or 0)
+        if window_size <= 0:
+            raise ValueError("swa.window_size must be > 0")
+        attention_block = {
+            "type": "swa",
+            "n_heads": n_heads,
+            "n_kv_heads": n_kv_heads,
+            "d_head": d_head,
+            "rope": True,
+            "kv_cache_bits": kv_cache_bits,
+            "precision": attn_precision,
+            "window_size": window_size,
+        }
+    else:
+        attention_block = {
+            "type": "full",
+            "n_heads": n_heads,
+            "n_kv_heads": n_kv_heads,
+            "d_head": d_head,
+            "rope": True,
+            "kv_cache_bits": kv_cache_bits,
+            "precision": attn_precision,
         }
 
+    norm_block = {
+        "type": "rmsnorm",
+        "eps": 1e-5,
+        "precision": "bf16",
+    }
+    state_block = {
+        "type": state_type,
+        "d_state": state_d_state,
+        "state_expansion": state_expansion,
+        "n_heads": state_n_heads,
+        "d_head": state_d_head,
+        "precision": state_precision,
+    }
+
+    # Materialize local/global placement only across attention-capable slots;
+    # state positions remain fixed. This mirrors compose_layer_type_list().
+    global_attention_indices = sorted(attention_layer_indices)
+    local_attention_indices: List[int] = []
+    if local_global is not None and global_attention_indices:
+        requested_local = max(0, int(local_global.get("n_local_layers", 0)))
+        target_local = min(requested_local, len(global_attention_indices))
+        window_size = int(local_global.get("window_size", 0) or 0)
+        if 0 < target_local < len(global_attention_indices) and window_size > 0:
+            n_global = len(global_attention_indices) - target_local
+            keep_global = []
+            emitted_global = 0
+            for ordinal, idx in enumerate(global_attention_indices):
+                next_global = ((ordinal + 1) * n_global
+                               // len(global_attention_indices))
+                if next_global > emitted_global:
+                    emitted_global = next_global
+                    keep_global.append(idx)
+                else:
+                    local_attention_indices.append(idx)
+            global_attention_indices = keep_global
+    local_attention_block = {
+        "type": "swa",
+        "n_heads": n_heads,
+        "n_kv_heads": n_kv_heads,
+        "d_head": d_head,
+        "rope": True,
+        "kv_cache_bits": kv_cache_bits,
+        "precision": attn_precision,
+        "window_size": int((local_global or {}).get("window_size", 0) or 0),
+    }
+
+    n_dense = max(0, int(n_dense_ffn_layers))
+    split_dense_prefix = moe is not None and 0 < n_dense < n_layers
     layer_configs = []
 
-    # Attention layer config
-    if attention_layer_indices:
-        if nsa is not None:
-            attention_block = {
-                "type": "nsa",
-                "n_heads": n_heads,
-                "n_kv_heads": n_kv_heads,
-                "d_head": d_head,
-                "rope": True,
-                "kv_cache_bits": kv_cache_bits,
-                "precision": attn_precision,
-                "nsa_compress_block_size": int(
-                    nsa.get("compress_block_size", NSA_DEFAULTS["compress_block_size"])
-                ),
-                "nsa_compress_block_stride": int(
-                    nsa.get("compress_block_stride", NSA_DEFAULTS["compress_block_stride"])
-                ),
-                "nsa_select_block_size": int(
-                    nsa.get("select_block_size", NSA_DEFAULTS["select_block_size"])
-                ),
-                "nsa_select_top_k": int(
-                    nsa.get("select_top_k", NSA_DEFAULTS["select_top_k"])
-                ),
-                "nsa_window_size": int(
-                    nsa.get("window_size", NSA_DEFAULTS["window_size"])
-                ),
-            }
+    def _append_bands(
+        indices: List[int], block_type: str,
+        attention: Optional[Dict[str, Any]],
+    ) -> None:
+        if not indices:
+            return
+        groups = []
+        if split_dense_prefix:
+            groups = [
+                ([i for i in indices if i < n_dense], dense_ffn_block),
+                ([i for i in indices if i >= n_dense], moe_ffn_block),
+            ]
         else:
-            attention_block = {
-                "type": "full",
-                "n_heads": n_heads,
-                "n_kv_heads": n_kv_heads,
-                "d_head": d_head,
-                "rope": True,
-                "kv_cache_bits": kv_cache_bits,
-                "precision": attn_precision,
-            }
-        attn_lc = {
-            "layer_idx": sorted(attention_layer_indices),
-            "type": "transformer_block",
-            "attention": attention_block,
-            "ffn": dict(ffn_block),
-            "normalization": {
-                "type": "rmsnorm",
-                "eps": 1e-5,
-                "precision": "bf16",
-            },
-            "residual_dtype": "bf16",
-            "state": None,
-        }
-        layer_configs.append(attn_lc)
+            groups = [(
+                list(indices),
+                moe_ffn_block if moe_ffn_block is not None else dense_ffn_block,
+            )]
+        for band_indices, ffn in groups:
+            if not band_indices:
+                continue
+            layer_configs.append({
+                "layer_idx": sorted(band_indices),
+                "type": block_type,
+                "attention": dict(attention) if attention is not None else None,
+                "ffn": dict(ffn),
+                "normalization": dict(norm_block),
+                "residual_dtype": activation_precision,
+                "state": dict(state_block) if block_type == "state_block" else None,
+            })
 
-    # State layer config
-    if state_layer_indices:
-        state_lc = {
-            "layer_idx": sorted(state_layer_indices),
-            "type": "state_block",
-            "attention": None,
-            "ffn": dict(ffn_block),
-            "normalization": {
-                "type": "rmsnorm",
-                "eps": 1e-5,
-                "precision": "bf16",
-            },
-            "residual_dtype": "bf16",
-            "state": {
-                "type": state_type,
-                "d_state": state_d_state,
-                "n_heads": state_n_heads,
-                "d_head": state_d_head,
-            },
-        }
-        layer_configs.append(state_lc)
+    _append_bands(global_attention_indices, "transformer_block", attention_block)
+    _append_bands(local_attention_indices, "transformer_block", local_attention_block)
+    _append_bands(sorted(state_layer_indices), "state_block", None)
 
     config = {
         "schema_version": SCHEMA_VERSION,
@@ -1340,7 +1569,11 @@ def build_hybrid_config(
         "architecture": {
             "d_model": d_model,
             "n_layers": n_layers,
+            "ffn_dim": ffn_dim,
+            "weight_precision": weight_precision,
             "vocab_size": vocab_size,
+            "placement_strategy": placement_strategy,
+            "hybrid_ratio": hybrid_ratio,
             "tied_embeddings": False,
             "positional_encoding": {
                 "type": "rope",
@@ -1353,7 +1586,13 @@ def build_hybrid_config(
                 } if rope_scaling_method != "none" else None),
             },
             "layer_configs": layer_configs,
-            **({"yoco": dict(yoco)} if yoco else {}),
+            "n_dense_ffn_layers": (
+                n_dense if split_dense_prefix else 0
+            ),
+            **({"mtp": MTP_DEFAULTS.copy() if mtp is True else dict(mtp)}
+               if mtp else {}),
+            **({"yoco": YOCO_DEFAULTS.copy() if yoco is True else dict(yoco)}
+               if yoco else {}),
         },
     }
 

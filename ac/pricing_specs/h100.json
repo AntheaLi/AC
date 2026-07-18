@@ -1,0 +1,72 @@
+{
+  "schema_version": "pricing_v1",
+  "hardware_target": "h100",
+  "cloud_vendor": "aws",
+  "accelerator_name": "NVIDIA H100 SXM5 80GB",
+  "instance_reference": {
+    "instance_type": "p5.48xlarge",
+    "accelerators_per_instance": 8,
+    "region": "us-east-1",
+    "note": "Per-accelerator-hour figures derived from the whole-instance hourly list price divided by 8 GPUs."
+  },
+  "usd_per_accelerator_hour": {
+    "on_demand": 6.88,
+    "reserved_1y": 4.82,
+    "spot": 2.47
+  },
+  "reference_estimate_usd_per_accelerator_hour": null,
+  "tdp_watts": 700,
+  "assumed_avg_utilization": 0.65,
+  "assumed_pue": 1.15,
+  "electricity_usd_per_kwh": 0.10,
+  "currency": "USD",
+  "price_note": "LIST PRICES only, as published or derived from public vendor price pages; negotiated enterprise discounts, capacity-block deals, and neocloud offers (often far lower) are NOT reflected. Spot prices are dynamic snapshots. Prices change without notice; hot-update this file by editing the numbers and bumping provenance.date_accessed.",
+  "energy_note": "Electricity sub-term uses assumed_avg_utilization x tdp_watts x assumed_pue x electricity_usd_per_kwh. utilization, PUE (AWS does not publish fleet PUE; 1.15 is an assumption) and the $0.10/kWh industrial-power ballpark are ASSUMPTIONS, not measurements.",
+  "provenance": {
+    "prices": [
+      {
+        "field": "on_demand",
+        "value_usd_per_accelerator_hour": 6.88,
+        "derivation": "p5.48xlarge $55.04/hr / 8 GPUs (post June-2025 ~44% AWS price cut)",
+        "tier": "T3",
+        "source_url": "https://instances.vantage.sh/aws/ec2/p5.48xlarge",
+        "corroborating_urls": [
+          "https://www.devzero.io/instances/aws/p5.48xlarge",
+          "https://www.spheron.network/blog/aws-h100-pricing-2026/"
+        ],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "reserved_1y",
+        "value_usd_per_accelerator_hour": 4.82,
+        "derivation": "p5.48xlarge ~$38.53/hr 1-year savings-plan rate / 8 GPUs (~30% off on-demand)",
+        "tier": "T3",
+        "source_url": "https://www.spheron.network/blog/aws-h100-pricing-2026/",
+        "corroborating_urls": [],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "spot",
+        "value_usd_per_accelerator_hour": 2.47,
+        "derivation": "p5.48xlarge $19.785/hr current spot snapshot / 8 GPUs; spot is dynamic and P5 spot capacity is scarce in practice",
+        "tier": "T3",
+        "source_url": "https://instances.vantage.sh/aws/ec2/p5.48xlarge",
+        "corroborating_urls": [],
+        "date_accessed": "2026-07-17"
+      }
+    ],
+    "tdp": {
+      "value_watts": 700,
+      "tier": "T2",
+      "source_url": "https://www.nvidia.com/en-us/data-center/h100/",
+      "note": "NVIDIA H100 SXM datasheet TDP 700W (official vendor specification).",
+      "date_accessed": "2026-07-17"
+    },
+    "pue": {
+      "value": 1.15,
+      "tier": "T3",
+      "note": "ASSUMPTION. AWS does not publish fleet-average PUE.",
+      "date_accessed": "2026-07-17"
+    }
+  }
+}

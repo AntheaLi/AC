@@ -120,6 +120,10 @@ TRAINIUM3 = HardwareSpec(
 
 HARDWARE = {
     "h100": H100, "b200": B200,
+    # Gate-2 Task C: system targets share the chip-level tile spec of their
+    # silicon (GB200 NVL72 = B200 dies; H800 = H100 die). Only the
+    # interconnect/domain layer differs, which lives in the JSON spec.
+    "gb200_nvl72": B200, "h800": H100,
     "tpu_v5e": TPU_V5E, "tpu_v5p": TPU_V5P,
     "trainium2": TRAINIUM2, "trn2": TRAINIUM2,
     "trainium3": TRAINIUM3, "trn3": TRAINIUM3,
@@ -464,6 +468,11 @@ DEFAULT_TOP_K = [1, 2, 4, 8]
 NVLINK_DOMAIN = {
     "h100": 8,
     "b200": 72,
+    # Gate-2 Task C: GB200 NVL72's NVLink5 domain spans the full 72-GPU
+    # rack (datasheet); H800 keeps H100's 8-GPU island (only per-link
+    # bandwidth drops to 400 GB/s, which lives in the spec JSON).
+    "gb200_nvl72": 72,
+    "h800": 8,
     "tpu_v5p": 16,   # treated as "axis" rather than NVLink, but same role
     "tpu_v5e": 8,
 }
@@ -472,12 +481,10 @@ NVLINK_DOMAIN = {
 def default_ep_options(hw_name: str, for_moe: bool = False) -> List[int]:
     """Powers of 2 up to the hardware's NVLink/axis domain size.
 
-    When `for_moe=True`, EP=1 is excluded because a MoE candidate with EP=1
-    forces every rank to hold the full set of experts — at any reasonable
-    MoE size this is multiple-× HBM and gets silently caught downstream
-    via the memory→INFEASIBLE side-channel. Excluding EP=1 from the MoE
-    enumeration makes the bug unreachable by construction. Callers from
-    the MoE / hybrid generators must pass `for_moe=True`.
+    When `for_moe=True`, the default search starts at EP=2 to prioritize
+    distributed expert layouts. EP=1 remains a legal TP-sharded execution
+    plan and is accepted when a caller requests it explicitly; serving HBM
+    accounting decides whether its full local expert set fits.
     """
     cap = NVLINK_DOMAIN.get(hw_name, 8)
     opts = [] if for_moe else [1]
@@ -598,12 +605,19 @@ def compute_moe_options(
                 if n_experts / top_k < 8:
                     continue
 
-                shared_raw = baseline_ffn_dim // 4
-                shared_dim = round_nearest_to(shared_raw, tile.cta_n)
-                if shared_dim < tile.cta_n:
-                    shared_dim = tile.cta_n
-
                 for g in granularity_targets:
+                    # Wave 45: the shared expert is ~1/4 of the candidate's
+                    # OWN active budget (DeepSeek-V2 proportions), so it must
+                    # scale with g. Sizing it off the dense baseline made the
+                    # g=0.25 "quarter-active regime" mathematically empty
+                    # (0.25*ffn - 0.25*ffn = 0): a silent dead grid point in
+                    # every default sweep — and the exact value the CLI's
+                    # allow-moe hint recommends passing.
+                    shared_raw = int(g * baseline_ffn_dim) // 4
+                    shared_dim = round_nearest_to(shared_raw, tile.cta_n)
+                    if shared_dim < tile.cta_n:
+                        shared_dim = tile.cta_n
+
                     # Active FFN-equivalent ≈ g × baseline_ffn_dim (minus shared)
                     target_active = max(0, int(g * baseline_ffn_dim) - shared_dim)
                     if target_active <= 0:

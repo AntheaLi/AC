@@ -1,5 +1,7 @@
 # 算模 AC — Architecture Compiler - v0
 
+[![CI](https://github.com/AntheaLi/AC/actions/workflows/ci.yml/badge.svg)](https://github.com/AntheaLi/AC/actions/workflows/ci.yml)
+
 ![算模AC - ArchCalc](assets/image.png)
 
 AC is a compiler for model architecture design under hardware constraints. It can take hardware platform, param count, training tokens, serving workload, and an optional basemodel, 
@@ -10,7 +12,9 @@ It serves as a quantitative **pre-flight** check, it does NOT replace training.
 
 Check out demo here: [ac-demo](https://antheali.github.io/ac-demo/)
 
-Three composable capabilities, one shared config format:
+> **TL;DR (60s)** — Give AC a hardware target + budget (`ac-compile --hardware h100 --params 7 --tokens 2 …`); get back a Pareto-optimal architecture, the binding constraint that decided it, and the price of relaxing it. Why trust it: an [anchor validation study](validation/anchor_report.md) pre-registered predictions before comparing them to the public record — decision retrodiction **4 hit + 1 partial of 5** (DeepSeek-V3 MLA, Llama-3 GQA-8, Mistral SWA, first-K-dense, EP=72-on-NVL72), ranking fidelity **Kendall τ = 1.0**, with every miss published in an error taxonomy instead of deleted. Absolute numbers are priors until you calibrate — [read the 3 lines below](#calibration-vs-ordinal-use). Run it in 30s: `pip install archc && ac-compile --hardware h100 --params 7 --tokens 2 --context 8192 --serving-tbt 50 --serving-batch 32 --tp 8 --pp 1 --dp 8`
+
+Three composable use cases, one shared config format:
 
 - **Greenfield**  Given compute -> architecture | `ac-compile --hardware H --params N --tokens T …` 
 
@@ -26,25 +30,20 @@ built to automate the process. It can also exist as a thin layer that sits besid
 ## Install
 
 ```bash
-# editable install from the repo
+# from PyPI (recommended)
+pip install archc
+
+# or, from a source checkout: editable install from the repo root
 pip install -e .
 
-# or run directly without installing
+# or run directly without installing (from the repo root)
 python ac/cli_compile.py --help
-python ac/cli_delta_eval.py --help
-python ac/cli_stress.py --help
-python ac/auto_calibrate.py --help
 ```
 
 After install the console scripts are on your `PATH`:
 
 ```bash
 ac-compile        --help    # greenfield / modifier entry
-ac-delta-eval     --help    # delta influence entry
-ac-stress         --help    # stress / quality / transition inspection
-ac-auto-calibrate --help    # ridge fit + fit-pairs + plan-ladder
-ac-matrix-18b     --help    # budget-matched matrix + scenario Pareto
-ac-trust-audit    --help    # public-model anchors + trust audit
 ```
 
 No external runtime dependencies beyond Python ≥ 3.10 and PyYAML.
@@ -88,6 +87,7 @@ misleading. For comparative decisions ("does adding MLA relieve the
 binding axis without spending >1% loss on a frontier already at TP=8?"),
 AC's structural answer is the value it adds.
 
+
 ---
 
 ## Quickstart
@@ -127,7 +127,7 @@ given hardware and constraints. No baseline config required.
 ac-compile [OPTIONS]
 
 required
-  --hardware {h100, b200, tpu_v5p, tpu_v5e, trainium2, trn2, trainium3, trn3}
+  --hardware {h100, b200, gb200_nvl72, h800, tpu_v5p, tpu_v5e, trainium2, trn2, trainium3, trn3}
   --params  N        (billions; supports "7" or "7B")
   --tokens  N        (trillions; supports "2" or "2T")
 
@@ -157,14 +157,18 @@ serving budgets
 
 parallelism
   --tp / --pp / --dp   degrees (defaults 8/1/8)
+  --training-cluster-gpus  minimum cluster size; derives candidate-specific
+                           DP across TP/PP/CP search and rounds DP for EP
   --cp / --cp-method   context parallel: ring | ulysses
   --cp-options         comma-list of CP degrees to sweep
 
 architecture sweeps
   --allow-state            enable state/hybrid candidates
-  --state-type             mamba2 | mamba | gla | kda | gated_deltanet
-                           | deltanet | rwkv7 | retnet | swa
-                           | sliding_window | linear_attention
+  --state-type             mamba2 | mamba | s4 | s5 | s6
+                           | gla | kda | deltanet | gated_deltanet
+                           | rwkv7 | retnet | linear_attention
+                           | parallel_heads | moh | hydra
+                           | sliding_window
   --placement-strategy     first_periodic_last, interleaved, periodic
   --state-precision        bf16 | fp16 | fp32
 
@@ -172,6 +176,10 @@ architecture sweeps
   --max-total-params-b     MoE memory ceiling (total params billions)
   --moe-n-experts          comma-list (e.g. "64,128,256")
   --moe-top-k              comma-list
+  --moe-granularity        comma-list of expert-granularity targets
+                           (1.0 = coarse Mixtral-style; 0.25 =
+                           DeepSeek-V3-style fine-grained experts)
+  --ep-topology            single_axis | cross_axis
   --dense-ffn-layers       comma-list of first-K-dense layer counts
   --ep-options             comma-list of expert-parallel degrees
 
@@ -194,17 +202,31 @@ architecture sweeps
   --rope-original-max-position     pretrain context (default 8192)
   --rope-scaling-methods           comma-list: yarn,ntk,longrope,pi,none
 
-architecture stamps (post-search emission; optimizer does not sweep)
-  --nsa                            emit Native Sparse Attention block
+evaluated attention transforms (scored by quality + throughput models)
+  --nsa                            require Native Sparse Attention on every candidate
     --nsa-compress-block-size      (default 64)
     --nsa-compress-block-stride    (default 16)
     --nsa-select-block-size        (default 64)
     --nsa-select-top-k             (default 16)
     --nsa-window-size              (default 512)
 
-  --yoco                           emit YOCO sharing block
+  --yoco                           require YOCO KV sharing on every candidate
     --yoco-n-self-attn-layers      (default 1)
-    --yoco-share-pattern           single_source | block_shared
+    --yoco-share-pattern           single_source (the calibrated YOCO topology)
+
+compressed / indexer attention sweeps (Wave 32)
+  --allow-csa                      Compressed Sparse Attention candidates
+    --csa-block-sizes              comma-list (default 64,128)
+    --csa-top-k-blocks             comma-list
+    --csa-compression-dim          (default 64)
+  --allow-indexshare               DSA-style bucketed lightning-indexer candidates
+    --indexshare-buckets           comma-list (default 64,128)
+    --indexshare-top-k             comma-list (default 4,8)
+    --indexshare-index-dim         (default 64)
+  --allow-msa                      multi-scale attention candidates
+    --msa-windows                  comma-list (default 512,1024)
+    --msa-dilated-top-k            comma-list
+    --msa-global-top-k             comma-list
 
 precision search
   --precision-modes        comma-list: bf16, fp8_ffn, fp8, fp4, mxfp4, mxfp6
@@ -222,9 +244,16 @@ outputs (paths)
   --no-shadow-prices        skip the shadow-price pass (faster)
   --max-candidates          optional greenfield cap after candidate dedupe
   --progress-every          print evaluation progress every N candidates
+                            (default auto: every 1000 on large searches)
   --quiet                   suppress progress logs
 ```
 </details>
+
+Training memory and DP communication assume FSDP/ZeRO-3: weights,
+gradients, and optimizer state are sharded across DP ranks. The training
+replica is `TP x PP x CP`; EP overlays DP for training but expands a serving
+instance. Compare topology choices with the emitted per-GPU, per-replica,
+and aggregate TPS fields rather than the legacy `training_tps` field alone.
 
 Alternatively you can also use yaml to pass in args (more details below):
 
@@ -313,8 +342,12 @@ Modifier mode writes **fixed file names** into the `--out` directory; the
 greenfield `--output-config` / `--output-*` path flags do not apply here
 and are ignored with a stderr warning.
 
-The modifier and greenfield share all other flags (precision, parallelism,
-state, MoE, MLA, MTP, CP, RoPE, NSA, YOCO).
+Modifier mode preserves the baseline's architecture family exactly (including
+state/MoE/MLA/compressed attention, MTP, CP, RoPE, NSA, YOCO, and local/global
+layout) while searching nearby depth, KV-head, FFN/expert-width, precision,
+KV-cache, and TP choices. Greenfield-only family-enabling flags do not add a
+new family to an existing baseline; use delta-eval for an explicit family
+transition or greenfield mode for a broad family search.
 
 
 ## Delta influence
@@ -369,7 +402,7 @@ Available delta names (REGISTRY):
 | `add_state_layers` | Replace a fraction of attention with a state mixer | `ratio` (e.g. `"1:3"`), `state_type` |
 | `densify_first_k` | Convert the first K MoE layers back to dense | `k` |
 | `change_moe_topology` | Reshape an MoE block | `n_experts`, `top_k` |
-| `change_precision_per_component` | Per-component weight / KV precision | `weight`, `kv` |
+| `change_precision_per_component` | Weight, activation, and KV precision | `weight`, `activation`, `kv` |
 | `change_parallelism` | Swap TP / PP / EP / CP degrees | `tp`, `pp`, `ep`, `cp` |
 | `scale_d_model` | Shift `d_model` by `delta`, aligned to `align` | `delta`, `align` |
 | `scale_n_layers` | Shift `n_layers` by `delta` | `delta` |
@@ -676,6 +709,22 @@ Two subcommands sharpen decisions without any training runs:
       --params 13 --tokens 2 --context 8192 --out out/plan
     ```
 
+### Cost estimates (optional layer)
+
+`--cost-usd` appends a `cost_estimate_usd` block (training_total /
+serving_per_1m_tokens / annual_serving_at_load) to any emitted config —
+greenfield and modifier. Pure-add: Pareto ranking and every existing
+field are unchanged, and with the flag off the output is byte-identical.
+
+```bash
+ac-compile --hardware h100 --params 7 --tokens 2 ... --cost-usd --price-tier on_demand
+```
+
+Price books live in `ac/pricing_specs/*.json` (on-demand / reserved-1y /
+spot, TDP, PUE) and are designed to be hot-updated — they are **list
+prices** with per-file provenance and access dates, not quotes. Demo:
+[`validation/e_pricing/`](validation/e_pricing/).
+
 ---
 
 ## Implementation export
@@ -723,10 +772,23 @@ components.
 |---|---|---:|---|---|
 | **NVIDIA H100 SXM** | 990 / 1980 / — | 80 GB | NVLink 4 (900 GB/s) | wmma 16×16 |
 | **NVIDIA B200** | 2 250 / 4 500 / 9 000 (MXFP4) | 192 GB | NVLink 5 (1.8 TB/s) | wmma + MX |
+| **NVIDIA GB200 NVL72** (rack-scale, 72× B200) | 2 250 / 4 500 / 9 000 (MXFP4) | 192 GB ×72 | NVLink 5 domain = 72 GPUs (1.8 TB/s per GPU, 130 TB/s rack); IB scale-out 400 Gb/s per GPU | wmma + MX |
+| **NVIDIA H800 SXM** (H100 export SKU) | 990 / 1980 / — | 80 GB | NVLink 4 reduced (400 GB/s) | wmma 16×16 |
 | **TPU v5p** | 459 BF16 / — / — | 95 GB | ICI mesh | MXU 128×128 |
 | **TPU v5e** | 197 BF16 / — / — | 16 GB | ICI mesh | MXU 128×128 |
 | **AWS Trainium 2** | 650 / 1 300 / — | 96 GB | NeuronLink v3 (1.28 TB/s) | NCv3 128×128 |
 | **AWS Trainium 3** | 1 300 / 2 600 / 5 200 (MX) | 192 GB | NeuronLink v4 (2.4 TB/s) | NCv4 + FP4 |
+
+`gb200_nvl72` and `h800` are *system-level* targets: the per-chip numbers are
+identical to B200 / H100 (same silicon); what changes is the fabric.
+`gb200_nvl72` models the full rack as one NVLink domain
+(`nvlink_domain_size = 72`), which is what makes rack-scale expert
+parallelism (EP up to 72) priceable — see
+[`validation/c_nvl72/report.md`](validation/c_nvl72/report.md) (EP=72 on the
+Pareto frontier for a 1T-class 288-expert MoE on NVL72 vs mandatory spill +
+a −21% training all-to-all tax on single-node H100). `h800` models the
+export-restricted H100 SKU whose NVLink is capped at 400 GB/s. Rack power,
+cooling, and failure rates are intentionally not modeled (see Roadmap).
 
 The numbers above are the **vendor datasheet** dense Tensor-Core peaks.
 The `peak_flops_tf` field inside `ac/hardware_specs/*.json` is an *effective*
@@ -744,6 +806,9 @@ datasheet. If you fork a spec, keep both fields in sync.
 | Full / MHA / GQA / MQA | `full` | (default; n_kv_heads sweeps) | `swap_attention_to_gqa` | — |
 | **MLA** (Multi-head Latent Attention) | `mla` | `--allow-mla --mla-kv-latent --mla-q-latent` | `swap_attention_to_mla` | DeepSeek-V2/V3 |
 | **NSA** (Native Sparse Attention) | `nsa` | `--nsa --nsa-{compress,select,window}-*` | — | DeepSeek 2025 |
+| **CSA** (Compressed Sparse Attention) | `csa` | `--allow-csa --csa-*` | — | block-compressed KV + top-k blocks |
+| **IndexShare** (bucketed lightning indexer) | `indexshare` | `--allow-indexshare --indexshare-*` | — | DSA-style shared top-k buckets |
+| **MSA** (multi-scale attention) | `msa` | `--allow-msa --msa-*` | — | local + dilated + global top-k |
 | **SWA** (Sliding Window Attention) | `full` + window | (via state-hybrid `--state-type sliding_window`) | `swap_attention_to_swa` | Mistral / Longformer |
 | **YOCO** (You Only Cache Once) | `architecture.yoco` | `--yoco --yoco-n-self-attn-layers --yoco-share-pattern` | — | Sun et al. 2024 (Microsoft) |
 
@@ -769,6 +834,9 @@ family controls which residual-quality term fires.
 
 Placement: `--placement-strategy first_periodic_last,interleaved,periodic`.
 State sizing (`d_state`) is SRAM-derived per hardware target.
+The CLI accepts the alias spellings above but emits canonical schema names
+where needed, e.g. `swa` / `local_recurrent` become `sliding_window`,
+`delta_net` becomes `deltanet`, and `gated_delta` becomes `gated_deltanet`.
 
 #### Parallelism axes
 
@@ -777,6 +845,7 @@ State sizing (`d_state`) is SRAM-derived per hardware target.
 | Tensor (TP) | `parallelism.tensor_parallel` | `--tp` |
 | Pipeline (PP) | `parallelism.pipeline_parallel` | `--pp` |
 | Data (DP) | `parallelism.data_parallel` | `--dp` |
+| Fixed training cluster | derived candidate-specific DP | `--training-cluster-gpus` |
 | **Expert (EP)** | `parallelism.expert_parallel` | `--ep-options` |
 | **Context (CP)** — Ring / Ulysses | `parallelism.context_parallel`, `cp_method` | `--cp --cp-method --cp-options` |
 
@@ -829,7 +898,7 @@ FP4/MX modes are available on B200 and Trainium 3.
 | `add_state_layers` | replace fraction of attention with a state mixer | `ratio`, `state_type` |
 | `densify_first_k` | first K MoE layers → dense | `k` |
 | `change_moe_topology` | reshape an MoE block | `n_experts`, `top_k` |
-| `change_precision_per_component` | per-component weight / KV precision | `weight`, `kv` |
+| `change_precision_per_component` | weight, activation, and KV precision | `weight`, `activation`, `kv` |
 | `change_parallelism` | swap TP / PP / EP / CP | `tp`, `pp`, `ep`, `cp` |
 | `scale_d_model` | shift `d_model`, aligned to `align` | `delta`, `align` |
 | `scale_n_layers` | shift `n_layers` | `delta` |
@@ -842,8 +911,27 @@ Qwen3-{8B, 32B}   DeepSeek-V3   Kimi-K2.5   GLM-5.1
 GPT-OSS-120B   MAI-Base-1
 ```
 
+
 ---
 
+## Roadmap to boundaries
+
+Future plans to our current boundaries with needs.
+
+- **Datamix dimension to quality spline** Cross-corpus absolute-loss
+  error is 10–22% with intervals too narrow to cover it (E2: 0/3 CI
+  coverage — published, not hidden). Use AC ordinally, or fit
+  per-datamix calibration packs (`ac-auto-calibrate fit`) as designed.
+- **Training-efficiency bucket runs ~10 pp low** against reported
+  frontier-lab MFU (E1 T2 anchors). Same fix: lab-local calibration.
+- **Optimizer-agnostic**: assumes AdamW-family scaling; Muon-class
+  optimizers shift the exponents and are not modeled.
+- **Hardware coverage**: no TPU v6/v7, AMD MI300/MI355, Ascend 910B/C.
+- **EP granularity**: EP must divide `n_experts`.
+- Data recipes, tokenizers, and post-training effects are out of scope
+  for the current stage (stated boundaries, not oversights).
+
+---
 
 ## Repository layout
 

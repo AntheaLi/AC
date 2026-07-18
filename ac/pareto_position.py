@@ -178,6 +178,8 @@ def _baseline_fingerprint(c: CandidateArch) -> Tuple:
 def _constraints_fingerprint(con: DeploymentConstraints) -> Tuple:
     return (
         int(con.tp), int(con.pp), int(con.dp),
+        int(getattr(con, "training_cluster_gpus", 0) or 0),
+        int(getattr(con, "max_training_cluster_gpus", 0) or 0),
         int(con.target_params_b * 1000),
         int(con.context_length or 0),
         int(con.prompt_len or 0),

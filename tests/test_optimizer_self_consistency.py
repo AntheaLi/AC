@@ -154,7 +154,6 @@ class HarmonizationPassesNoOpTests(unittest.TestCase):
         already consistent within the same (params, tokens, ctx, arch_mode);
         invoking the harmonization passes manually must not change any row."""
         import copy
-        sys.path.insert(0, str(ROOT / "scripts"))
         from _generator_payload import (
             _harmonize_serving_train_metrics, _harmonize_loss_across_hw,
         )

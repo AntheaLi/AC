@@ -18,7 +18,11 @@ class DensifyFirstK(Transformation):
     def apply(self, arch, k: int = 3):
         if k < 0:
             raise ValueError("k must be >= 0")
+        if k >= arch.n_layers:
+            raise ValueError(
+                f"k={k} must be < n_layers={arch.n_layers}; densifying the "
+                "entire stack is a dense conversion, not a first-K MoE prefix")
         out = _copy_arch(arch)
-        out.n_dense_ffn_layers = min(k, arch.n_layers - 1)
+        out.n_dense_ffn_layers = k
         _record_applied(out, self.name)
         return out

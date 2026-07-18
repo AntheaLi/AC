@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from typing import Any, Dict
@@ -40,7 +41,7 @@ from delta_engine import apply_transitions, rank_transitions  # noqa: E402
 from deltas import REGISTRY  # noqa: E402
 
 
-VALID_HARDWARE = ["h100", "b200", "tpu_v5e", "tpu_v5p",
+VALID_HARDWARE = ["h100", "b200", "gb200_nvl72", "h800", "tpu_v5e", "tpu_v5p",
                   "trainium2", "trn2", "trainium3", "trn3"]
 
 # Same map used in throughput_model.evaluate_known.
@@ -66,6 +67,21 @@ def _coerce(s: str) -> Any:
     return s
 
 
+def _json_ready(value: Any) -> Any:
+    """Return a strict-JSON-safe copy of nested stress diagnostics."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_ready(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(v) for v in value]
+    return value
+
+
+def _emit_json(value: Any) -> None:
+    print(json.dumps(_json_ready(value), indent=2, allow_nan=False))
+
+
 def _parse_apply_spec(spec: str) -> tuple[str, Dict[str, Any]]:
     """Parse NAME, NAME:k=v,k=v, or NAME{k=v,k=v} for stress ranking."""
     raw = (spec or "").strip()
@@ -88,6 +104,39 @@ def _parse_apply_spec(spec: str) -> tuple[str, Dict[str, Any]]:
         key, value = chunk.split("=", 1)
         params[key.strip()] = _coerce(value.strip())
     return name.strip(), params
+
+
+def _split_apply_specs(raw_group: str) -> list[str]:
+    """Split comma-separated transformation names without splitting kwargs.
+
+    ``--apply a,b`` is a convenient legacy form, while inline specs use the
+    same comma as ``name:k=v,k2=v2``. A chunk starts a new transformation
+    only when it has no ``=`` before its ``:``/``{`` delimiter; otherwise it
+    continues the current inline argument body.
+    """
+    specs: list[str] = []
+    current = ""
+    for raw_chunk in (raw_group or "").split(","):
+        chunk = raw_chunk.strip()
+        if not chunk:
+            continue
+        eq_pos = chunk.find("=")
+        delimiters = [p for p in (chunk.find(":"), chunk.find("{")) if p >= 0]
+        delimiter_pos = min(delimiters) if delimiters else -1
+        starts_spec = (
+            eq_pos < 0
+            or (delimiter_pos >= 0 and delimiter_pos < eq_pos)
+        )
+        if current and starts_spec:
+            specs.append(current)
+            current = chunk
+        elif current:
+            current += "," + chunk
+        else:
+            current = chunk
+    if current:
+        specs.append(current)
+    return specs
 
 
 def _positive_int(v: str) -> int:
@@ -388,7 +437,7 @@ def _resolve_parallelism(args, arch) -> dict:
     """
     declared = getattr(arch, "_parallelism", {}) or {}
     out = {}
-    for key in ("tp", "pp", "ep", "dp"):
+    for key in ("tp", "pp", "ep", "dp", "cp"):
         flag = getattr(args, key, None)
         out[key] = int(flag if flag is not None else (declared.get(key) or 0) or 1)
     if getattr(arch, "moe_config", None) and out["ep"] < 2:
@@ -416,11 +465,11 @@ def cmd_stress(args) -> int:
     sv = compute_throughput_stress(
         arch, args.hw, wl,
         tp_degree=par["tp"], pp_degree=par["pp"], ep_degree=par["ep"],
-        dp_degree=par["dp"],
+        dp_degree=par["dp"], cp_degree=par["cp"],
         arch_name=name,
     )
     if args.json:
-        print(json.dumps(sv.as_dict(), indent=2, default=float))
+        _emit_json(sv.as_dict())
     else:
         print(sv.pretty())
     return 0
@@ -448,7 +497,7 @@ def cmd_quality(args) -> int:
     workload_spec = {"context_length": args.decode_kv}
     qsv = compute_quality_stress(arch, training, workload_spec, arch_name=name)
     if args.json:
-        print(json.dumps(qsv.as_dict(), indent=2, default=float))
+        _emit_json(qsv.as_dict())
     else:
         print(qsv.pretty())
     return 0
@@ -475,7 +524,7 @@ def cmd_transition(args) -> int:
     if args.apply:
         try:
             for raw_group in args.apply:
-                for spec in raw_group.split(","):
+                for spec in _split_apply_specs(raw_group):
                     if spec.strip():
                         requested.append(_parse_apply_spec(spec))
         except ValueError as exc:
@@ -528,12 +577,12 @@ def cmd_transition(args) -> int:
         arch, pairs,
         hardware=args.hw, workload=wl,
         tp_degree=par["tp"], pp_degree=par["pp"], ep_degree=par["ep"],
-        dp_degree=par["dp"],
+        dp_degree=par["dp"], cp_degree=par["cp"],
         baseline_name=name,
     )
     ranked = rank_transitions(transitions)
     if args.json:
-        print(json.dumps([t.as_dict() for t in transitions], indent=2, default=float))
+        _emit_json([t.as_dict() for t in transitions])
         return 0
     print(f"Baseline: {name}   hw={args.hw}   workload=batch={args.batch} "
           f"prefill={args.prefill_seq} kv={args.decode_kv} phase={args.phase}")
@@ -658,6 +707,7 @@ def main(argv=None) -> int:
     p_stress.add_argument("--pp", type=_positive_int, default=None)
     p_stress.add_argument("--ep", type=_positive_int, default=None)
     p_stress.add_argument("--dp", type=_positive_int, default=None)
+    p_stress.add_argument("--cp", type=_positive_int, default=None)
     p_stress.add_argument("--json", action="store_true")
     p_stress.set_defaults(func=cmd_stress)
 
@@ -687,6 +737,8 @@ def main(argv=None) -> int:
     p_t.add_argument("--tp", type=_positive_int, default=None)
     p_t.add_argument("--pp", type=_positive_int, default=None)
     p_t.add_argument("--ep", type=_positive_int, default=None)
+    p_t.add_argument("--dp", type=_positive_int, default=None)
+    p_t.add_argument("--cp", type=_positive_int, default=None)
     p_t.add_argument(
         "--apply", action="append", default=None,
         help=(

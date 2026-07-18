@@ -36,8 +36,8 @@ from ac.optimizer import (  # noqa: E402
 )
 
 
-def _per_gpu_train_tps(arch, ep, tp=8, pp=2):
-    r = throughput(arch, "h100", tp_degree=tp, pp_degree=pp, dp_degree=8,
+def _per_gpu_train_tps(arch, ep, tp=8, pp=2, dp=32):
+    r = throughput(arch, "h100", tp_degree=tp, pp_degree=pp, dp_degree=dp,
                    ep_degree=ep)
     return r.training_throughput_tokens_per_sec / (tp * pp)
 
@@ -72,14 +72,16 @@ def _small_moe_arch(batch=1):
 class TestMoeTrainingThroughput:
     def test_equal_active_moe_within_published_band_of_dense(self):
         """The release-review band: real MoE training runs ~1.2-2.5x below
-        equal-active dense per GPU, not ~20x."""
+        equal-active dense per GPU, not ~20x. The upper edge is 3x after
+        correcting ZeRO ownership: dense optimizer state shards over all DP,
+        while expert state shards over EDP=DP/EP."""
         dense = _per_gpu_train_tps(_dense_34b(), ep=1)
         for shared in (False, True):
             moe = _per_gpu_train_tps(_moe_34b(shared=shared), ep=8)
             ratio = dense / moe
-            assert 1.1 <= ratio <= 2.5, (
+            assert 1.1 <= ratio <= 3.0, (
                 f"dense/MoE per-GPU training ratio {ratio:.2f} outside the "
-                f"[1.1, 2.5] plausibility band (shared={shared}); "
+                f"[1.1, 3.0] plausibility band (shared={shared}); "
                 "EP token accounting or a2a overlap has regressed")
 
     def test_moe_tps_independent_of_ep_within_nvlink_domain(self):
@@ -125,10 +127,10 @@ class TestEpDpCap(unittest.TestCase):
     """EP > DP is unreachable at greenfield enumeration."""
 
     def test_helper_drops_ep_above_dp(self):
-        # default_ep_options for b200 goes to 72; DP=4 must cap to {2, 4}.
+        # EP=1 is legal; options above DP remain unreachable.
         self.assertEqual(
             _filter_ep_options_by_dp([1, 2, 4, 8, 16, 32, 64, 72], dp=4),
-            [2, 4],
+            [1, 2, 4],
         )
 
     def test_helper_keeps_ep_le_dp(self):
@@ -137,11 +139,16 @@ class TestEpDpCap(unittest.TestCase):
             [2, 4, 8],
         )
 
-    def test_helper_drops_ep_lt_2(self):
-        # EP=1 is unreachable — every rank would hold every expert.
+    def test_helper_keeps_legal_tp_sharded_ep1(self):
         self.assertEqual(
             _filter_ep_options_by_dp([1, 2], dp=8),
-            [2],
+            [1, 2],
+        )
+
+    def test_helper_requires_ep_to_divide_dp(self):
+        self.assertEqual(
+            _filter_ep_options_by_dp([1, 2, 3, 4, 6, 8], dp=8),
+            [1, 2, 4, 8],
         )
 
     def test_user_supplied_ep_all_gt_dp_raises(self):

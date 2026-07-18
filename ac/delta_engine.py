@@ -71,14 +71,79 @@ def _arch_hash(arch: TArchConfig) -> str:
 
 def _parallelism_for(
     arch: TArchConfig,
-    defaults: Tuple[int, int, int, int],
-) -> Tuple[int, int, int, int]:
+    defaults: Tuple[int, int, int, int, int],
+) -> Tuple[int, int, int, int, int]:
     """Read parallelism overrides set by ChangeParallelism, fall back to defaults."""
     tp = getattr(arch, "_tp_override", defaults[0])
     pp = getattr(arch, "_pp_override", defaults[1])
     ep = getattr(arch, "_ep_override", defaults[2])
     dp = getattr(arch, "_dp_override", defaults[3])
-    return tp, pp, ep, dp
+    cp = getattr(arch, "_cp_override", defaults[4])
+    return tp, pp, ep, dp, cp
+
+
+def _structural_execution_error(
+    arch: TArchConfig,
+    *,
+    tp: int,
+    pp: int,
+    ep: int,
+    dp: int,
+    cp: int,
+) -> str:
+    """Return a schema/execution-plan mismatch, or an empty string.
+
+    Delta evaluation used to pass arbitrary parallelism and head layouts
+    straight into the analytic models. That priced candidates greenfield
+    generation and config validation would never emit. Keep this central so
+    every current and future transformation receives the same guard.
+    """
+    for name, value in (("tp", tp), ("pp", pp), ("ep", ep),
+                        ("dp", dp), ("cp", cp)):
+        if int(value) < 1:
+            return f"{name} must be >= 1"
+
+    n_heads = int(getattr(arch, "n_heads", 0) or 0)
+    n_kv = int(getattr(arch, "n_kv_heads", 0) or 0)
+    d_model = int(getattr(arch, "d_model", 0) or 0)
+    ffn_dim = int(getattr(arch, "ffn_dim", 0) or 0)
+    n_layers = int(getattr(arch, "n_layers", 0) or 0)
+    if n_kv < 1 or n_heads % n_kv != 0:
+        return f"n_kv_heads={n_kv} must divide n_heads={n_heads}"
+    if d_model % tp != 0 or n_heads % tp != 0:
+        return (
+            f"TP={tp} must divide d_model={d_model} and n_heads={n_heads}")
+    if n_kv < tp and tp % n_kv != 0:
+        return (
+            f"TP={tp} is incompatible with n_kv_heads={n_kv}; when KV "
+            "heads are fewer than TP, TP must divide into KV groups evenly")
+    if ffn_dim % tp != 0:
+        return f"TP={tp} must divide ffn_dim={ffn_dim}"
+    if pp > 1 and n_layers % pp != 0:
+        return f"PP={pp} must divide n_layers={n_layers}"
+
+    moe = getattr(arch, "moe_config", None)
+    if moe:
+        n_experts = int(moe.get("n_experts", 0) or 0)
+        expert_dim = int(moe.get("expert_dim", ffn_dim) or ffn_dim)
+        if dp > 1 and (ep > dp or dp % ep != 0):
+            return f"EP={ep} must divide DP={dp} when EP overlays DP"
+        if n_experts % ep != 0:
+            return f"EP={ep} must divide n_experts={n_experts}"
+        if expert_dim % tp != 0:
+            return f"TP={tp} must divide MoE expert_dim={expert_dim}"
+    elif ep != 1:
+        return f"EP={ep} is meaningless for a dense FFN; use EP=1"
+
+    layer_types = list(getattr(arch, "layer_type_list", None) or [])
+    has_attention = not layer_types or any(
+        kind in ("attention", "local_attention") for kind in layer_types)
+    if cp > 1 and not has_attention:
+        return "CP>1 is unsupported for a pure-state stack"
+    if (cp > 1 and str(getattr(arch, "cp_method", "ring")) == "ulysses"
+            and n_heads % cp != 0):
+        return f"Ulysses CP={cp} must divide n_heads={n_heads}"
+    return ""
 
 
 def apply_transition(
@@ -92,6 +157,7 @@ def apply_transition(
     pp_degree: int = 1,
     ep_degree: int = 1,
     dp_degree: int = 1,
+    cp_degree: int = 1,
     training: Optional[TrainingConfig] = None,
     baseline_name: str = "",
     _baseline_stress: Optional[StressVector] = None,
@@ -138,16 +204,30 @@ def apply_transition(
         )
 
     # --- read parallelism overrides from the candidate ---
-    c_tp, c_pp, c_ep, c_dp = _parallelism_for(
-        candidate, (tp_degree, pp_degree, ep_degree, dp_degree)
+    c_tp, c_pp, c_ep, c_dp, c_cp = _parallelism_for(
+        candidate, (tp_degree, pp_degree, ep_degree, dp_degree, cp_degree)
     )
+    structural_error = _structural_execution_error(
+        candidate, tp=c_tp, pp=c_pp, ep=c_ep, dp=c_dp, cp=c_cp)
+    if structural_error:
+        return Transition(
+            transformation_name=transformation.name,
+            transformation_params=dict(params),
+            baseline_architecture_id=_arch_hash(baseline),
+            candidate_architecture_id=_arch_hash(candidate),
+            hardware_id=hardware,
+            workload_id=workload.workload_id(),
+            feasible=False,
+            reason_if_infeasible=(
+                f"structural_validation_failed: {structural_error}"),
+        )
 
     # --- stress vectors ---
     if _baseline_stress is None:
         b_stress = compute_throughput_stress(
             baseline, hardware, workload,
             tp_degree=tp_degree, pp_degree=pp_degree, ep_degree=ep_degree,
-            dp_degree=dp_degree,
+            dp_degree=dp_degree, cp_degree=cp_degree,
             arch_name=baseline_name or "baseline",
         )
     else:
@@ -156,7 +236,7 @@ def apply_transition(
         c_stress = compute_throughput_stress(
             candidate, hardware, workload,
             tp_degree=c_tp, pp_degree=c_pp, ep_degree=c_ep,
-            dp_degree=c_dp,
+            dp_degree=c_dp, cp_degree=c_cp,
             arch_name=f"{baseline_name or 'baseline'}+{transformation.name}",
         )
     except Exception as e:
@@ -216,6 +296,7 @@ def apply_transitions(
     pp_degree: int = 1,
     ep_degree: int = 1,
     dp_degree: int = 1,
+    cp_degree: int = 1,
     training: Optional[TrainingConfig] = None,
     baseline_name: str = "",
 ) -> List[Transition]:
@@ -230,7 +311,7 @@ def apply_transitions(
     b_stress = compute_throughput_stress(
         baseline, hardware, workload,
         tp_degree=tp_degree, pp_degree=pp_degree, ep_degree=ep_degree,
-        dp_degree=dp_degree,
+        dp_degree=dp_degree, cp_degree=cp_degree,
         arch_name=baseline_name or "baseline",
     )
     out: List[Transition] = []
@@ -252,7 +333,7 @@ def apply_transitions(
             baseline, xf, params or {},
             hardware=hardware, workload=workload,
             tp_degree=tp_degree, pp_degree=pp_degree, ep_degree=ep_degree,
-            dp_degree=dp_degree,
+            dp_degree=dp_degree, cp_degree=cp_degree,
             training=training, baseline_name=baseline_name,
             _baseline_stress=b_stress,
         )

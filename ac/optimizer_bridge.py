@@ -11,6 +11,7 @@ to this bridge, not to every caller.
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Optional
 
 try:
@@ -62,12 +63,32 @@ def candidate_to_arch(candidate, *, batch_size: int = 1, seq_len: int = 2048) ->
         vocab_size=candidate.vocab_size,
         batch_size=batch_size,
         seq_len=seq_len,
-        precision=getattr(candidate, "weight_precision", "bf16") or "bf16",
+        # Wave 35 fix: the canonical forward mapping
+        # (optimizer.evaluate_candidate) uses ffn_precision as the
+        # dominant throughput precision; this bridge passed
+        # weight_precision, so any delta round-trip on an fp8-FFN
+        # baseline silently flipped the candidate to bf16 FFN (phantom
+        # `ffn_precision fp8→bf16` in field_changes, contaminated
+        # TBT/TTFT deltas). Match the canonical convention, which the
+        # reverse bridge (evaluator.arch_to_candidate) already assumes.
+        precision=(getattr(candidate, "ffn_precision", None)
+                   or getattr(candidate, "weight_precision", "bf16")
+                   or "bf16"),
+        weight_precision=str(
+            getattr(candidate, "weight_precision", "bf16") or "bf16"),
+        activation_precision=str(
+            getattr(candidate, "activation_precision", "bf16") or "bf16"),
+        attn_precision=copy.deepcopy(
+            getattr(candidate, "attn_precision", None) or {
+                "qk": "bf16", "v": "bf16", "output": "bf16",
+            }),
         kv_precision=_kv_precision(getattr(candidate, "kv_cache_bits", 16)),
         moe_config=getattr(candidate, "moe", None),
         n_dense_ffn_layers=getattr(candidate, "n_dense_ffn_layers", 0),
         state_config=getattr(candidate, "state_config", None),
         layer_type_list=getattr(candidate, "layer_type_list", None),
+        placement_strategy=str(
+            getattr(candidate, "placement_strategy", "none") or "none"),
         # Attention variant (drives kv_bytes_per_token_per_layer and the
         # per-layer attention cost in the throughput model).
         attention_type=str(getattr(candidate, "attention_type", "full") or "full"),
@@ -90,8 +111,21 @@ def candidate_to_arch(candidate, *, batch_size: int = 1, seq_len: int = 2048) ->
         msa_dilated_top_k=_opt_int("msa_dilated_top_k"),
         msa_global_top_k=_opt_int("msa_global_top_k"),
         yoco_n_self_attn_layers=int(getattr(candidate, "yoco_n_self_attn_layers", 0) or 0),
+        yoco_share_pattern=str(
+            getattr(candidate, "yoco_share_pattern", "single_source")
+            or "single_source"),
         mtp_n_predict_depths=int(getattr(candidate, "mtp_n_predict_depths", 0) or 0),
         mtp_depth_n_layers=int(getattr(candidate, "mtp_depth_n_layers", 1) or 1),
+        mtp_train_loss_weight=float(
+            getattr(candidate, "mtp_train_loss_weight", 0.3) or 0.3),
+        rope_scaling_method=str(
+            getattr(candidate, "rope_scaling_method", "none") or "none"),
+        rope_scaling_factor=float(
+            getattr(candidate, "rope_scaling_factor", 1.0) or 1.0),
+        rope_original_max_position=int(
+            getattr(candidate, "rope_original_max_position", 8192) or 8192),
+        sparsity_2_4=copy.deepcopy(
+            getattr(candidate, "sparsity_2_4", None)),
         cp_degree=int(getattr(candidate, "cp_degree", 1) or 1),
         cp_method=str(getattr(candidate, "cp_method", "ring") or "ring"),
     )
@@ -150,6 +184,7 @@ def stress_for_candidate(
         pp_degree=max(1, int(pp_degree)),
         ep_degree=max(1, int(ep_degree)),
         dp_degree=max(1, int(dp_degree)),
+        cp_degree=max(1, int(getattr(arch, "cp_degree", 1) or 1)),
         arch_name=arch_name,
     )
 

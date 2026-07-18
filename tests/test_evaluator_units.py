@@ -104,6 +104,10 @@ class ArchChangesTests(unittest.TestCase):
         self.assertIn("attention.n_layers", names)
         self.assertIn("state.hybrid_ratio", names)
         self.assertIn("state.placement_strategy", names)
+        attention_row = next(
+            ch for ch in changes if ch["field"] == "attention.n_layers")
+        self.assertEqual(attention_row["baseline"], 32)
+        self.assertEqual(attention_row["candidate"], 24)
 
     def test_mla_swap_surfaces_attention_type_and_latent(self):
         """B1: swap_attention_to_mla sets attention_type + MLA latent
@@ -266,7 +270,6 @@ class TpSearchTests(unittest.TestCase):
 
     def test_tp_search_respects_nvlink_domain(self):
         import sys as _sys, os as _os
-        _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
         from _generator_payload import (
             context_aware_parallelism, NVLINK_DOMAIN_SIZE_SEARCH,
         )

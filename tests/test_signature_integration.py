@@ -55,7 +55,6 @@ class SerializeCandidateEmitsSignatureTests(unittest.TestCase):
 
     def _serialize(self, cand):
         from ac.optimizer import DeploymentConstraints, evaluate_candidate
-        sys.path.insert(0, str(ROOT / "scripts"))
         from _generator_payload import serialize_candidate
         c = DeploymentConstraints(
             target_params_b=7.0, training_tokens=int(2e12),
@@ -95,7 +94,6 @@ class DecisionBlockCarriesSignatureTests(unittest.TestCase):
 
     def _decision(self, cand):
         from ac.optimizer import DeploymentConstraints, evaluate_candidate
-        sys.path.insert(0, str(ROOT / "scripts"))
         from _generator_payload import (
             serialize_candidate, _build_decision_diagnostics,
         )
@@ -185,7 +183,6 @@ class HandRolledClassifiersAgreeTests(unittest.TestCase):
 
     def test_generator_payload_and_signature_agree(self):
         from ac.architecture import architecture_signature
-        sys.path.insert(0, str(ROOT / "scripts"))
         from _generator_payload import _arch_family_from_optimal
         # Build a serialized-optimal-shaped dict for each case.
         for label, cand in self._cases():

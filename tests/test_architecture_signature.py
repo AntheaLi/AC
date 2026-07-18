@@ -300,7 +300,7 @@ class NoHandwrittenFamilyLabelTests(unittest.TestCase):
                       "optimizer._family_key must route through architecture_signature")
 
     def test_generator_payload_arch_family_routes_through_signature(self):
-        gen_path = ROOT / "scripts" / "_generator_payload.py"
+        gen_path = ROOT / "tests" / "_generator_payload.py"
         src = gen_path.read_text()
         self.assertIn("architecture_signature", src,
                       "_arch_family in _generator_payload must route through "

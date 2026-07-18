@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
@@ -100,6 +101,129 @@ class ParameterLedger:
         return dataclasses.asdict(self)
 
 
+@dataclass(frozen=True)
+class ParameterByteLedger:
+    """Physical stored bytes for the categories in :class:`ParameterLedger`.
+
+    Component precision is part of architecture identity. In particular,
+    an ``ffn_fp8`` candidate keeps embeddings and attention weights in BF16;
+    charging the whole model at the FFN precision silently turns that mode
+    into ``all_fp8`` in every memory and communication estimate.
+    """
+
+    embeddings: float
+    norms: float
+    attention: float
+    dense_ffn: float
+    state: float
+    expert_active: float
+    expert_total: float
+    shared_expert: float
+    mtp: float
+
+    @property
+    def shared_bytes(self) -> float:
+        return (
+            self.embeddings
+            + self.norms
+            + self.attention
+            + self.dense_ffn
+            + self.state
+            + self.shared_expert
+            + self.mtp
+        )
+
+    @property
+    def active_bytes(self) -> float:
+        return self.shared_bytes + self.expert_active
+
+    @property
+    def total_bytes(self) -> float:
+        return self.shared_bytes + self.expert_total
+
+    def as_dict(self) -> Dict[str, float]:
+        return dataclasses.asdict(self)
+
+
+@dataclass(frozen=True)
+class TrainingParameterLayout:
+    """Resident and ZeRO-3-owned parameters for one training rank.
+
+    EP partitions the DP dimension. Shared parameters have a DP group of
+    size ``dp``; expert parameters are resident on one EP shard and have an
+    expert-data-parallel group of size ``dp / ep``. Consequently the total
+    ZeRO-3-owned parameter count is independent of EP at fixed DP.
+    """
+
+    shared_resident_params: float
+    expert_resident_params: float
+    shared_zero3_params: float
+    expert_zero3_params: float
+    expert_data_parallel_degree: int
+
+    @property
+    def resident_params(self) -> float:
+        return self.shared_resident_params + self.expert_resident_params
+
+    @property
+    def zero3_params(self) -> float:
+        return self.shared_zero3_params + self.expert_zero3_params
+
+
+def training_parameter_layout(
+    arch_or_ledger: Any,
+    *,
+    tp: int = 1,
+    pp: int = 1,
+    dp: int = 1,
+    ep: int = 1,
+) -> TrainingParameterLayout:
+    """Return canonical EP-over-DP training parameter ownership.
+
+    ``dp <= 1`` retains the historical single-cell probe behavior where EP
+    can be supplied without a complete training world. Real distributed
+    layouts (``dp > 1``) require EP to divide DP exactly.
+    """
+    ledger = (
+        arch_or_ledger
+        if isinstance(arch_or_ledger, ParameterLedger)
+        else parameter_ledger(arch_or_ledger)
+    )
+    tp_i = max(1, int(tp))
+    pp_i = max(1, int(pp))
+    dp_i = max(1, int(dp))
+    ep_i = max(1, int(ep))
+    if ledger.expert_total and dp_i > 1 and (
+        ep_i > dp_i or dp_i % ep_i != 0
+    ):
+        raise ValueError(
+            f"EP={ep_i} must divide DP={dp_i} when EP overlays the DP dimension"
+        )
+
+    shared_resident = ledger.shared_params / (tp_i * pp_i)
+    expert_resident = ledger.expert_total / (tp_i * pp_i * ep_i)
+    expert_dp = max(1, dp_i // ep_i) if ledger.expert_total else dp_i
+    return TrainingParameterLayout(
+        shared_resident_params=shared_resident,
+        expert_resident_params=expert_resident,
+        shared_zero3_params=shared_resident / dp_i,
+        expert_zero3_params=expert_resident / expert_dp,
+        expert_data_parallel_degree=expert_dp,
+    )
+
+
+def format_state_attention_ratio(n_state: int, n_attention: int) -> str:
+    """Return the exact reduced ``state:attention`` layer-count ratio."""
+    state = max(0, int(n_state))
+    attention = max(0, int(n_attention))
+    if state == 0:
+        return "pure_attention"
+    if attention == 0:
+        return "pure_state"
+    divisor = math.gcd(state, attention)
+    return f"{state // divisor}:{attention // divisor}"
+
+
 def parameter_ledger(arch: Any) -> ParameterLedger:
     """Return canonical active/total parameter accounting for ``arch``.
 
@@ -129,12 +253,17 @@ def parameter_ledger(arch: Any) -> ParameterLedger:
         c_q = int(_get(arch, "mla_q_latent_dim", 0) or 0)
         d_rope = int(_get(arch, "mla_rope_head_dim", 0) or 0)
         d_nope = int(_get(arch, "mla_nope_head_dim", d_head - d_rope) or 0)
+        query_projection = (
+            d * c_q + c_q * n_heads * (d_nope + d_rope)
+            if c_q > 0
+            # c_q=0 means an ordinary direct Q projection, not no Q path.
+            else d * n_heads * d_head
+        )
         per_layer_attention = (
             d * c_kv
             + d * d_rope
             + 2 * c_kv * n_heads * d_nope
-            + d * c_q
-            + c_q * n_heads * (d_nope + d_rope)
+            + query_projection
             + n_heads * d_nope * d
         )
     else:
@@ -214,6 +343,182 @@ def parameter_ledger(arch: Any) -> ParameterLedger:
         expert_total=expert_total,
         shared_expert=shared_expert,
         mtp=mtp,
+    )
+
+
+_PRECISION_STORAGE_BYTES = {
+    "bf16": 2.0,
+    "fp16": 2.0,
+    "fp32": 4.0,
+    "tf32": 4.0,
+    "fp8": 1.0,
+    "int8": 1.0,
+    "fp4": 0.5,
+    "int4": 0.5,
+    # OCP MX formats include one shared scale byte per 32 elements.
+    "mxfp4": 0.53,
+    "mxfp6": 0.78,
+}
+
+
+def precision_bytes_per_element(precision: str) -> float:
+    """Canonical physical storage width for one precision element."""
+    return _PRECISION_STORAGE_BYTES.get(str(precision or "bf16"), 2.0)
+
+
+def _attention_projection_params_per_layer(arch: Any) -> Dict[str, float]:
+    """Split the canonical attention count into QKV and output weights."""
+    d = int(_get(arch, "d_model", 0) or 0)
+    n_heads = int(_get(arch, "n_heads", 0) or 0)
+    d_head = int(_get(arch, "d_head", 0) or 0)
+    n_kv = int(_get(arch, "n_kv_heads", n_heads) or n_heads)
+    attention_type = str(_get(arch, "attention_type", "full") or "full")
+    if attention_type == "mla" and int(
+        _get(arch, "mla_kv_latent_dim", _get(arch, "mla_latent_dim", 0)) or 0
+    ) > 0:
+        c_kv = int(
+            _get(arch, "mla_kv_latent_dim", _get(arch, "mla_latent_dim", 0))
+            or 0
+        )
+        c_q = int(_get(arch, "mla_q_latent_dim", 0) or 0)
+        d_rope = int(_get(arch, "mla_rope_head_dim", 0) or 0)
+        d_nope = int(_get(arch, "mla_nope_head_dim", d_head - d_rope) or 0)
+        query = (
+            d * c_q + c_q * n_heads * (d_nope + d_rope)
+            if c_q > 0 else d * n_heads * d_head
+        )
+        shared_kv_down = d * c_kv
+        key = d * d_rope + c_kv * n_heads * d_nope + shared_kv_down / 2
+        value = c_kv * n_heads * d_nope + shared_kv_down / 2
+        output = n_heads * d_nope * d
+        return {"q": query, "k": key, "v": value, "output": output}
+    return {
+        "q": d * d_head * n_heads,
+        "k": d * d_head * n_kv,
+        "v": d * d_head * n_kv,
+        "output": d_head * n_heads * d,
+    }
+
+
+def parameter_byte_ledger(arch: Any) -> ParameterByteLedger:
+    """Return component-precision-aware physical parameter bytes."""
+    ledger = parameter_ledger(arch)
+    weight_precision = str(_get(arch, "weight_precision", "bf16") or "bf16")
+    ffn_precision = str(
+        _get(arch, "ffn_precision", _get(arch, "precision", weight_precision))
+        or weight_precision
+    )
+    attn_precision = dict(_get(arch, "attn_precision", {}) or {})
+    # ``v`` is AC's QKV projection storage/compute precision. ``qk`` is the
+    # accumulator/logit precision and therefore does not change weight bytes.
+    qkv_precision = str(attn_precision.get("v", weight_precision) or weight_precision)
+    output_precision = str(
+        attn_precision.get("output", attn_precision.get("o", weight_precision))
+        or weight_precision
+    )
+    weight_bpe = precision_bytes_per_element(weight_precision)
+    ffn_bpe = precision_bytes_per_element(ffn_precision)
+
+    projection_params = _attention_projection_params_per_layer(arch)
+    projection_total = sum(projection_params.values())
+    projection_bytes = (
+        (projection_params["q"] + projection_params["k"]
+         + projection_params["v"])
+        * precision_bytes_per_element(qkv_precision)
+        + projection_params["output"]
+        * precision_bytes_per_element(output_precision)
+    )
+    attention_bytes = (
+        ledger.attention * projection_bytes / projection_total
+        if projection_total > 0 else 0.0
+    )
+
+    state_cfg = _get(arch, "state_config", None) or {}
+    state_precision = str(
+        state_cfg.get("state_precision", weight_precision) or weight_precision
+    )
+    moe = _get(arch, "moe", None) or _get(arch, "moe_config", None) or {}
+    expert_precision = str(
+        moe.get("expert_precision", moe.get("precision", ffn_precision))
+        or ffn_precision
+    )
+    shared = moe.get("shared_expert")
+    shared_precision = (
+        str(shared.get("precision", expert_precision) or expert_precision)
+        if isinstance(shared, dict) else expert_precision
+    )
+
+    d = int(_get(arch, "d_model", 0) or 0)
+    ffn_dim = int(_get(arch, "ffn_dim", 0) or 0)
+    mtp_depths = int(_get(arch, "mtp_n_predict_depths", 0) or 0)
+    mtp_layers = int(_get(arch, "mtp_depth_n_layers", 1) or 1)
+    mtp_bytes = mtp_depths * mtp_layers * (
+        projection_bytes + 3 * d * ffn_dim * ffn_bpe + 2 * d * weight_bpe
+    )
+
+    return ParameterByteLedger(
+        embeddings=ledger.embeddings * weight_bpe,
+        norms=ledger.norms * weight_bpe,
+        attention=attention_bytes,
+        dense_ffn=ledger.dense_ffn * ffn_bpe,
+        state=ledger.state * precision_bytes_per_element(state_precision),
+        expert_active=(
+            ledger.expert_active * precision_bytes_per_element(expert_precision)
+        ),
+        expert_total=(
+            ledger.expert_total * precision_bytes_per_element(expert_precision)
+        ),
+        shared_expert=(
+            ledger.shared_expert * precision_bytes_per_element(shared_precision)
+        ),
+        mtp=mtp_bytes,
+    )
+
+
+@dataclass(frozen=True)
+class TrainingParameterByteLayout:
+    """Resident and ZeRO-3-owned parameter bytes for one training rank."""
+
+    shared_resident_bytes: float
+    expert_resident_bytes: float
+    shared_zero3_bytes: float
+    expert_zero3_bytes: float
+    expert_data_parallel_degree: int
+
+    @property
+    def resident_bytes(self) -> float:
+        return self.shared_resident_bytes + self.expert_resident_bytes
+
+    @property
+    def zero3_bytes(self) -> float:
+        return self.shared_zero3_bytes + self.expert_zero3_bytes
+
+
+def training_parameter_byte_layout(
+    arch: Any,
+    *,
+    tp: int = 1,
+    pp: int = 1,
+    dp: int = 1,
+    ep: int = 1,
+) -> TrainingParameterByteLayout:
+    """Return component-aware byte ownership for the canonical EP/DP layout."""
+    params = training_parameter_layout(arch, tp=tp, pp=pp, dp=dp, ep=ep)
+    byte_ledger = parameter_byte_ledger(arch)
+    tp_i = max(1, int(tp))
+    pp_i = max(1, int(pp))
+    dp_i = max(1, int(dp))
+    ep_i = max(1, int(ep))
+    shared_resident = byte_ledger.shared_bytes / (tp_i * pp_i)
+    expert_resident = byte_ledger.expert_total / (tp_i * pp_i * ep_i)
+    return TrainingParameterByteLayout(
+        shared_resident_bytes=shared_resident,
+        expert_resident_bytes=expert_resident,
+        shared_zero3_bytes=shared_resident / dp_i,
+        expert_zero3_bytes=(
+            expert_resident / params.expert_data_parallel_degree
+        ),
+        expert_data_parallel_degree=params.expert_data_parallel_degree,
     )
 
 
@@ -722,6 +1027,26 @@ def validate_architecture_views(
         _attention_family(_get(source, "attention_type", "full")),
         _attention_family(_get(throughput_view, "attention_type", "full")),
     )
+    check(
+        "throughput.weight_precision",
+        _get(source, "weight_precision", "bf16"),
+        _get(throughput_view, "weight_precision", "bf16"),
+    )
+    check(
+        "throughput.ffn_precision",
+        _get(source, "ffn_precision", "bf16"),
+        _get(throughput_view, "precision", "bf16"),
+    )
+    check(
+        "throughput.activation_precision",
+        _get(source, "activation_precision", "bf16"),
+        _get(throughput_view, "activation_precision", "bf16"),
+    )
+    check(
+        "throughput.attn_precision",
+        dict(_get(source, "attn_precision", {}) or {}),
+        dict(_get(throughput_view, "attn_precision", {}) or {}),
+    )
 
     source_moe = _get(source, "moe", None) or {}
     tput_moe = _get(throughput_view, "moe_config", None) or {}
@@ -759,6 +1084,16 @@ def validate_architecture_views(
             "quality.attention_type",
             _attention_family(_get(source, "attention_type", "full")),
             _attention_family(_get(quality_view, "attention_type", "full")),
+        )
+        check(
+            "quality.weight_precision",
+            _get(source, "weight_precision", "bf16"),
+            _get(quality_view, "weight_precision", "bf16"),
+        )
+        check(
+            "quality.activation_precision",
+            _get(source, "activation_precision", "bf16"),
+            _get(quality_view, "activation_precision", "bf16"),
         )
         quality_moe = _get(quality_view, "moe_config", None) or {}
         for field_name in ("n_experts", "top_k", "expert_dim"):

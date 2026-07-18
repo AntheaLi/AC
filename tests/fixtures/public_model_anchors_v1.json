@@ -1,0 +1,547 @@
+{
+  "schema_version": "wave18e.public_anchors.v1",
+  "generated_at_utc": "2026-07-02T00:00:00Z",
+  "notes": [
+    "Wave 18e reference registry \u2014 12 frontier public models.",
+    "Each entry is either fully published (with source citation) or explicitly",
+    "skipped (published_metric=null) when reliable numbers are not available.",
+    "Tolerances are wide pre-calibration because published numbers themselves",
+    "carry measurement variance across serving stacks (vLLM/TRT-LLM/SGLang).",
+    "workload.fresh_prompt_tokens is the benchmark's actual prompt length (default 1024, matching vLLM/TRT-LLM benchmark default). context_length represents the model's supported context, not the prefill length used for the published TTFT number."
+  ],
+  "default_tolerances": {
+    "loss": 0.1,
+    "tbt_ms": 0.25,
+    "ttft_ms": 0.3,
+    "mem_gb": 0.15
+  },
+  "post_calibration_tolerances": {
+    "loss": 0.05,
+    "tbt_ms": 0.15,
+    "ttft_ms": 0.2,
+    "mem_gb": 0.1
+  },
+  "entries": [
+    {
+      "id": "llama-3-8b",
+      "display_name": "Llama-3-8B",
+      "arch": {
+        "family": "dense",
+        "d_model": 4096,
+        "n_layers": 32,
+        "n_heads": 32,
+        "n_kv_heads": 8,
+        "d_head": 128,
+        "ffn_dim": 14336,
+        "vocab_size": 128256,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16
+      },
+      "training_tokens": 15000000000000,
+      "active_params_b": 8.0,
+      "total_params_b": 8.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 1,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 2.05,
+        "tbt_ms": 20.0,
+        "ttft_ms": 55.0,
+        "mem_gb": 18.0,
+        "source": "Llama-3 tech report + vLLM public benchmarks"
+      },
+      "representable": true
+    },
+    {
+      "id": "llama-3-70b",
+      "display_name": "Llama-3-70B",
+      "arch": {
+        "family": "dense",
+        "d_model": 8192,
+        "n_layers": 80,
+        "n_heads": 64,
+        "n_kv_heads": 8,
+        "d_head": 128,
+        "ffn_dim": 28672,
+        "vocab_size": 128256,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16
+      },
+      "training_tokens": 15000000000000,
+      "active_params_b": 70.0,
+      "total_params_b": 70.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 8,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 1.78,
+        "tbt_ms": 30.0,
+        "ttft_ms": 220.0,
+        "mem_gb": 20.0,
+        "source": "Llama-3 tech report + TRT-LLM public benchmarks"
+      },
+      "representable": true
+    },
+    {
+      "id": "llama-3-405b",
+      "display_name": "Llama-3-405B",
+      "arch": {
+        "family": "dense",
+        "d_model": 16384,
+        "n_layers": 126,
+        "n_heads": 128,
+        "n_kv_heads": 16,
+        "d_head": 128,
+        "ffn_dim": 53248,
+        "vocab_size": 128256,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16
+      },
+      "training_tokens": 15600000000000,
+      "active_params_b": 405.0,
+      "total_params_b": 405.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 16,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 1.62,
+        "tbt_ms": 55.0,
+        "ttft_ms": 800.0,
+        "mem_gb": 62.0,
+        "source": "Llama-3.1 tech report + vLLM 8B-405B benchmark disclosures"
+      },
+      "representable": true
+    },
+    {
+      "id": "qwen3-32b",
+      "display_name": "Qwen3-32B",
+      "arch": {
+        "family": "dense",
+        "d_model": 6144,
+        "n_layers": 64,
+        "n_heads": 48,
+        "n_kv_heads": 8,
+        "d_head": 128,
+        "ffn_dim": 21504,
+        "vocab_size": 152064,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16
+      },
+      "training_tokens": 18000000000000,
+      "active_params_b": 32.0,
+      "total_params_b": 32.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 4,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 1.85,
+        "tbt_ms": 22.0,
+        "ttft_ms": 130.0,
+        "mem_gb": 19.0,
+        "source": "Qwen3 tech report + Alibaba-Cloud vLLM benchmarks"
+      },
+      "representable": true
+    },
+    {
+      "id": "mistral-7b",
+      "display_name": "Mistral-7B",
+      "arch": {
+        "family": "dense",
+        "d_model": 4096,
+        "n_layers": 32,
+        "n_heads": 32,
+        "n_kv_heads": 8,
+        "d_head": 128,
+        "ffn_dim": 14336,
+        "vocab_size": 32000,
+        "attention_type": "swa",
+        "kv_projection": "gqa",
+        "swa_window": 4096,
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16
+      },
+      "training_tokens": 2000000000000,
+      "active_params_b": 7.0,
+      "total_params_b": 7.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 1,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": null,
+      "notes": "Mistral-7B training token count and serving benchmarks not consistently published; entry kept for signature-classification exercise.",
+      "representable": true
+    },
+    {
+      "id": "mixtral-8x22b",
+      "display_name": "Mixtral 8x22B",
+      "arch": {
+        "family": "moe",
+        "d_model": 6144,
+        "n_layers": 56,
+        "n_heads": 48,
+        "n_kv_heads": 8,
+        "d_head": 128,
+        "ffn_dim": 16384,
+        "vocab_size": 32000,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16,
+        "moe": {
+          "n_experts": 8,
+          "top_k": 2,
+          "expert_dim": 16384,
+          "router": {
+            "precision": "bf16"
+          }
+        }
+      },
+      "training_tokens": 5000000000000,
+      "active_params_b": 39.0,
+      "total_params_b": 141.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 8,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 1.79,
+        "tbt_ms": 40.0,
+        "ttft_ms": 260.0,
+        "mem_gb": 46.0,
+        "source": "Mixtral paper + vLLM MoE benchmarks"
+      },
+      "representable": true
+    },
+    {
+      "id": "qwen3-235b-a22b",
+      "display_name": "Qwen3-235B-A22B",
+      "arch": {
+        "family": "moe",
+        "d_model": 4096,
+        "n_layers": 94,
+        "n_heads": 64,
+        "n_kv_heads": 4,
+        "d_head": 128,
+        "ffn_dim": 12288,
+        "vocab_size": 151936,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16,
+        "moe": {
+          "n_experts": 128,
+          "top_k": 8,
+          "expert_dim": 1536,
+          "router": {
+            "precision": "bf16"
+          }
+        },
+        "_ledger_note": "Wave 19: corrected to the published Qwen3 arch; ledger reproduces 235B total / 22B active."
+      },
+      "training_tokens": 36000000000000,
+      "active_params_b": 22.0,
+      "total_params_b": 235.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 8,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 1.74,
+        "tbt_ms": 28.0,
+        "ttft_ms": 200.0,
+        "mem_gb": 60.0,
+        "source": "Qwen3 tech report + Alibaba-Cloud vLLM MoE benchmarks"
+      },
+      "representable": true
+    },
+    {
+      "id": "dbrx",
+      "display_name": "DBRX",
+      "arch": {
+        "family": "moe",
+        "d_model": 6144,
+        "n_layers": 40,
+        "n_heads": 48,
+        "n_kv_heads": 8,
+        "d_head": 128,
+        "ffn_dim": 10752,
+        "vocab_size": 100352,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16,
+        "moe": {
+          "n_experts": 16,
+          "top_k": 4,
+          "expert_dim": 10752,
+          "router": {
+            "precision": "bf16"
+          }
+        }
+      },
+      "training_tokens": 12000000000000,
+      "active_params_b": 36.0,
+      "total_params_b": 132.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 8,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 1.8,
+        "tbt_ms": 35.0,
+        "ttft_ms": 240.0,
+        "mem_gb": 44.0,
+        "source": "DBRX blog + Databricks vLLM deployment notes"
+      },
+      "representable": true
+    },
+    {
+      "id": "deepseek-v3",
+      "display_name": "DeepSeek-V3",
+      "arch": {
+        "family": "moe",
+        "d_model": 7168,
+        "n_layers": 61,
+        "n_heads": 128,
+        "n_kv_heads": 128,
+        "d_head": 128,
+        "ffn_dim": 18432,
+        "vocab_size": 129280,
+        "attention_type": "mla",
+        "kv_projection": "mla",
+        "mla_kv_latent_dim": 512,
+        "mla_q_latent_dim": 1536,
+        "mla_rope_head_dim": 64,
+        "mla_nope_head_dim": 128,
+        "weight_precision": "fp8",
+        "ffn_precision": "fp8",
+        "kv_cache_bits": 8,
+        "moe": {
+          "n_experts": 256,
+          "top_k": 8,
+          "expert_dim": 2048,
+          "shared_expert": {
+            "ffn_dim": 2048
+          },
+          "router": {
+            "precision": "bf16"
+          }
+        },
+        "n_dense_ffn_layers": 3
+      },
+      "training_tokens": 14800000000000,
+      "active_params_b": 37.0,
+      "total_params_b": 671.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 16,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 1.65,
+        "tbt_ms": 25.0,
+        "ttft_ms": 180.0,
+        "mem_gb": 55.0,
+        "source": "DeepSeek-V3 technical report + published inference cost"
+      },
+      "representable": true
+    },
+    {
+      "id": "kimi-k2",
+      "display_name": "Kimi K2",
+      "arch": {
+        "family": "moe",
+        "d_model": 7168,
+        "n_layers": 61,
+        "n_heads": 64,
+        "n_kv_heads": 64,
+        "d_head": 128,
+        "ffn_dim": 18432,
+        "vocab_size": 160000,
+        "attention_type": "mla",
+        "kv_projection": "mla",
+        "mla_kv_latent_dim": 512,
+        "mla_q_latent_dim": 1536,
+        "weight_precision": "fp8",
+        "ffn_precision": "fp8",
+        "kv_cache_bits": 8,
+        "moe": {
+          "n_experts": 384,
+          "top_k": 8,
+          "expert_dim": 2048,
+          "shared_expert": {
+            "ffn_dim": 2048,
+            "precision": "fp8"
+          },
+          "router": {
+            "precision": "bf16"
+          }
+        },
+        "_ledger_note": "Wave 19: corrected to the published K2 arch (DeepSeek-V3-like, 384 experts)."
+      },
+      "training_tokens": 12000000000000,
+      "active_params_b": 30.0,
+      "total_params_b": 1026.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 16,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": null,
+      "notes": "Kimi K2 published serving numbers unstable across release cadence; entry kept for signature validation only.",
+      "representable": true
+    },
+    {
+      "id": "jamba-1.5-large",
+      "display_name": "Jamba-1.5-Large",
+      "arch": {
+        "family": "moe_hybrid",
+        "d_model": 8192,
+        "n_layers": 72,
+        "n_heads": 64,
+        "n_kv_heads": 8,
+        "d_head": 128,
+        "ffn_dim": 21504,
+        "vocab_size": 65536,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "bf16",
+        "kv_cache_bits": 16,
+        "state_config": {
+          "d_state": 128,
+          "n_heads": 64,
+          "d_head": 128
+        },
+        "moe": {
+          "n_experts": 16,
+          "top_k": 2,
+          "expert_dim": 13568,
+          "router": {
+            "precision": "bf16"
+          }
+        },
+        "_ledger_note": "Wave 19: expert_dim scaled so the flat-band ledger reproduces the published 398B total; the declared 94B active additionally includes mamba state-layer params the flat ledger does not book (audit status for this anchor is skipped)."
+      },
+      "training_tokens": 7000000000000,
+      "active_params_b": 94.0,
+      "total_params_b": 398.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 32768,
+        "serving_batch": 16,
+        "tp": 8,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": null,
+      "notes": "Jamba serving TBT/TTFT vary sharply with Mamba-2 kernel choice; excluded until a specific reference stack is documented.",
+      "representable": true
+    },
+    {
+      "id": "gpt-oss-120b",
+      "display_name": "GPT-OSS-120B",
+      "arch": {
+        "family": "moe",
+        "d_model": 2880,
+        "n_layers": 36,
+        "n_heads": 64,
+        "n_kv_heads": 8,
+        "d_head": 64,
+        "ffn_dim": 2880,
+        "vocab_size": 200000,
+        "attention_type": "gqa",
+        "kv_projection": "gqa",
+        "weight_precision": "bf16",
+        "ffn_precision": "mxfp4",
+        "kv_cache_bits": 16,
+        "moe": {
+          "n_experts": 128,
+          "top_k": 4,
+          "expert_dim": 2880,
+          "router": {
+            "precision": "bf16"
+          },
+          "expert_precision": "mxfp4"
+        }
+      },
+      "training_tokens": 5000000000000,
+      "active_params_b": 5.1,
+      "total_params_b": 117.0,
+      "workload": {
+        "hardware": "h100",
+        "context_length": 8192,
+        "serving_batch": 16,
+        "tp": 2,
+        "pp": 1,
+        "fresh_prompt_tokens": 1024
+      },
+      "published_metric": {
+        "loss": 1.98,
+        "tbt_ms": 18.0,
+        "ttft_ms": 90.0,
+        "mem_gb": 38.0,
+        "source": "OpenAI OSS card + vLLM public deployment notes (Wave 21: expert precision corrected bf16->mxfp4 to match the published mxfp4 deployment the metrics were measured on; Wave 29: workload tp corrected 4->2 \u2014 the published 38 GB/GPU is arithmetically impossible on 4 GPUs for a 117B-total mxfp4 model (~16 GB/GPU weights) and reconciles with the 2xH100 vLLM recipe the TBT/mem numbers were measured on: weights ~61 GB mxfp4 + attn/emb ~4 GB bf16 over 2 ranks + KV + runtime overhead ~= 38 GB/GPU)"
+      },
+      "representable": true
+    }
+  ]
+}

@@ -341,6 +341,12 @@ class QualityResult:
     quality_model_version: str = QUALITY_MODEL_EFFECTIVE_V2
     benchmark_score_proxy: Optional[float] = None
     benchmark_uncertainty: Optional[float] = None
+
+    # Wave 36: sentinel flag — True when the feasibility term fired
+    # INFEASIBLE (memory overflow, d_head out of range, etc.). When set,
+    # predicted_loss is capped at 10 x chinchilla_baseline instead of the
+    # 1e6-scaled value that used to poison Pareto arithmetic.
+    quality_sentinel: bool = False
     benchmark_notes: List[str] = field(default_factory=list)
     eval_predictions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     calibration_warnings: List[str] = field(default_factory=list)
@@ -629,6 +635,13 @@ DEFAULT_QUALITY_CONSTANTS = {
         "qk_logits": {
             "fp8": {"delta": 0.05, "uncertainty": 0.05, "risk": "medium_high"},
             "fp32_accum": {"delta": 0.0, "uncertainty": 0.0, "risk": "low"},
+            # Wave 40: rows below keep the widening order monotone now that
+            # qk_logits is actually consumed (it was a dead row before —
+            # attn_precision["qk"] was never threaded into the quality view).
+            # Sub-fp8 logits are speculative; penalties are floors, not fits.
+            "mxfp6": {"delta": 0.06, "uncertainty": 0.06, "risk": "high"},
+            "mxfp4": {"delta": 0.08, "uncertainty": 0.08, "risk": "high"},
+            "fp4": {"delta": 0.10, "uncertainty": 0.10, "risk": "high"},
         },
         "router": {
             "fp8": {"delta": 0.04, "uncertainty": 0.05, "risk": "medium_high"},
@@ -652,6 +665,13 @@ DEFAULT_QUALITY_CONSTANTS = {
             "fp8": {"delta": 0.006, "uncertainty": 0.012, "risk": "low_medium"},
             "fp4": {"delta": 0.05, "uncertainty": 0.06, "risk": "medium_high"},
             "bf16": {"delta": 0.0, "uncertainty": 0.0, "risk": "low"},
+            # Wave 39: mxfp6/mxfp4 rows were missing, so _component_table_lookup
+            # fell through to 0.0 and a 6-bit block format scored BETTER than
+            # fp8 at matched shape (precision-monotonicity violation, probe 3).
+            # Values interpolate fp8 -> fp4 using the same mxfp6 ≈ 1.5×fp8 /
+            # mxfp4 ≈ 3×fp8 ratios the ffn/qkv/o rows already encode.
+            "mxfp6": {"delta": 0.009, "uncertainty": 0.015, "risk": "low_medium"},
+            "mxfp4": {"delta": 0.018, "uncertainty": 0.025, "risk": "medium"},
         },
     },
     "moe_residual": {
@@ -1705,8 +1725,18 @@ def _architecture_residual(
     # absolute loss above GQA-4 (kv=18), in line with published Ainslie
     # 2023 / Llama-2-70B / Qwen-3 ablations. The shallow-side weight
     # stays at the legacy 0.001.
+    # Wave 36 fix: same function-class-monotonicity principle as the
+    # compressed-attention fix. MHA (n_kv_heads = n_heads) is the
+    # reference model — GQA is a strict INFORMATION-REDUCTION of MHA
+    # (K/V shared across query groups). The published Ainslie 2023 /
+    # Llama-2-70B ablations show GQA-8 matches MHA WITHIN SEED VARIANCE,
+    # not that MHA loses to GQA-4. Encoding that as a hard "excess KV
+    # heads" penalty made MHA rank ~1.4% BEHIND GQA-8 at 8k — an
+    # ordering the underlying evidence does not support, and a
+    # function-class violation (a superset scoring worse than its
+    # subset). Only the shallow-side penalty (below GQA-8) fires now;
+    # MHA and GQA-8 both live in the zero-penalty band.
     kv_lower_threshold = max(kv_reference, n_query_heads / 8.0)
-    kv_upper_threshold = max(kv_lower_threshold, n_query_heads / 4.0)
     f_kv_heads = 0.0
     if n_kv_heads < kv_lower_threshold:
         # Shallow GQA / MQA: per-head group is too aggressive. Quadratic
@@ -1714,13 +1744,6 @@ def _architecture_residual(
         f_kv_heads = (
             float(weights.get("kv_heads", 0.001))
             * math.log(kv_lower_threshold / max(1.0, n_kv_heads)) ** 2
-        )
-    elif n_kv_heads > kv_upper_threshold:
-        # Excess KV heads (toward MHA): per-head group is too shallow.
-        # Quadratic in log(n_kv_heads / kv_upper_threshold).
-        f_kv_heads = (
-            float(weights.get("kv_heads_excess", 0.008))
-            * math.log(n_kv_heads / kv_upper_threshold) ** 2
         )
 
     # Compatibility with the original ablation prior, without adding it twice.
@@ -1907,28 +1930,23 @@ def _architecture_residual(
                 * math.log(c_ref / max(1.0, c_kv))
             )
 
-        # v1-fix MLA short-ctx audit (Jun 2026): the compression penalty
-        # alone is small (~0.16% at c_kv=512), but MLA's *benefit* — KV
-        # cache reduction — only materializes when the KV cache is large
-        # enough to bind on memory or bandwidth. At short context (8k-32k)
-        # KV is tiny (~32 MB at 1B/8k), the compression buys nothing, and
-        # the model still pays the latent projection's compute + the
-        # compression-quality cost. In production nobody runs MLA at 8k
-        # because GQA is strictly better there. Bake that into the
-        # quality model: scale the MLA penalty by a "context-payoff"
-        # multiplier that's large at short ctx and decays to 1.0 at
-        # frontier-context (≥128k where DeepSeek-V2/V3 actually deploy MLA).
-        # Reference context = 128k. At 8k the multiplier is ~4.5×; at
-        # 128k it's 1×.
-        mla_ctx_ref = float(cfg.get("mla_payoff_ref_ctx", 131072.0))
-        if workload_context > 0 and workload_context < mla_ctx_ref:
-            ctx_ratio = workload_context / mla_ctx_ref
-            # log-scale multiplier — same shape as the long-ctx term but
-            # in the opposite direction.
-            short_ctx_mult = 1.0 + 2.5 * math.log(mla_ctx_ref / workload_context)
-        else:
-            short_ctx_mult = 1.0
-        f_attention_mla = f_attention_mla_compression * short_ctx_mult
+        # Wave 42 (probe-caught): the "context-payoff multiplier" that used
+        # to live here (x7.9 at 8k, decaying to x1 at 128k) is REMOVED. It
+        # baked a DEPLOYMENT preference ("nobody runs MLA at 8k — GQA is
+        # better there") into the QUALITY model — a category error:
+        # pretraining loss does not depend on the serving context. Its
+        # decay with workload ctx manufactured a fake loss IMPROVEMENT for
+        # MLA as context grew (-0.28% from 8k to 128k at a 7B shape),
+        # overwhelming the genuine +0.83% long-context degradation and
+        # making MLA's predicted loss non-monotone in ctx. The legitimate
+        # short-ctx story — MLA's KV savings buy nothing at 8k — is
+        # already expressed by the THROUGHPUT model (no KV-bound win), so
+        # the picker handles it without distorting quality. What remains
+        # is the pure compression term: ~0.16% at c_kv=512 / c_ref=1024,
+        # consistent with DeepSeek-V2's "roughly quality-neutral vs MHA"
+        # (and MLA modestly beating GQA-8 at matched shape matches their
+        # published ablation ordering).
+        f_attention_mla = f_attention_mla_compression
 
     # v1-fix NSA: small quality penalty for Native Sparse Attention.
     # DeepSeek 2025 reports near-parity vs full attention at L=64k with
@@ -1936,8 +1954,16 @@ def _architecture_residual(
     # block-coverage ratio that the compressed branch can compensate for.
     f_attention_nsa = 0.0
     if arch.attention_type == "nsa" and arch.nsa_window_size:
-        # Coverage ratio of the (top-k × block-size) + window over the
-        # workload context. When coverage shrinks the model loses information.
+        # Wave 38: same function-class-monotonicity floor as
+        # csa/indexshare/msa (Wave 35). NSA is a strict subset of full
+        # attention (it caps attention to selected+window tokens); at
+        # matched shape it cannot beat full on quality. The old branch
+        # only charged undercoverage below 5% and left NSA winning long
+        # ctx for free because the MHA long-context penalty was zeroed
+        # in the short-circuit. Clamped nonnegative so a weights-pack
+        # override can never turn the floor into a bonus.
+        f_attention_nsa = max(
+            0.0, float(weights.get("nsa_floor", 0.002)))
         win = float(arch.nsa_window_size or 0)
         stk = float(arch.nsa_select_top_k or 0)
         sbs = float(arch.nsa_select_block_size or 0)
@@ -1947,7 +1973,7 @@ def _architecture_residual(
         # selection branch loses recall.
         ref_coverage = float(cfg.get("nsa_reference_coverage", 0.05))
         if coverage < ref_coverage and coverage > 0:
-            f_attention_nsa = (
+            f_attention_nsa += (
                 float(weights.get("nsa_undercoverage", 0.005))
                 * math.log(ref_coverage / coverage)
             )
@@ -1958,8 +1984,22 @@ def _architecture_residual(
     # documented above. See plan/redesign/09-compressed-attention-coverage.md.
     workload_ctx_w9 = float((workload_spec or {}).get("context_length", 65536))
 
+    # Wave 35: always-on compression floor for csa/indexshare/msa. Sparse
+    # readout is a strict subset of full attention, so even at generous
+    # coverage the prior charges a small constant (default 0.2% of loss
+    # units) on top of the coverage-scaled term below. Uncalibrated prior —
+    # zero fit-pairs coverage for these terms; NSA/DSA-scale ablation pairs
+    # would sharpen or shrink it via ac-auto-calibrate fit-pairs.
+    # Clamped at >= 0 so a weights-pack override can never turn the floor
+    # into a bonus and reintroduce the monotonicity violation: with the
+    # per-head subterms shared with full attention, compressed-at-same-
+    # shape = full + floor + coverage terms, all >= 0 by construction.
+    _compressed_floor = max(
+        0.0, float(weights.get("compressed_attention_floor", 0.002)))
+
     f_attention_csa = 0.0
     if arch.attention_type == "csa":
+        f_attention_csa = _compressed_floor
         # CSA: KV stored per compressed block; query attends top_k_blocks.
         # Compression ratio ≈ block_size / top_k_blocks. Penalty grows with
         # log(ratio): the more aggressive the compression, the bigger the
@@ -1969,26 +2009,58 @@ def _architecture_residual(
         csa_top_k = float(getattr(arch, "csa_top_k_blocks", 0) or 0)
         if csa_block > 0 and csa_top_k > 0:
             comp_ratio = max(1.0, csa_block / max(1.0, csa_top_k))
-            f_attention_csa = (
+            f_attention_csa += (
                 float(weights.get("csa_compression", 0.005))
                 * math.log(comp_ratio)
             )
+            # Wave 35: ctx-aware recall risk. CSA attends a constant token
+            # COUNT (top_k_blocks x block_size), so its coverage FRACTION
+            # shrinks linearly with context — unlike IndexShare, whose
+            # buckets scale with S (constant fraction, scale-free prior).
+            # Same form and reference as the MSA coverage term; without
+            # this, CSA's predicted loss was context-INDEPENDENT and it
+            # dominated every long-ctx cell for free.
+            if workload_ctx_w9 > 0:
+                attended_csa = csa_top_k * csa_block
+                coverage_csa = attended_csa / workload_ctx_w9
+                ref_csa = 0.02
+                if 0 < coverage_csa < ref_csa:
+                    f_attention_csa += (
+                        float(weights.get("csa_pattern_coverage", 0.005))
+                        * math.log(ref_csa / coverage_csa)
+                    )
 
     f_attention_indexshare = 0.0
     if arch.attention_type == "indexshare":
+        f_attention_indexshare = _compressed_floor
         # IndexShare: coverage = top_k_buckets / num_buckets. Penalty grows
         # log(1 / coverage) as coverage shrinks (more buckets missed per query).
         num_b = float(getattr(arch, "indexshare_num_buckets", 0) or 0)
         top_k_b = float(getattr(arch, "indexshare_top_k_buckets", 0) or 0)
         if num_b > 0 and top_k_b > 0 and top_k_b < num_b:
             coverage = top_k_b / num_b
-            f_attention_indexshare = (
+            f_attention_indexshare += (
                 float(weights.get("indexshare_coverage", 0.006))
                 * math.log(1.0 / coverage)
+            )
+        # Wave 42 (probe-caught): ctx-aware indexer-routing risk. The
+        # attended FRACTION is scale-free (buckets grow with S), but the
+        # indexer must route each query over ever-larger bucket contents,
+        # and DSA-style trained indexers show mild long-context
+        # degradation. Without this term IndexShare's predicted loss was
+        # context-FLAT, so past ~1.5M ctx it undercut every ctx-penalized
+        # family and won cells with 640ms-TBT configs — and the displayed
+        # row loss DROPPED from 1M to 2M (non-monotone in ctx). Log-growth
+        # past a 64k reference, mirroring the msa/csa coverage forms.
+        if workload_ctx_w9 > 65536:
+            f_attention_indexshare += (
+                float(weights.get("indexshare_ctx_risk", 0.003))
+                * math.log(workload_ctx_w9 / 65536.0)
             )
 
     f_attention_msa = 0.0
     if arch.attention_type == "msa":
+        f_attention_msa = _compressed_floor
         # MSA: effective coverage = (window + dilated_top_k + global_top_k) / ctx.
         # Penalty if coverage falls below 0.02 (2% of ctx): below that the
         # mixture can't preserve recall on long-range dependencies.
@@ -1999,7 +2071,7 @@ def _architecture_residual(
             coverage_msa = (win + dil + glob) / workload_ctx_w9
             ref_msa = 0.02
             if coverage_msa < ref_msa and coverage_msa > 0:
-                f_attention_msa = (
+                f_attention_msa += (
                     float(weights.get("msa_pattern_coverage", 0.005))
                     * math.log(ref_msa / coverage_msa)
                 )
@@ -2023,7 +2095,27 @@ def _architecture_residual(
     # Wave 9 (Jun 2026): same short-circuit applies to csa/indexshare/msa.
     # They each use compressed/sparse KV reads; the per-head softmax
     # penalty subterms don't apply.
-    is_non_mha = (arch.attention_type in ("mla", "nsa", "csa", "indexshare", "msa"))
+    # Wave 35 (Jul 2026) fix: the Wave 9 short-circuit zeroed ALL per-head
+    # subterms for csa/indexshare/msa too, which made MSA score 0.6% BETTER
+    # than full attention at 8k on the identical head configuration — a
+    # function-class monotonicity violation (sparse attention is a strict
+    # subset of full attention; at a context where nothing is truncated it
+    # cannot have lower loss at the same shape). Root cause: unlike MLA/NSA,
+    # the compressed trio KEEPS standard per-head GQA softmax attention with
+    # a per-head KV cache — they only restrict WHICH tokens each query
+    # attends — so d_head/query-heads/KV-heads/GQA-sharing/bottleneck/
+    # kernel-underrun all still apply. Only MLA (latent KV replaces the GQA
+    # head structure; enumerator emits carrier n_kv_heads) and NSA (its own
+    # compressed+selected branch cost model) legitimately skip them.
+    # Wave 37 (probe-caught, composes with Wave 38's nsa_floor): NSA moved
+    # OUT of the head-penalty skip — like the compressed trio, NSA keeps
+    # real per-head GQA attention over its compressed+selected+window
+    # branches (our NSA candidates carry real n_kv_heads, not carrier
+    # values), so d_head/kv-head/GQA-sharing penalties apply. The floor
+    # alone (0.2%) could not cover the skipped head penalties (~0.7% at
+    # a typical 7B shape), leaving NSA 0.5% BETTER than full at 8k. Only
+    # MLA (latent KV, carrier n_kv_heads) legitimately skips.
+    is_non_mha = (arch.attention_type == "mla")
     if is_non_mha:
         f_d_head = 0.0
         f_query_heads = 0.0
@@ -2031,13 +2123,13 @@ def _architecture_residual(
         f_gqa_sharing = 0.0
         f_attention_bottleneck = 0.0
         f_attn_kernel_underrun = 0.0
-        # MHA long-context penalty still applies for MLA (it's still softmax
-        # attention over the full token set, just with compressed K/V), but
-        # NSA is explicitly a long-context construction and is charged via
-        # f_attention_nsa coverage instead. Same for csa/indexshare/msa.
-        if arch.attention_type in ("nsa", "csa", "indexshare", "msa"):
-            f_attention_long_context = 0.0
-            f_attention_swa_locality = 0.0
+    # MHA long-context penalty still applies for MLA (it's still softmax
+    # attention over the full token set, just with compressed K/V), but
+    # NSA and the compressed trio are explicitly long-context
+    # constructions charged via their own coverage residuals instead.
+    if arch.attention_type in ("nsa", "csa", "indexshare", "msa"):
+        f_attention_long_context = 0.0
+        f_attention_swa_locality = 0.0
 
     f_attention_heads = (
         f_d_head + f_query_heads + f_kv_heads
@@ -2198,7 +2290,12 @@ def _component_table_lookup(constants: Dict[str, Any], component: str, precision
     row = constants.get("precision_sensitivity", {}).get(component, {}).get(precision)
     if row:
         return float(row.get("delta", 0.0)), float(row.get("uncertainty", 0.0)), str(row.get("risk", "medium"))
-    return 0.0, 0.0, "unknown"
+    # Wave 39 clamp: an unknown reduced-precision format cannot be free.
+    # A missing table row previously returned 0.0, letting narrower formats
+    # score better than wider ones whose rows exist (probe-3 reversal).
+    # Conservative floor matches penalties.weight_precision_quality fallback;
+    # a weights-pack override that drops a row cannot reintroduce the bug.
+    return 0.005, 0.02, "unknown"
 
 
 def _group_precision(arch: ArchConfig, components: List[str]) -> str:
@@ -2310,6 +2407,26 @@ def _precision_residual(
         hardware_dependent=True,
     )
     total += weight_total
+
+    # QK-logits precision: Wave 40 — the qk_logits table row existed but was
+    # never consumed (attn_precision["qk"] was dropped at the evaluate_
+    # candidate mapping site), so fp8 attention logits were a free quality
+    # no-op. Read from component_precisions directly: get_precision() falls
+    # back to weight_precision, but logits accumulate in bf16/fp32 regardless
+    # of the weight format, so the default here must be bf16.
+    qk_prec = (arch.component_precisions or {}).get("qk_logits", "bf16")
+    qk_value, qk_unc, qk_risk = _component_table_lookup(constants, "qk_logits", qk_prec)
+    penalties["qk_logits_precision"] = _make_penalty_entry(
+        "qk_logits_precision", qk_value,
+        "quality_v1 precision_sensitivity.qk_logits (softmax-logit instability)",
+        caveat=f"risk={qk_risk}; sub-fp8 logits rows are floors, not fits" if qk_value > 0 else "",
+        confidence="medium" if qk_value == 0.0 else "low",
+        hardware_dependent=False,
+    )
+    if qk_value > 0:
+        notes.append(f"qk_logits={qk_prec} risk={qk_risk}")
+    total += qk_value
+    uncertainty_sq += qk_unc ** 2
 
     act_prec = arch.activation_precision
     if act_prec not in ("bf16", "fp16"):
@@ -3528,7 +3645,24 @@ def estimate_quality(
     result.total_penalty_fraction = total_frac
     result.total_penalty_absolute = total_frac * L_base
     result.pretraining_loss_proxy = L_base * (1 + pretraining_frac)
-    result.predicted_loss = L_base * (1 + total_frac)
+    # Wave 36: the feasibility term used to emit INFEASIBLE=1e6 straight
+    # into predicted_loss, so a merely oversized shape (MHA at 1M ctx
+    # forecasts 1.2 TB per GPU, i.e. >10x HBM => memory_fits=False) came
+    # out as loss=2,000,000. That number then poisoned every downstream
+    # consumer that reads predicted_loss as a scaled loss — cell Pareto
+    # arithmetic, family rollup, the plateau-marker relative-delta math.
+    # The downstream sentinel gate (predicted_loss > 10x chinchilla_baseline
+    # in optimize / optimize_across_contexts) already flags these, so we
+    # cap the surfaced loss at exactly 10x baseline and set an explicit
+    # quality_sentinel flag. total_penalty_absolute keeps the INFEASIBLE
+    # magnitude so callers that need the raw signal still see it.
+    is_sentinel = total_frac >= 1000.0  # INFEASIBLE is 1e6; real terms are <1
+    if is_sentinel:
+        result.predicted_loss = 10.0 * L_base
+        result.quality_sentinel = True
+    else:
+        result.predicted_loss = L_base * (1 + total_frac)
+        result.quality_sentinel = False
     result.task_adjusted_loss_proxy = result.predicted_loss
     result.loss_proxy = result.predicted_loss
     result.penalty_breakdown = penalties

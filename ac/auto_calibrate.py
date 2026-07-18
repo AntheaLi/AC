@@ -1859,7 +1859,7 @@ def fit_command(args: argparse.Namespace) -> int:
         print(
             "ERROR: --backend hierarchical is not yet implemented.\n"
             "Wave 19's hierarchical backend requires the optional extra:\n"
-            "    pip install 'ac-architecture-compiler[calibration]'\n"
+            "    pip install 'archc[calibration]'\n"
             "and a Bayesian fitter that has not shipped yet. Use --backend "
             "ridge (default) for the current fitter, which produces packs "
             "marked 'production_ready' when the fit-warning gates and the "
@@ -2098,7 +2098,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Fitting backend. 'ridge' (default) is the current "
                           "compat fitter. 'hierarchical' is the Wave 19 "
                           "posterior backend (requires the optional "
-                          "'ac-architecture-compiler[calibration]' extra) "
+                          "'archc[calibration]' extra) "
                           "— not yet implemented; will exit with an error.")
     # Wave 18e/19 — release-gate integration. Setting this to a non-empty
     # value causes the fitter to run the public-model predictive-accuracy

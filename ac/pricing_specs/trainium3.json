@@ -1,0 +1,62 @@
+{
+  "schema_version": "pricing_v1",
+  "hardware_target": "trainium3",
+  "cloud_vendor": "aws",
+  "accelerator_name": "AWS Trainium3",
+  "instance_reference": {
+    "instance_type": "trn3 UltraServer (Gen1 64-chip / Gen2 144-chip)",
+    "accelerators_per_instance": 64,
+    "region": "us-east-1 (capacity blocks / contracts)",
+    "note": "Trn3 is sold as UltraServer capacity blocks and long-term contracts; no standard per-instance on-demand listing exists."
+  },
+  "usd_per_accelerator_hour": {
+    "on_demand": null,
+    "reserved_1y": null,
+    "spot": null
+  },
+  "reference_estimate_usd_per_accelerator_hour": 1.80,
+  "tdp_watts": 750,
+  "assumed_avg_utilization": 0.65,
+  "assumed_pue": 1.15,
+  "electricity_usd_per_kwh": 0.10,
+  "currency": "USD",
+  "price_note": "AWS has NOT published standard on-demand, reserved, or spot hourly pricing for Trn3 instances (GA Dec 2025, sold via UltraServer capacity blocks / long-term contracts). All three tiers are therefore null. reference_estimate_usd_per_accelerator_hour = $1.80 is an AWS-quoted internal customer pricing equivalent per chip-hour reported by secondary press (May 2026); ac.pricing uses it only as a last-resort fallback and marks the block with price_source='reference_estimate'. A blog-claimed 'trn3.48xlarge ~$47.50/hr' was DROPPED: the cited instance shape does not match the official Trn3 UltraServer configurations (64/144 chips).",
+  "energy_note": "AWS does not publish Trainium3 TDP; ~750W is a SECONDARY-ESTIMATE (reporting aligned with SemiAnalysis modeling), tier T3. utilization, PUE (1.15, assumption) and $0.10/kWh are ASSUMPTIONS, not measurements.",
+  "provenance": {
+    "prices": [
+      {
+        "field": "on_demand",
+        "value_usd_per_accelerator_hour": null,
+        "derivation": "No standard on-demand hourly price published for Trn3; UltraServers offered via Capacity Blocks and long-term contracts.",
+        "tier": "T3",
+        "source_url": "https://awesomeagents.ai/hardware/aws-trainium3/",
+        "corroborating_urls": [
+          "https://aws.amazon.com/ec2/instance-types/trn3/"
+        ],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "reference_estimate",
+        "value_usd_per_accelerator_hour": 1.80,
+        "derivation": "AWS-quoted internal customer pricing equivalent ~$1.80/chip-hour for Trainium3, reported by secondary press (May 2026). Not a public list price.",
+        "tier": "T3",
+        "source_url": "https://tech-insider.org/uber-aws-trainium3-amazon-ai-chip-deal-2026/",
+        "corroborating_urls": [],
+        "date_accessed": "2026-07-17"
+      }
+    ],
+    "tdp": {
+      "value_watts": 750,
+      "tier": "T3",
+      "source_url": "https://tech-insider.org/uber-aws-trainium3-amazon-ai-chip-deal-2026/",
+      "note": "AWS does not publish Trainium3 TDP. ~750W from secondary reporting (spec table aligned with SemiAnalysis modeling); treat as approximate.",
+      "date_accessed": "2026-07-17"
+    },
+    "pue": {
+      "value": 1.15,
+      "tier": "T3",
+      "note": "ASSUMPTION. AWS does not publish fleet-average PUE.",
+      "date_accessed": "2026-07-17"
+    }
+  }
+}

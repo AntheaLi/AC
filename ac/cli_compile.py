@@ -32,7 +32,7 @@ from typing import Any, Dict, Optional
 try:
     from .optimizer import (
         optimize, result_to_config, result_to_pareto_csv,
-        DeploymentConstraints,
+        DeploymentConstraints, _same_candidate,
     )
     from .cli_recipe import (
         expand_argv, render_group_help, snapshot_recipe,
@@ -54,10 +54,11 @@ try:
         generate_baseline_delta_report, generate_modifier_justification,
         generate_modifier_shadow_report,
     )
+    from .pricing import attach_cost_block
 except ImportError:
     from optimizer import (
         optimize, result_to_config, result_to_pareto_csv,
-        DeploymentConstraints,
+        DeploymentConstraints, _same_candidate,
     )
     from cli_recipe import (
         expand_argv, render_group_help, snapshot_recipe,
@@ -79,13 +80,14 @@ except ImportError:
         generate_baseline_delta_report, generate_modifier_justification,
         generate_modifier_shadow_report,
     )
+    from pricing import attach_cost_block
 
 
 # Canonical hardware names shown in --help. Trainium short forms
 # (`trn2`/`trn3`) are still parsed via `_normalize_hardware` below but
 # hidden from --help so users only see one name per platform.
 VALID_HARDWARE = [
-    "h100", "b200", "tpu_v5p", "tpu_v5e",
+    "h100", "b200", "gb200_nvl72", "h800", "tpu_v5p", "tpu_v5e",
     "trainium2", "trainium3",
 ]
 
@@ -98,6 +100,31 @@ _HARDWARE_ALIASES = {
 def _normalize_hardware(value: str) -> str:
     v = (value or "").strip().lower()
     return _HARDWARE_ALIASES.get(v, v)
+
+
+# State families accepted by the greenfield CLI. Keep this aligned with
+# schema._SUPPORTED_STATE_TYPES and quality_model._resolve_hybrid_family.
+STATE_TYPE_ALIASES = {
+    "mamba1": "mamba",
+    "delta_net": "deltanet",
+    "gated_delta": "gated_deltanet",
+    "gated_linear_attention": "gla",
+    "rwkv": "rwkv7",
+    "swa": "sliding_window",
+    "local_recurrent": "sliding_window",
+}
+VALID_STATE_TYPES = [
+    "mamba2", "mamba", "s4", "s5", "s6",
+    "gla", "kda", "deltanet", "gated_deltanet",
+    "rwkv7", "retnet", "linear_attention",
+    "parallel_heads", "moh", "hydra",
+    "sliding_window",
+]
+
+
+def _normalize_state_type(value: str) -> str:
+    v = (value or "").strip().lower()
+    return STATE_TYPE_ALIASES.get(v, v)
 
 
 def _format_optimal_line(opt) -> str:
@@ -119,7 +146,32 @@ def _format_optimal_line(opt) -> str:
         q_latent = a.mla_q_latent_dim or 0
         parts.append(f"attn=mla(kv_latent={latent},q_latent={q_latent})")
     elif attn == "nsa":
-        parts.append("attn=nsa")
+        parts.append(
+            "attn=nsa("
+            f"select_top_k={getattr(a, 'nsa_select_top_k', 0) or 0},"
+            f"window={getattr(a, 'nsa_window_size', 0) or 0})"
+        )
+    elif attn == "csa":
+        parts.append(
+            "attn=csa("
+            f"block={getattr(a, 'csa_block_size', 0) or 0},"
+            f"top_k={getattr(a, 'csa_top_k_blocks', 0) or 0},"
+            f"dim={getattr(a, 'csa_compression_dim', 0) or 0})"
+        )
+    elif attn == "indexshare":
+        parts.append(
+            "attn=indexshare("
+            f"buckets={getattr(a, 'indexshare_num_buckets', 0) or 0},"
+            f"top_k={getattr(a, 'indexshare_top_k_buckets', 0) or 0},"
+            f"dim={getattr(a, 'indexshare_index_dim', 0) or 0})"
+        )
+    elif attn == "msa":
+        parts.append(
+            "attn=msa("
+            f"window={getattr(a, 'msa_window_size', 0) or 0},"
+            f"dilated_top_k={getattr(a, 'msa_dilated_top_k', 0) or 0},"
+            f"global_top_k={getattr(a, 'msa_global_top_k', 0) or 0})"
+        )
     else:
         parts.append(f"attn=full h={a.n_heads} kv={a.n_kv_heads}")
     # FFN family. Wave 19 (P2): on MoE rows, `ffn=<aggregate>` next to dense
@@ -211,6 +263,34 @@ def _arch_mode_of(arch) -> str:
         return "dense"
 
 
+def _non_moe_family_label(arch) -> str:
+    """Human-readable family label for a candidate with dense FFNs."""
+    mode = _arch_mode_of(arch)
+    if mode == "hybrid":
+        n_attn = int(getattr(arch, "n_attention_layers", 0) or 0)
+        return "state-attention hybrid" if n_attn > 0 else "state-space model"
+    return "dense model"
+
+
+def _display_family_label(arch, mode: Optional[str] = None) -> str:
+    """Compact factorized label for the family comparison table."""
+    mode = mode or _arch_mode_of(arch)
+    label = {
+        "dense": "dense",
+        "hybrid": "hybrid",
+        "moe": "MoE",
+        "moe_hybrid": "MoE-hybrid",
+    }.get(mode, mode)
+    attention = str(getattr(arch, "attention_type", "full") or "full")
+    if attention != "full":
+        label += f"+{attention.upper()}"
+    if int(getattr(arch, "yoco_n_self_attn_layers", 0) or 0) > 0:
+        label += "+YOCO"
+    if int(getattr(arch, "n_local_attn_layers", 0) or 0) > 0:
+        label += "+local/global"
+    return label
+
+
 def _state_type_of(arch):
     if int(getattr(arch, "n_state_layers", 0) or 0) <= 0:
         return None
@@ -264,29 +344,43 @@ def _rollup_families(result, opt) -> list:
         }
 
     def _same(a, b):
-        return a is b or (
-            getattr(a.arch, "d_model", 0) == getattr(b.arch, "d_model", -1)
-            and getattr(a.arch, "n_layers", 0) == getattr(b.arch, "n_layers", -1)
-            and getattr(a.arch, "kv_cache_bits", 0) == getattr(b.arch, "kv_cache_bits", -1)
-            and abs(a.predicted_loss - b.predicted_loss) < 1e-9
-        )
+        return a is b or _same_candidate(a, b)
 
+    eligible = [
+        ev for ev in getattr(result, "all_evaluated", [])
+        if getattr(ev, "meets_constraints", True)
+    ]
+    try:
+        try:
+            from .optimizer import _prefer_training_fit
+        except ImportError:
+            from optimizer import _prefer_training_fit
+        eligible = _prefer_training_fit(eligible, result.hardware)
+    except Exception:
+        pass
     best_per_family = {}
-    for ev in getattr(result, "all_evaluated", []):
-        if not getattr(ev, "meets_constraints", True):
-            continue
+    for ev in eligible:
         mode = _arch_mode_of(ev.arch)
-        prev = best_per_family.get(mode)
+        display_key = (
+            mode,
+            str(getattr(ev.arch, "attention_type", "full") or "full"),
+            int(getattr(ev.arch, "yoco_n_self_attn_layers", 0) or 0) > 0,
+            int(getattr(ev.arch, "n_local_attn_layers", 0) or 0) > 0,
+        )
+        prev = best_per_family.get(display_key)
         if prev is None or ev.predicted_loss < prev.predicted_loss:
-            best_per_family[mode] = ev
+            best_per_family[display_key] = ev
     if not best_per_family:
         return []
     rows = []
     opt_in_rows = False
-    for mode, ev in best_per_family.items():
+    for display_key, ev in best_per_family.items():
+        mode = display_key[0]
         is_sel = opt is not None and _same(ev, opt)
         opt_in_rows = opt_in_rows or is_sel
-        rows.append(_row_for(ev, mode, is_sel))
+        rows.append(_row_for(
+            ev, mode, is_sel,
+            family_label=_display_family_label(ev.arch, mode)))
     if opt is not None and not opt_in_rows:
         # Preserve the picked config's real family in `family_label` so the
         # renderer can print "dense ←picked" instead of the anonymous
@@ -294,7 +388,7 @@ def _rollup_families(result, opt) -> list:
         # gate doesn't count the pick as a second family. See Wave 26 #2.
         rows.append(_row_for(
             opt, "picked", True,
-            family_label=_arch_mode_of(opt.arch),
+            family_label=_display_family_label(opt.arch),
         ))
     rows.sort(key=lambda r: r["loss"])
     base_loss = rows[0]["loss"]
@@ -742,13 +836,24 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Comma-separated pipeline-parallel search options (e.g., 1,2,4)")
     p.add_argument("--dp", type=parse_positive_int, default=8,
                    help="Data parallelism degree (default: 8)")
+    p.add_argument(
+        "--training-cluster-gpus",
+        type=parse_positive_int,
+        default=None,
+        help=(
+            "Minimum training-cluster size. When set, AC derives DP for "
+            "each TP/PP/CP candidate and rounds it up to a legal EP "
+            "multiple; this overrides the scalar --dp for greenfield "
+            "evaluation."
+        ),
+    )
     p.add_argument("--training-micro-batch", type=parse_positive_int, default=None,
                    help="Training micro-batch per TP×PP×CP replica (default: 8)")
     p.add_argument("--pipeline-microbatches", type=parse_positive_int, default=1,
                    help="Pipeline microbatches / gradient-accumulation slots used for PP bubble modeling (default: 1)")
     p.add_argument("--num-gpus", type=parse_positive_int, default=None,
-                   help="Forward-compat shim. Ignored for modeling; --tp * --pp * --dp wins. "
-                        "If passed and the product disagrees, AC prints a WARNING.")
+                   help="Forward-compat shim ignored for modeling. If passed and it disagrees "
+                        "with --training-cluster-gpus or TP*PP*DP, AC prints a WARNING.")
 
     # Precision/KV search controls
     p.add_argument("--kv-dtypes", type=parse_kv_dtype_options, default=None,
@@ -783,6 +888,17 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Output generated PyTorch architecture implementation path (greenfield mode)")
     p.add_argument("--implementation-class-name", default="ACGeneratedModel",
                    help="Class name for --output-implementation (default: ACGeneratedModel)")
+    # Gate-2 Task E: USD cost block (pure-add; default off keeps output byte-identical)
+    p.add_argument("--cost-usd", action="store_true",
+                   help="Attach a cost_estimate_usd block (training_total / "
+                        "serving_per_1m_tokens / annual_serving_at_load) to the "
+                        "emitted config. Pure-add; list prices from "
+                        "ac/pricing_specs/. Default off.")
+    p.add_argument("--price-tier", default="on_demand",
+                   choices=["on_demand", "reserved_1y", "spot"],
+                   help="Price tier for --cost-usd (default: on_demand). "
+                        "Falls back to on_demand, then reference_estimate, "
+                        "when a tier is not published for the target.")
 
     # Baseline modifier mode
     p.add_argument("--baseline-config", default=None,
@@ -803,10 +919,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-state", action="store_true",
                    help="Enable state/hybrid architecture search (state block + attention)")
     p.add_argument("--state-type", default="mamba2",
-                   choices=["mamba2", "mamba", "gla", "kda", "gated_deltanet",
-                            "deltanet", "rwkv7", "retnet", "swa",
-                            "sliding_window", "linear_attention"],
-                   help="State mechanism family (default: mamba2).")
+                   type=_normalize_state_type,
+                   choices=VALID_STATE_TYPES,
+                   metavar="STATE",
+                   help="State mechanism family (default: mamba2). "
+                        "Aliases: swa/local_recurrent -> sliding_window, "
+                        "gated_delta -> gated_deltanet, delta_net -> deltanet.")
     p.add_argument("--placement-strategy", default=None,
                    help="Comma-separated placement strategies for hybrid layers "
                         "(e.g., first_periodic_last,interleaved,periodic). "
@@ -827,6 +945,16 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Comma-separated first-K-dense layer counts to sweep.")
     p.add_argument("--ep-options", default=None,
                    help="Comma-separated expert-parallel degrees to sweep.")
+    p.add_argument("--moe-granularity", default=None,
+                   help="Comma-separated expert-granularity targets "
+                        "(expert_dim as a fraction of the dense ffn_dim / "
+                        "top_k; e.g. '1.0,0.25'). Lower = finer-grained, "
+                        "DeepSeek-V3-style experts. Reference granularity "
+                        "8.0 in the effective-capacity model.")
+    p.add_argument("--ep-topology", default=None,
+                   choices=[None, "single_axis", "cross_axis"],
+                   help="Expert-parallel all-to-all topology (default: "
+                        "single_axis).")
 
     # MLA / MTP / CP / RoPE scaling
     p.add_argument("--allow-mla", action="store_true",
@@ -835,6 +963,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Comma-separated MLA c_kv options (default: 512).")
     p.add_argument("--mla-q-latent", default=None,
                    help="Comma-separated MLA c_q options (default: 1536).")
+    p.add_argument("--mla-rope-head-dim", type=parse_positive_int, default=None,
+                   help="MLA decoupled RoPE head dim (default: 64).")
+    p.add_argument("--mla-nope-head-dim", type=parse_positive_int, default=None,
+                   help="MLA NoPE head dim (default: 128).")
     # Wave 18g: per-layer attention heterogeneity — local:global interleave.
     p.add_argument("--allow-local-global", action="store_true",
                    help="Enable local:global attention interleave candidates "
@@ -853,6 +985,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Enable Multi-Token Prediction depth sweep.")
     p.add_argument("--mtp-depths", default=None,
                    help="Comma-separated MTP depths (e.g., 0,1,2).")
+    p.add_argument("--mtp-depth-n-layers", type=parse_positive_int, default=None,
+                   help="Transformer layers per MTP depth (default: 1).")
+    p.add_argument("--mtp-train-loss-weight", type=float, default=None,
+                   help="MTP auxiliary loss weight (default: 0.3).")
     p.add_argument("--cp", type=parse_positive_int, default=1,
                    help="Context parallelism degree (default: 1).")
     p.add_argument("--cp-method", default="ring", choices=["ring", "ulysses"],
@@ -876,7 +1012,39 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Evaluate and require YOCO KV sharing on every candidate.")
     p.add_argument("--yoco-n-self-attn-layers", type=parse_positive_int, default=None)
     p.add_argument("--yoco-share-pattern", default=None,
-                   choices=[None, "single_source", "block_shared"])
+                   choices=[None, "single_source"],
+                   help="YOCO's calibrated single shared-cache topology.")
+    # Wave 32: compressed / indexer attention families (Wave 9 evaluator
+    # support existed but was reachable only via the Python API — no CLI
+    # flag could ever select them).
+    p.add_argument("--allow-csa", action="store_true",
+                   help="Enable Compressed Sparse Attention candidates "
+                        "(block-compressed KV with top-k block selection).")
+    p.add_argument("--csa-block-sizes", default=None,
+                   help="Comma-separated CSA block sizes (default: 64,128).")
+    p.add_argument("--csa-top-k-blocks", default=None,
+                   help="Comma-separated CSA top-k block counts.")
+    p.add_argument("--csa-compression-dim", type=parse_positive_int, default=None,
+                   help="CSA compression dim (default: 64).")
+    p.add_argument("--allow-indexshare", action="store_true",
+                   help="Enable index-sharing attention candidates "
+                        "(DSA-style bucketed lightning indexer; shared "
+                        "top-k bucket selection across heads).")
+    p.add_argument("--indexshare-buckets", default=None,
+                   help="Comma-separated bucket counts (default: 64,128).")
+    p.add_argument("--indexshare-top-k", default=None,
+                   help="Comma-separated top-k bucket counts (default: 4,8).")
+    p.add_argument("--indexshare-index-dim", type=parse_positive_int, default=None,
+                   help="Indexer head dim (default: 64).")
+    p.add_argument("--allow-msa", action="store_true",
+                   help="Enable multi-scale attention candidates "
+                        "(local window + dilated top-k + global top-k).")
+    p.add_argument("--msa-windows", default=None,
+                   help="Comma-separated MSA local windows (default: 512,1024).")
+    p.add_argument("--msa-dilated-top-k", default=None,
+                   help="Comma-separated MSA dilated top-k options.")
+    p.add_argument("--msa-global-top-k", default=None,
+                   help="Comma-separated MSA global top-k options.")
     p.add_argument("--allow-rope-scaling", action="store_true",
                    help="Enable RoPE extension method sweep.")
     p.add_argument("--rope-original-max-position", type=parse_positive_int, default=8192,
@@ -890,14 +1058,29 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-candidates", type=parse_positive_int, default=None,
                    help="Optional greenfield cap after deterministic candidate dedupe")
     p.add_argument("--progress-every", type=parse_non_negative_int, default=0,
-                   help="Print greenfield evaluation progress every N candidates")
+                   help="Print greenfield evaluation progress every N candidates "
+                        "(default: auto — every 1000 candidates on large "
+                        "searches; silenced by --quiet)")
     p.add_argument("--quiet", action="store_true",
                    help="Suppress progress output")
+    p.add_argument("--max-full-evaluations", type=parse_positive_int, default=None,
+                   help="Two-stage evaluation: cap the number of full "
+                        "evaluations after cheap ranking (speed knob).")
+    p.add_argument("--local-refine-budget", type=int, default=None,
+                   help="Wave 34: extra full evaluations spent on lattice "
+                        "neighbors of the per-class Pareto leaders when "
+                        "--max-candidates dropped candidates (default 96; "
+                        "0 disables).")
+    p.add_argument("--allow-quality-sentinel", action="store_true",
+                   help="Return a best-effort answer marked UNCOVERED "
+                        "instead of failing when every candidate is outside "
+                        "the quality model's covered envelope (extreme "
+                        "params x context corners).")
 
     p.epilog = (
         "logical groups for --help-group: hardware, workload, serving, "
         "parallelism, precision, state, moe, mla, mtp, rope, nsa, yoco, "
-        "modifier, outputs, recipe."
+        "compressed, modifier, outputs, recipe."
     )
     return p
 
@@ -1017,6 +1200,25 @@ def main(argv=None):
                 "directory (default: outputs/<model>_modifier/)."
             )
 
+        _ignored_parallelism = [
+            flag for flag, value in (
+                ("--pp-options", getattr(args, "pp_options", None)),
+                ("--cp-options", getattr(args, "cp_options", None)),
+                ("--ep-options", getattr(args, "ep_options", None)),
+                ("--training-cluster-gpus", getattr(args, "training_cluster_gpus", None)),
+            )
+            if value is not None
+        ]
+        if _ignored_parallelism:
+            log(
+                "WARNING: modifier mode searches local shape, component "
+                "precision, KV dtype, and TP only; "
+                + ", ".join(_ignored_parallelism)
+                + " do not change its candidate grid. Use `ac-delta-eval "
+                "--apply change_parallelism` for PP/CP/EP topology "
+                "experiments."
+            )
+
     # When the user points --output-config at a non-default location (e.g.
     # /tmp/run42/mistral_arch.json) and leaves the sibling outputs at
     # their defaults, route ALL siblings into the same directory AND have
@@ -1065,7 +1267,11 @@ def main(argv=None):
     # the warning so it's not silent.
     def _is_pow2(n: int) -> bool:
         return n >= 1 and (n & (n - 1)) == 0
-    for label, val in (("--tp", args.tp), ("--pp", args.pp), ("--dp", args.dp)):
+    parallelism_values = [("--tp", args.tp), ("--pp", args.pp)]
+    if getattr(args, "training_cluster_gpus", None) is None \
+            or getattr(args, "baseline_config", None):
+        parallelism_values.append(("--dp", args.dp))
+    for label, val in parallelism_values:
         if val is not None and not _is_pow2(val):
             extra = ""
             if label == "--tp":
@@ -1089,14 +1295,26 @@ def main(argv=None):
     # something it doesn't. Warn loudly so the user knows the number they
     # typed will be ignored.
     if getattr(args, "num_gpus", None) is not None:
-        implied = (args.tp or 1) * (args.pp or 1) * (args.dp or 1)
+        cluster_floor = getattr(args, "training_cluster_gpus", None)
+        implied = (
+            int(cluster_floor)
+            if cluster_floor is not None and not getattr(args, "baseline_config", None)
+            else (args.tp or 1) * (args.pp or 1) * (args.dp or 1)
+        )
         if int(args.num_gpus) != implied:
+            source = (
+                f"--training-cluster-gpus = {implied}"
+                if cluster_floor is not None and not getattr(args, "baseline_config", None)
+                else (
+                    f"--tp * --pp * --dp = {args.tp}*{args.pp}*{args.dp} "
+                    f"= {implied}"
+                )
+            )
             print(
                 f"WARNING: --num-gpus={args.num_gpus} does not match "
-                f"--tp * --pp * --dp = {args.tp}*{args.pp}*{args.dp} = "
-                f"{implied}. --num-gpus is accepted for command-line "
-                "compatibility only; AC sizes the model from TP/PP/DP. "
-                "Update --tp/--pp/--dp if you want a different total.",
+                f"{source}. --num-gpus is accepted for command-line "
+                "compatibility only; update the modeled parallelism or "
+                "cluster-floor flags if you want a different total.",
                 file=sys.stderr,
             )
 
@@ -1133,6 +1351,17 @@ def main(argv=None):
         tp_options            = _split_int(getattr(args, "tp_options", None), "--tp-options")
         pp_options            = _split_int(getattr(args, "pp_options", None), "--pp-options")
         rope_methods          = _split_str(getattr(args, "rope_scaling_methods", None))
+        # Wave 32: compressed / indexer attention option lists
+        csa_block_size_options    = _split_int(getattr(args, "csa_block_sizes", None), "--csa-block-sizes")
+        csa_top_k_options         = _split_int(getattr(args, "csa_top_k_blocks", None), "--csa-top-k-blocks")
+        indexshare_bucket_options = _split_int(getattr(args, "indexshare_buckets", None), "--indexshare-buckets")
+        indexshare_top_k_options  = _split_int(getattr(args, "indexshare_top_k", None), "--indexshare-top-k")
+        msa_window_options        = _split_int(getattr(args, "msa_windows", None), "--msa-windows")
+        msa_dilated_top_k_options = _split_int(getattr(args, "msa_dilated_top_k", None), "--msa-dilated-top-k")
+        msa_global_top_k_options  = _split_int(getattr(args, "msa_global_top_k", None), "--msa-global-top-k")
+        moe_granularity_targets   = (
+            [float(v) for v in str(args.moe_granularity).split(",") if v.strip()]
+            if getattr(args, "moe_granularity", None) else None)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -1156,6 +1385,7 @@ def main(argv=None):
             tp=args.tp,
             pp=args.pp,
             dp=args.dp,
+            training_cluster_gpus=getattr(args, "training_cluster_gpus", None),
             tp_options=tp_options,
             pp_options=pp_options,
             vocab_size=args.vocab_size,
@@ -1215,9 +1445,47 @@ def main(argv=None):
             force_yoco=bool(getattr(args, "yoco", False)),
             yoco_n_self_attn_layers=int(getattr(args, "yoco_n_self_attn_layers", None) or 1),
             yoco_share_pattern=str(getattr(args, "yoco_share_pattern", None) or "single_source"),
+            # Wave 32: compressed / indexer attention families
+            allow_csa=getattr(args, "allow_csa", False),
+            csa_block_size_options=csa_block_size_options,
+            csa_top_k_options=csa_top_k_options,
+            csa_compression_dim=int(getattr(args, "csa_compression_dim", None) or 64),
+            allow_indexshare=getattr(args, "allow_indexshare", False),
+            indexshare_num_buckets_options=indexshare_bucket_options,
+            indexshare_top_k_options=indexshare_top_k_options,
+            indexshare_index_dim=int(getattr(args, "indexshare_index_dim", None) or 64),
+            allow_msa=getattr(args, "allow_msa", False),
+            msa_window_options=msa_window_options,
+            msa_dilated_top_k_options=msa_dilated_top_k_options,
+            msa_global_top_k_options=msa_global_top_k_options,
+            # Wave 32: MoE granularity + EP topology
+            moe_granularity_targets=moe_granularity_targets,
+            ep_topology=str(getattr(args, "ep_topology", None) or "single_axis"),
+            # Wave 32: MLA / MTP detail knobs
+            mla_rope_head_dim=int(getattr(args, "mla_rope_head_dim", None) or 64),
+            mla_nope_head_dim=int(getattr(args, "mla_nope_head_dim", None) or 128),
+            mtp_depth_n_layers=int(getattr(args, "mtp_depth_n_layers", None) or 1),
+            mtp_train_loss_weight=float(
+                getattr(args, "mtp_train_loss_weight", None)
+                if getattr(args, "mtp_train_loss_weight", None) is not None else 0.3),
+            # Wave 32: search ergonomics
+            max_full_evaluations=getattr(args, "max_full_evaluations", None),
+            local_refine_budget=(
+                int(args.local_refine_budget)
+                if getattr(args, "local_refine_budget", None) is not None
+                else 96),
+            allow_quality_sentinel=getattr(args, "allow_quality_sentinel", False),
             # Search ergonomics
             max_candidates=getattr(args, "max_candidates", None),
-            progress_every=0 if args.quiet else getattr(args, "progress_every", 0),
+            # Wave 47: auto-progress. An uncapped greenfield search can run
+            # ~10^4 full evaluations (tens of seconds) — before this default,
+            # the CLI printed one line and went silent unless the user knew
+            # about --progress-every. 0 (unset) now means "auto": every 1000
+            # candidates, which small searches never reach. --quiet still
+            # disables entirely; an explicit --progress-every N is honored.
+            progress_every=(
+                0 if args.quiet
+                else (getattr(args, "progress_every", 0) or 1000)),
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -1329,9 +1597,23 @@ def main(argv=None):
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    log(f"[arch-compiler] Search complete: {result.candidates_generated} candidates, "
+    log(f"[arch-compiler] Search complete: {result.candidates_evaluated} evaluated "
+        f"({result.candidates_generated} initial after cap), "
         f"{result.candidates_feasible} feasible, {len(result.pareto_frontier)} Pareto, "
         f"{result.search_time_sec:.1f}s")
+    if result.evaluation_failures:
+        reasons = sorted(
+            result.evaluation_failure_reasons.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        preview = "; ".join(
+            f"{count}x {reason}" for reason, count in reasons[:3]
+        )
+        print(
+            f"WARNING: {result.evaluation_failures} candidate evaluation(s) "
+            f"failed and were excluded: {preview}",
+            file=sys.stderr,
+        )
 
     if result.optimal is None:
         print(f"ERROR: No feasible architecture found for {args.params}B on {args.hardware}.",
@@ -1434,19 +1716,40 @@ def main(argv=None):
                     getattr(opt.quality, "uncertainty_total", 0.0) or 0.0
                 ) * 100.0
                 _b_arch = _best.arch
-                # Wave 19 (P1-4): name the band source. Pre-calibration the
-                # tiebreak band is CAPPED (~0.5% max spend), not derived
-                # from the ±8% uncalibrated uncertainty.
-                if _uncalibrated:
-                    _band_src = (
-                        "the capped pre-calibration tiebreak band "
-                        "(max ~0.5% loss spend; modeled uncertainty is "
-                        f"±{_unc_pct:.1f}% but is not trusted for tiebreaks "
-                        "until a pack is fitted)"
+                _profile = str(getattr(
+                    constraints, "objective_profile", "balanced"))
+                _quality_first = _profile in ("research_quality", "loss_only")
+                if _quality_first:
+                    # Wave 19 (P1-4): quality-first profiles use the capped
+                    # uncertainty bucket as the primary ordering.
+                    if _uncalibrated:
+                        _band_src = (
+                            "the capped pre-calibration tiebreak band "
+                            "(max ~0.5% loss spend; modeled uncertainty is "
+                            f"±{_unc_pct:.1f}% but is not trusted for tiebreaks "
+                            "until a pack is fitted)"
+                        )
+                    else:
+                        _band_src = (
+                            f"the calibrated ±{_unc_pct:.1f}% uncertainty band"
+                        )
+                    _why = (
+                        f"The two are treated as quality-equivalent within "
+                        f"{_band_src} and tiebroken on memory/TBT/TPS. "
+                        "Use --strict-quality to rank by point-estimate loss."
                     )
                 else:
-                    _band_src = (
-                        f"the calibrated ±{_unc_pct:.1f}% uncertainty band"
+                    # Balanced/latency/cost profiles rank the weighted
+                    # multi-objective score first. The quality bucket is only
+                    # a secondary tiebreak there, so calling a large gap a
+                    # capped quality tie is false and dangerously reassuring.
+                    _why = (
+                        f"This is an explicit weighted tradeoff from the "
+                        f"`{_profile}` objective, not a quality-equivalent "
+                        "tie: serving/training/memory gains outweighed the "
+                        "profile's loss term. Use --objective-profile "
+                        "research_quality for a quality-first capped band, "
+                        "or add --strict-quality for exact score/loss ordering."
                     )
                 log(
                     "[arch-compiler] Pick rationale: selected loss "
@@ -1454,10 +1757,7 @@ def main(argv=None):
                     f"{_best.predicted_loss:.4f} "
                     f"(d={_b_arch.d_model} L={_b_arch.n_layers} "
                     f"kv_bits={getattr(_b_arch, 'kv_cache_bits', '?')}) — "
-                    f"+{_gap_pct:.2f}%. The two are treated as "
-                    f"quality-equivalent within {_band_src} "
-                    "and tiebroken on memory/TBT/TPS. "
-                    "Use --strict-quality to rank by point-estimate loss."
+                    f"+{_gap_pct:.2f}%. {_why}"
                 )
                 # Wave 20 (feedback #5): cross-reference the plan-ladder
                 # run-noise floor. When the quality gap is below what two
@@ -1677,22 +1977,83 @@ def main(argv=None):
     # numbers describe a layout the user cannot actually run.
     #
     # Wave 24 lifted the fix upstream — greenfield enumeration now filters
-    # EP <= DP before candidates ever reach the picker (see
+    # EP divides DP before candidates ever reach the picker (see
     # `_filter_ep_options_by_dp` in optimizer.py). This warning survives as
     # a defensive net for modifier-mode runs whose baseline config declares
     # EP > DP in `parallelism`, which the enumerator preserves rather than
     # rewrites.
     _picked_ep = int(getattr(opt.arch, "ep_degree", 1) or 1)
-    if _picked_ep > 1 and _picked_ep > int(getattr(args, "dp", 1) or 1):
+    _picked_dp = (
+        int(getattr(opt.arch, "dp_degree", 0) or 0)
+        or int(getattr(args, "dp", 1) or 1)
+    )
+    if (_picked_ep > 1 and _picked_dp > 1
+            and (_picked_ep > _picked_dp or _picked_dp % _picked_ep != 0)):
+        _layout_issue = (
+            f"exceeds DP={_picked_dp}"
+            if _picked_ep > _picked_dp
+            else f"does not divide DP={_picked_dp}"
+        )
         print(
-            f"WARNING: picked EP={_picked_ep} exceeds DP={args.dp} "
+            f"WARNING: picked EP={_picked_ep} {_layout_issue} "
             "(inherited from baseline `parallelism.expert_parallel`). "
             "Training throughput assumes EP-over-DP (each EP rank processes "
-            "its own microbatch), which requires EP <= DP. Serving "
+            "its own microbatch), which requires EP to divide DP. Serving "
             "predictions are unaffected (a serving instance spans "
             "TPxPPxCPxEP GPUs).",
             file=sys.stderr,
         )
+
+    # Wave 45: surface HBM oversubscription of the PICKED architecture.
+    # Serving spill is priced into TBT/TTFT and training memory overflow is
+    # honest arithmetic, but neither was previously visible anywhere except
+    # a family-table tag — a 546 GB/GPU pick on a 192 GB part sailed
+    # through with zero warnings.
+    _t = getattr(opt, "throughput", None)
+    if _t is not None:
+        try:
+            try:
+                from .optimizer import _get_hbm_gb
+            except ImportError:
+                from optimizer import _get_hbm_gb
+            _hbm = float(_get_hbm_gb(args.hardware))
+        except Exception:
+            _hbm = 0.0
+        if _hbm > 0:
+            if getattr(_t, "spill_tier", "fits") != "fits":
+                print(
+                    f"WARNING: picked architecture needs "
+                    f"{opt.memory_per_gpu_gb:.1f} GB/GPU to serve — exceeds "
+                    f"{_hbm:.0f} GB HBM; {getattr(_t, 'hbm_spill_gb', 0.0):.1f} GB "
+                    f"spills via {getattr(_t, 'spill_tier', '?')} (cost included "
+                    f"in TBT/TTFT). Raise TP/PP, cut serving batch/context, or "
+                    f"quantize the KV cache if spill is not deployable in your "
+                    f"stack.", file=sys.stderr)
+            _train_mem = float(getattr(_t, "training_memory_per_gpu_gb", 0.0) or 0.0)
+            if _train_mem > _hbm:
+                _any_train_fit = any(
+                    float(getattr(
+                        getattr(ev, "throughput", None),
+                        "training_memory_per_gpu_gb", 0.0) or 0.0) <= _hbm
+                    for ev in (getattr(result, "all_evaluated", None) or [])
+                    if getattr(ev, "meets_constraints", False)
+                )
+                _fit_note = (
+                    " A fitting candidate existed, so this indicates a "
+                    "selection bug; please report the emitted bundle."
+                    if _any_train_fit else
+                    " No evaluated candidate fits training HBM; this is a "
+                    "best-effort, physically incomplete plan."
+                )
+                print(
+                    f"WARNING: picked architecture needs {_train_mem:.1f} GB/GPU "
+                    f"to TRAIN at the declared TP×PP×DP — exceeds "
+                    f"{_hbm:.0f} GB HBM and there is no training-spill "
+                    f"mechanism. Training TPS assumes it fits; add CP/PP, "
+                    f"reduce training micro-batch/context, or explicitly "
+                    f"model offload before trusting the training numbers."
+                    f"{_fit_note}",
+                    file=sys.stderr)
 
     # MoE-fallback warning: the user opted into MoE search but the picked
     # config is dense, which usually means either no MoE candidate beat the
@@ -1701,17 +2062,44 @@ def main(argv=None):
     # constraints. Make this visible so silent dense fallback is not mistaken
     # for "MoE didn't help."
     if getattr(args, "allow_moe", False) and getattr(opt.arch, "moe_style", "dense") == "dense":
+        picked_family = _non_moe_family_label(opt.arch)
         any_moe_in_frontier = any(
             getattr(c.arch, "moe_style", "dense") != "dense"
             for c in (result.pareto_frontier or [])
         )
+        # Wave 45: "dominated off the frontier" is NOT "infeasible". The old
+        # branch keyed the infeasibility message on frontier membership, so a
+        # run where hundreds of MoE candidates were evaluated, met every
+        # constraint, and simply lost to dense on all axes told the user to
+        # go hunting for --max-total-params-b / tile-alignment problems that
+        # don't exist. Distinguish via all_evaluated.
+        any_moe_feasible = any(
+            getattr(c.arch, "moe_style", "dense") != "dense"
+            and getattr(c, "meets_constraints", False)
+            for c in (getattr(result, "all_evaluated", None) or [])
+        )
         requested_experts = getattr(args, "moe_n_experts", None)
-        if any_moe_in_frontier:
+        if any_moe_in_frontier or any_moe_feasible:
+            # Wave 34: with the refined two-stage search this is often the
+            # honest answer (a well-shaped dense model can beat a coarse
+            # MoE at small scale under the data-sufficiency gate), and the
+            # old "rerun with --objective-profile=quality" hint fired even
+            # when the run WAS quality-profile. State the fact; hint only
+            # at knobs that actually change the MoE side.
+            where = ("exist on the Pareto frontier but were dominated"
+                     if any_moe_in_frontier else
+                     "were evaluated and met every constraint but were "
+                     "Pareto-dominated")
             msg = (
-                "--allow-moe was set, but the picked architecture is dense. "
-                "MoE candidates exist on the Pareto frontier but were dominated "
-                "by dense under the current objective profile; inspect the CSV "
-                "or rerun with --objective-profile=quality to prefer MoE."
+                "--allow-moe was set, but the picked architecture uses "
+                f"dense FFNs ({picked_family}). "
+                f"MoE candidates {where} "
+                "by the selected non-MoE family under the current objective "
+                "profile — often the honest answer at small scale / low "
+                "tokens-per-param. Inspect "
+                "the CSV; a finer expert axis (--moe-n-experts 64+ with "
+                "--moe-granularity 0.25) is the usual way MoE wins back the "
+                "loss axis."
             )
         else:
             extra = (
@@ -1720,7 +2108,8 @@ def main(argv=None):
             )
             msg = (
                 "--allow-moe was set, but no MoE candidate was feasible under "
-                "the current constraints, so the picked architecture is dense."
+                "the current constraints, so the picked architecture uses "
+                f"dense FFNs ({picked_family})."
                 f"{extra} Common causes: --max-total-params-b too low, "
                 "n_experts incompatible with --ep-options × tile alignment, "
                 "or expert_dim too small for the model width."
@@ -1763,6 +2152,19 @@ def main(argv=None):
     # Write outputs
     # 1. JSON config
     config = result_to_config(result)
+    # Gate-2 Task E: optional USD cost block (pure-add; off by default).
+    if getattr(args, "cost_usd", False) and config is not None:
+        config = attach_cost_block(
+            config,
+            args.hardware,
+            {
+                "training_tokens": constraints.training_tokens,
+                "prompt_len": constraints.prompt_len,
+                "output_len": constraints.output_len,
+                "serving_batch": constraints.serving_batch,
+            },
+            price_tier=getattr(args, "price_tier", "on_demand"),
+        )
     ensure_parent_dir(args.output_config)
     save_config(config, args.output_config)
     log(f"[arch-compiler] Wrote {args.output_config}")
@@ -2017,8 +2419,12 @@ def _run_modifier_mode(args, log):
             f"flags to explore quality-trading moves.")
     else:
         log(f"[arch-compiler] Selected: {selected.change_summary}")
+    width_label = (
+        f"dense_ffn={c.ffn_dim} expert_dim={c.moe.get('expert_dim')}"
+        if c.moe else f"ffn={c.ffn_dim}"
+    )
     log(f"[arch-compiler] Config: d={c.d_model} L={c.n_layers} h={c.n_heads} "
-        f"kv={c.n_kv_heads} ffn={c.ffn_dim} ffn_prec={c.ffn_precision} "
+        f"kv={c.n_kv_heads} {width_label} ffn_prec={c.ffn_precision} "
         f"kv_bits={c.kv_cache_bits} TP={selected.tp}")
 
     paths = {
@@ -2031,7 +2437,25 @@ def _run_modifier_mode(args, log):
         "model_card": os.path.join(out_dir, "model_card.md"),
     }
 
-    save_config(modifier_result_to_config(result), paths["config"])
+    # Gate-2 Task E: optional USD cost block (pure-add; off by default).
+    modifier_config = modifier_result_to_config(result)
+    if getattr(args, "cost_usd", False) and modifier_config is not None:
+        mod_constraints = getattr(result, "constraints", None)
+        workload = None
+        if mod_constraints is not None:
+            workload = {
+                "training_tokens": getattr(mod_constraints, "training_tokens", None),
+                "prompt_len": getattr(mod_constraints, "prompt_len", None),
+                "output_len": getattr(mod_constraints, "output_len", None),
+                "serving_batch": getattr(mod_constraints, "serving_batch", None),
+            }
+        modifier_config = attach_cost_block(
+            modifier_config,
+            args.hardware,
+            workload,
+            price_tier=getattr(args, "price_tier", "on_demand"),
+        )
+    save_config(modifier_config, paths["config"])
     with open(paths["pareto"], "w") as f:
         f.write(modifier_pareto_to_csv(result))
     with open(paths["baseline_delta"], "w") as f:

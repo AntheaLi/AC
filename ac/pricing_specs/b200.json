@@ -1,0 +1,73 @@
+{
+  "schema_version": "pricing_v1",
+  "hardware_target": "b200",
+  "cloud_vendor": "aws",
+  "accelerator_name": "NVIDIA B200 SXM6 180GB (HGX B200)",
+  "instance_reference": {
+    "instance_type": "p6-b200.48xlarge",
+    "accelerators_per_instance": 8,
+    "region": "us-east-1",
+    "note": "Per-accelerator-hour figures derived from the whole-instance hourly list price divided by 8 GPUs."
+  },
+  "usd_per_accelerator_hour": {
+    "on_demand": 14.24,
+    "reserved_1y": 12.355,
+    "spot": 2.70
+  },
+  "reference_estimate_usd_per_accelerator_hour": null,
+  "tdp_watts": 1000,
+  "assumed_avg_utilization": 0.65,
+  "assumed_pue": 1.15,
+  "electricity_usd_per_kwh": 0.10,
+  "currency": "USD",
+  "price_note": "LIST PRICES only, as published or derived from public vendor price pages; negotiated enterprise discounts and neocloud offers (B200 on-demand runs ~$3.70-7.00/GPU-hr at neoclouds as of mid-2026) are NOT reflected. The reserved_1y figure is the AWS EC2 Capacity Blocks for ML per-accelerator rate (US regions, effective 2026-07-01) used as the reserved-capacity reference because AWS does not publish a standard 1-year RI rate for p6-b200; Capacity Block pricing is revised quarterly. Spot prices are dynamic snapshots with inconsistent availability.",
+  "energy_note": "Electricity sub-term uses assumed_avg_utilization x tdp_watts x assumed_pue x electricity_usd_per_kwh. utilization, PUE (AWS does not publish fleet PUE; 1.15 is an assumption) and the $0.10/kWh industrial-power ballpark are ASSUMPTIONS, not measurements.",
+  "provenance": {
+    "prices": [
+      {
+        "field": "on_demand",
+        "value_usd_per_accelerator_hour": 14.24,
+        "derivation": "p6-b200.48xlarge $113.93/hr / 8 GPUs",
+        "tier": "T3",
+        "source_url": "https://www.spheron.network/blog/nvidia-b200-cloud-pricing-2026/",
+        "corroborating_urls": [
+          "https://getdeploying.com/gpus/nvidia-b200"
+        ],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "reserved_1y",
+        "value_usd_per_accelerator_hour": 12.355,
+        "derivation": "AWS EC2 Capacity Blocks for ML, P6-B200 US-region rate per accelerator-hour, effective 2026-07-01 (next scheduled revision Oct 2026). Reserved-capacity product; NOT a standard 1-year RI rate (none is published for p6-b200).",
+        "tier": "T3",
+        "source_url": "https://www.spheron.network/blog/aws-capacity-blocks-pricing-2026-b200-b300-hike/",
+        "corroborating_urls": [
+          "https://aws.amazon.com/ec2/capacityblocks/pricing/"
+        ],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "spot",
+        "value_usd_per_accelerator_hour": 2.70,
+        "derivation": "p6-b200 spot snapshot ~$21.61/hr per node / 8 GPUs (~81% below on-demand); availability is inconsistent in practice",
+        "tier": "T3",
+        "source_url": "https://www.spheron.network/blog/nvidia-b200-cloud-pricing-2026/",
+        "corroborating_urls": [],
+        "date_accessed": "2026-07-17"
+      }
+    ],
+    "tdp": {
+      "value_watts": 1000,
+      "tier": "T2",
+      "source_url": "https://lenovopress.lenovo.com/lp2226-thinksystem-nvidia-b200-180gb-1000w-gpu",
+      "note": "NVIDIA HGX B200 Total Graphics Power 1000W (OEM product guide reproducing the NVIDIA specification).",
+      "date_accessed": "2026-07-17"
+    },
+    "pue": {
+      "value": 1.15,
+      "tier": "T3",
+      "note": "ASSUMPTION. AWS does not publish fleet-average PUE.",
+      "date_accessed": "2026-07-17"
+    }
+  }
+}

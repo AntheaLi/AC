@@ -50,6 +50,17 @@ def generate_justification(
     q = opt.quality
     t = opt.throughput
     con = result.constraints
+    selected_tp = max(1, int(getattr(c, "tp_degree", 0) or 0)
+                      or int(getattr(con, "tp", 1) or 1))
+    selected_pp = max(1, int(getattr(c, "pp_degree", 0) or 0)
+                      or int(getattr(con, "pp", 1) or 1))
+    selected_cp = max(1, int(getattr(c, "cp_degree", 1) or 1))
+    selected_dp = max(
+        1,
+        int(getattr(c, "dp_degree", 0) or 0)
+        or int(getattr(con, "dp", 1) or 1),
+    )
+    selected_ep = max(1, int(getattr(c, "ep_degree", 1) or 1))
 
     lines = []
     lines.append("# Architecture Justification\n")
@@ -57,7 +68,8 @@ def generate_justification(
     # Target summary
     lines.append(f"**Target**: {con.target_params_b}B active parameters, "
                  f"{con.training_tokens/1e12:.1f}T training tokens, "
-                 f"{result.hardware.upper()} (TP={con.tp} PP={con.pp} DP={con.dp}), "
+                 f"{result.hardware.upper()} (TP={selected_tp} PP={selected_pp} "
+                 f"CP={selected_cp} DP={selected_dp} EP={selected_ep}), "
                  f"context={con.context_length}.")
     # Surface the param tolerance band so users can see why active_params_b
     # may not match --params exactly.
@@ -116,12 +128,13 @@ def generate_justification(
     tps_suffix = f" (±{sig_tps:,.0f})" if sig_tps > 0 else ""
     tbt_suffix = f" (±{sig_tbt:.1f}ms)" if sig_tbt > 0 else ""
     pre_suffix = f" (±{sig_pre:.1f}ms)" if sig_pre > 0 else ""
-    # Fix #2: be explicit about the throughput unit. The base number is
-    # per-TP-replica; the aggregate scales by DP.
-    dp_replicas = max(1, int(getattr(con, "dp", 1) or 1))
+    # A training replica spans TP x PP x CP. EP overlays DP during training,
+    # so it is reported but does not multiply the replica GPU count.
+    dp_replicas = selected_dp
     agg_tps = opt.training_tps * dp_replicas
     lines.append(
-        f"- **Training throughput (per TP replica, TP={con.tp})**: "
+        f"- **Training throughput (per DP replica; TP={selected_tp}, "
+        f"PP={selected_pp}, CP={selected_cp}, EP={selected_ep})**: "
         f"{opt.training_tps:,.0f} tokens/sec{tps_suffix}"
     )
     lines.append(
@@ -149,7 +162,37 @@ def generate_justification(
                  f"{_ttft_ovh_txt})"
                  + (f" ({_pct_under(t.prefill_time_ms, con.serving_ttft_ms)} under soft budget)"
                     if con.serving_ttft_ms else ""))
-    lines.append(f"- **Memory per GPU**: {opt.memory_per_gpu_gb:.1f} GB")
+    # Wave 45: a pick that oversubscribes HBM must say so next to the
+    # number. Serving spill is priced (tiered NVLink/PCIe bandwidth,
+    # already inside the TBT above) but was previously disclosed only in
+    # the family table; training overflow has NO spill mechanism — the
+    # config cannot train at the declared TP/PP/DP and needs CP, PP, or
+    # optimizer offload.
+    _hbm_gb = 0.0
+    try:
+        from ac.optimizer import _get_hbm_gb as _hbm_fn
+    except ImportError:
+        from optimizer import _get_hbm_gb as _hbm_fn
+    try:
+        _hbm_gb = float(_hbm_fn(result.hardware))
+    except Exception:
+        _hbm_gb = 0.0
+    _spill_tier = getattr(t, "spill_tier", "fits")
+    _mem_suffix = ""
+    if _spill_tier != "fits" and _hbm_gb > 0:
+        _mem_suffix = (
+            f" — **exceeds {_hbm_gb:.0f} GB HBM**; "
+            f"{getattr(t, 'hbm_spill_gb', 0.0):.1f} GB spills via "
+            f"{_spill_tier} (spill cost is included in the TBT/TTFT above)")
+    lines.append(f"- **Memory per GPU**: {opt.memory_per_gpu_gb:.1f} GB{_mem_suffix}")
+    _train_mem = float(getattr(t, "training_memory_per_gpu_gb", 0.0) or 0.0)
+    if _hbm_gb > 0 and _train_mem > _hbm_gb:
+        lines.append(
+            f"- **Training memory per GPU**: {_train_mem:.1f} GB — "
+            f"**does not fit {_hbm_gb:.0f} GB HBM at the declared "
+            f"TP×PP×DP**. Training this config requires context/pipeline "
+            f"parallelism or optimizer-state offload beyond what was "
+            f"searched; training TPS above assumes it fits.")
     lines.append(f"- **Predicted loss**: {opt.predicted_loss:.4f} "
                  f"(scaling-law spine: {q.chinchilla_baseline:.4f}, "
                  f"total residual: {q.total_penalty_fraction*100:.2f}%)")
@@ -182,10 +225,26 @@ def generate_justification(
 
     # d_model
     lines.append(f"### d_model = {c.d_model}\n")
-    lines.append(f"Lattice constraint: must be divisible by TP={con.tp} and "
-                 f"tile-aligned for BF16 CTA tiles on {result.hardware.upper()}. "
-                 f"d_model={c.d_model} lies on the lattice with n_heads={c.n_heads} × "
-                 f"d_head={c.d_head} = {c.n_heads * c.d_head}.")
+    attention_width = c.n_heads * c.d_head
+    width_text = (
+        f"MLA uses an attention projection width of n_heads={c.n_heads} x "
+        f"d_head={c.d_head} = {attention_width}; this is intentionally "
+        "decoupled from the residual-stream d_model."
+        if str(getattr(c, "attention_type", "full")).lower() == "mla"
+        else (
+            f"The attention width is n_heads={c.n_heads} x d_head={c.d_head} "
+            f"= {attention_width}, matching d_model."
+            if attention_width == c.d_model
+            else
+            f"The attention projection width is n_heads={c.n_heads} x "
+            f"d_head={c.d_head} = {attention_width}; AC supports this "
+            "decoupled inner width separately from d_model."
+        )
+    )
+    lines.append(f"Lattice constraint: d_model must be divisible by the selected "
+                 f"TP={selected_tp} and tile-aligned for BF16 CTA tiles on "
+                 f"{result.hardware.upper()}. d_model={c.d_model} lies on that "
+                 f"lattice. {width_text}")
     _add_alternatives(lines, result, "d_model", c.d_model)
     lines.append("")
 
@@ -202,8 +261,8 @@ def generate_justification(
         f"{basis_label} parameters is approximately {c.n_layers} layers at "
         f"d_model={c.d_model}."
     )
-    if con.pp > 1:
-        lines.append(f"Divisible by PP={con.pp} for pipeline parallelism.")
+    if selected_pp > 1:
+        lines.append(f"Divisible by selected PP={selected_pp} for pipeline parallelism.")
     lines.append("")
 
     # Attention layout (MHA / GQA / MQA / MLA)
@@ -244,6 +303,64 @@ def generate_justification(
             "Prefill/decode attention cost scales with the compressed + "
             "selected + window token set rather than full context."
         )
+        lines.append("")
+    elif attn_type == "csa":
+        block = int(getattr(c, "csa_block_size", 0) or 0)
+        top_k = int(getattr(c, "csa_top_k_blocks", 0) or 0)
+        dim = int(getattr(c, "csa_compression_dim", 0) or 0)
+        lines.append("### Attention: CSA (Compressed Sparse Attention)\n")
+        lines.append(
+            f"CSA selected: block_size={block}, top_k_blocks={top_k}, "
+            f"compression_dim={dim}; n_heads={c.n_heads}, "
+            f"n_kv_heads={c.n_kv_heads}, d_head={c.d_head}. "
+            "Prefill and decode price the selected compressed block set "
+            "instead of full-context KV streaming."
+        )
+        csa_pen = q.penalty_breakdown.get("attention_csa") if hasattr(q, "penalty_breakdown") else None
+        if csa_pen and getattr(csa_pen, "value", 0) != 0:
+            lines.append(
+                f"Coupled CSA coverage/compression residual: "
+                f"{csa_pen.value*100:.2f}%."
+            )
+        lines.append("")
+    elif attn_type == "indexshare":
+        buckets = int(getattr(c, "indexshare_num_buckets", 0) or 0)
+        top_k = int(getattr(c, "indexshare_top_k_buckets", 0) or 0)
+        dim = int(getattr(c, "indexshare_index_dim", 0) or 0)
+        lines.append("### Attention: IndexShare\n")
+        lines.append(
+            f"IndexShare selected: buckets={buckets}, top_k_buckets={top_k}, "
+            f"index_dim={dim}; n_heads={c.n_heads}, "
+            f"n_kv_heads={c.n_kv_heads}, d_head={c.d_head}. "
+            "The KV stream is bucket-routed while the small index entry is "
+            "modeled as TP-replicated."
+        )
+        idx_pen = q.penalty_breakdown.get("attention_indexshare") if hasattr(q, "penalty_breakdown") else None
+        if idx_pen and getattr(idx_pen, "value", 0) != 0:
+            lines.append(
+                f"Coupled IndexShare coverage residual: "
+                f"{idx_pen.value*100:.2f}%."
+            )
+        lines.append("")
+    elif attn_type == "msa":
+        window = int(getattr(c, "msa_window_size", 0) or 0)
+        dilated = int(getattr(c, "msa_dilated_top_k", 0) or 0)
+        global_k = int(getattr(c, "msa_global_top_k", 0) or 0)
+        lines.append("### Attention: MSA (Multi-scale Attention)\n")
+        lines.append(
+            f"MSA selected: local window={window}, "
+            f"dilated_top_k={dilated}, global_top_k={global_k}; "
+            f"n_heads={c.n_heads}, n_kv_heads={c.n_kv_heads}, "
+            f"d_head={c.d_head}. Prefill and decode use the summed "
+            "local + dilated + global token budget rather than full "
+            "context attention."
+        )
+        msa_pen = q.penalty_breakdown.get("attention_msa") if hasattr(q, "penalty_breakdown") else None
+        if msa_pen and getattr(msa_pen, "value", 0) != 0:
+            lines.append(
+                f"Coupled MSA pattern-coverage residual: "
+                f"{msa_pen.value*100:.2f}%."
+            )
         lines.append("")
     else:
         gqa_ratio = c.n_heads // c.n_kv_heads if c.n_kv_heads > 0 else 1
@@ -297,10 +414,15 @@ def generate_justification(
     if c.n_state_layers > 0:
         lines.append(f"### Hybrid architecture: {c.n_attention_layers} attention + "
                      f"{c.n_state_layers} state layers\n")
+        derived_d_state = int(getattr(c, "derived_d_state", 0) or 0)
+        configured_d_state = int(
+            (getattr(c, "state_config", None) or {}).get("d_state", 0) or 0)
+        displayed_d_state = derived_d_state or configured_d_state
+        d_state_source = "SRAM-derived" if derived_d_state > 0 else "configured"
         lines.append(f"State mechanism: {_state_family_display(c.state_config)} with "
-                     f"d_state={c.derived_d_state} (SRAM-derived).")
+                     f"d_state={displayed_d_state} ({d_state_source}).")
         lines.append(f"Placement strategy: {c.placement_strategy}.")
-        lines.append(f"Hybrid ratio: {c.hybrid_ratio} "
+        lines.append(f"Hybrid ratio (state:attention): {c.hybrid_ratio} "
                      f"(attention:state layers).")
         if c.crossover_seq_len > 0:
             lines.append(f"Decode cost crossover L* = {c.crossover_seq_len:.0f}: "

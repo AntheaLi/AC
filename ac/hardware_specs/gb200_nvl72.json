@@ -1,0 +1,95 @@
+{
+  "vendor": "nvidia",
+  "accelerator_family": "blackwell",
+  "accelerator_name": "GB200 NVL72 (rack-scale, 72x B200)",
+  "chip": "b200",
+  "compute_units": 160,
+  "compute_unit_type": "SM",
+  "hbm_capacity_gb": 192,
+  "hbm_bandwidth_tb_s": 8.0,
+  "_peak_flops_tf_convention": "The values below are the EFFECTIVE per-precision compute baseline used by AC's roofline model, NOT the datasheet peak. They are deliberately set to ~50% of NVIDIA's marketed dense-Tensor-Core peak so that, after the `efficiency_multipliers` block and the per-family efficiency table in throughput_model._DEFAULT_EFFICIENCY_TABLE compose, end-to-end TPS / TBT predictions match published Blackwell early-access traces. See `notes.peak_flops_source` for datasheet numbers. Override via ac-auto-calibrate when lab traces are available.",
+  "peak_flops_tf": {
+    "bf16": 1125,
+    "fp8": 2250,
+    "fp4": 4500,
+    "mxfp4": 4500,
+    "mxfp6": 3000,
+    "int8": 2250
+  },
+  "_datasheet_peak_flops_tf_note": "Wave 20 (feedback #2): vendor datasheet dense Tensor-Core peaks, for implied-MFU reporting ONLY. The roofline model must keep using peak_flops_tf. On NVIDIA parts peak_flops_tf is ~half of these (see _peak_flops_tf_convention); on TPU/Trainium the two coincide.",
+  "datasheet_peak_flops_tf": {
+    "bf16": 2250,
+    "fp8": 4500,
+    "fp4": 9000,
+    "mxfp4": 9000,
+    "mxfp6": 6000,
+    "int8": 4500
+  },
+  "bytes_per_element": {
+    "bf16": 2,
+    "fp8": 1,
+    "fp4": 0.5,
+    "mxfp4": 0.53,
+    "mxfp6": 0.78,
+    "int8": 1
+  },
+  "supported_precisions": [
+    "bf16",
+    "fp8",
+    "fp4",
+    "mxfp4",
+    "mxfp6",
+    "int8"
+  ],
+  "fused_attention_efficiency": {
+    "bf16": 0.8,
+    "fp8": 0.78,
+    "fp4": 0.72
+  },
+  "fused_attention_kernel": "FlashAttention-3",
+  "interconnect": {
+    "type": "nvlink",
+    "intra_node_bw_gb_s": 1800,
+    "inter_node_bw_gb_s": 50,
+    "topology": "NVL72 rack (72-GPU NVLink5 domain) / IB scale-out"
+  },
+  "system": {
+    "nvlink_domain_size": 72,
+    "intra_domain_bandwidth_gbps": 1800,
+    "inter_domain_bandwidth_gbps": 50,
+    "gpus_per_rack": 72,
+    "_comment": "Rack-scale system layer. The loader maps this block onto the legacy fields: nvlink_domain_size (top-level), interconnect.intra_node_bw_gb_s, interconnect.inter_node_bw_gb_s, gpus_per_rack. Bandwidth units are GB/s (bytes), consistent with every other AC spec. inter_domain 50 GB/s = 400 Gb/s per-GPU ConnectX-7 NDR scale-out port (datasheet figure quoted in Gb/s)."
+  },
+  "sram_per_sm_kb": 256,
+  "h_concurrent_heads": 8,
+  "fast_memory_tier": "sram",
+  "gpus_per_node": 72,
+  "nvlink_domain_size": 72,
+  "gpus_per_rack": 72,
+  "calibration": {
+    "kernel_launch_overhead_us": 4.0,
+    "kernels_per_layer": 12,
+    "optimizer_bytes_per_param": 12,
+    "training_system_efficiency": 0.39,
+    "decode_system_efficiency": 0.45,
+    "prefill_system_efficiency": 0.62,
+    "efficiency_multipliers": {
+      "training": 1.8,
+      "prefill": 2.5,
+      "decode": 1.5
+    },
+    "_prefill_multiplier_note": "v1-fix demo-audit-2 (Jun 2026): prefill bumped 1.4 -> 2.5 to match published FA-3 throughput on Blackwell, parallel to the H100 fix. Previous calibration reported ~120ms for 7B @ 8k batch=1; FA-3 reaches FP8 efficiency 70-80% on B200, putting the real number at ~50-70ms."
+  },
+  "notes": {
+    "chip_reuse": "Single-chip parameters (compute, HBM, SRAM, calibration) are identical to ac/hardware_specs/b200.json — the GB200 NVL72 uses the same B200 GPU silicon; only the system/interconnect layer differs. chip='b200' records this inheritance. NVIDIA GB200 NVL72 product page, https://www.nvidia.com/en-us/data-center/gb200-nvl72/ (accessed 2026-07-17, tier T2).",
+    "nvlink_domain_size_source": "NVIDIA GB200 NVL72 product page: 'connects 36 Grace CPUs and 72 Blackwell GPUs in a rack-scale, liquid-cooled design ... a 72-GPU NVIDIA NVLink domain that acts as a single, massive GPU'. https://www.nvidia.com/en-us/data-center/gb200-nvl72/ (accessed 2026-07-17, tier T2).",
+    "intra_domain_bandwidth_source": "NVIDIA GB200 NVL72 product page: fifth-generation NVLink provides 1.8 TB/s of GPU-to-GPU interconnect per GPU; NVLink Switch System provides 130 TB/s aggregate for the rack. https://www.nvidia.com/en-us/data-center/gb200-nvl72/ (accessed 2026-07-17, tier T2).",
+    "inter_domain_bandwidth_source": "GB200 NVL72 reference configuration: NVIDIA Quantum-2 NDR InfiniBand via ConnectX-7, 400 Gb/s per GPU scale-out (= 50 GB/s; stored in GB/s per AC convention). Deployment-configurable; 400 Gb/s/GPU is the reference design. NVIDIA partner spec sheets: https://www.spheron.network/gpu-rental/gb200/ and https://pcbstore.com.bd/product/nvidia-gb200-nvl72-48u-rack-solution (accessed 2026-07-17, tier T3).",
+    "gpus_per_rack_source": "72 GPUs per NVL72 rack (18 compute trays x 4 GPUs). NVIDIA GB200 NVL72 product page, https://www.nvidia.com/en-us/data-center/gb200-nvl72/ (accessed 2026-07-17, tier T2).",
+    "peak_flops_source": "NVIDIA B200 datasheet (dense, no 2:4 sparsity). BF16 Tensor Core = 2250 TFLOPS; FP8 Tensor Core = 4500 TFLOPS; FP4 Tensor Core = 9000 TFLOPS. The `peak_flops_tf` field above is intentionally ~half of these (see `_peak_flops_tf_convention`). https://nvidia.com/en-us/data-center/dgx-b200/ (accessed 2026-07-17, tier T2).",
+    "fused_efficiency_source": "FlashAttention-3 benchmarks, FP4 attention newer with lower expected efficiency",
+    "hbm_bw_source": "NVIDIA B200 datasheet, 8 TB/s HBM3e (192 GB per GPU; 13.4-13.5 TB per NVL72 rack). https://nvidia.com/en-us/data-center/dgx-b200/ (accessed 2026-07-17, tier T2).",
+    "compute_units_note": "~160 SMs estimated for B200, verify per SKU (inherited from b200.json).",
+    "scope_note": "Rack power (~120 kW), cooling, and rack-level failure rates are intentionally NOT modeled (Gate-2 Task C section 1.4 roadmap items)."
+  }
+}

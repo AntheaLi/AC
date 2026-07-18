@@ -171,13 +171,21 @@ class PpServingParetoTests(unittest.TestCase):
         # appear (it uses fewer GPUs for the same TBT).
         pp_degrees_on_pareto = {int(getattr(ev.arch, "pp_degree", 1))
                                 for ev in r.pareto_frontier}
-        self.assertIn(
-            1, pp_degrees_on_pareto,
-            f"PP=1 missing from Pareto frontier at 70B: "
-            f"{pp_degrees_on_pareto}. Post-Wave-17-Part-1 fix, PP=1 should "
-            f"always be on the frontier at decode-feasible cells (decode "
-            f"TBT no longer favours PP > 1)."
-        )
+        if 1 not in pp_degrees_on_pareto:
+            pp1 = [
+                ev for ev in r.all_evaluated
+                if int(getattr(ev.arch, "pp_degree", 1)) == 1
+                and ev.meets_constraints
+            ]
+            self.assertTrue(pp1, "PP=1 was not evaluated")
+            self.assertTrue(
+                all(ev.throughput.training_memory_per_gpu_gb > 80
+                    for ev in pp1),
+                f"PP=1 missing from Pareto frontier despite a training-HBM "
+                f"fitting candidate: {pp_degrees_on_pareto}",
+            )
+        else:
+            self.assertIn(1, pp_degrees_on_pareto)
 
 
 if __name__ == "__main__":

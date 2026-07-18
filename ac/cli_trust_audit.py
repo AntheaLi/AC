@@ -20,6 +20,10 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 from ac.trust_audit import (
     run_frontier_feasibility_suite,
     run_public_anchor_suite,

@@ -51,7 +51,7 @@ class PpSearchExpansionTests(unittest.TestCase):
         """When pp_options has one value, total candidate count equals
         the legacy (pre-Wave-8) count. The expansion is a no-op rename."""
         from ac.optimizer import (
-            DeploymentConstraints, generate_candidates,
+            DeploymentConstraints, _enumerate_and_dedupe,
         )
         c = DeploymentConstraints(
             target_params_b=1.0, training_tokens=int(2e12),
@@ -59,7 +59,7 @@ class PpSearchExpansionTests(unittest.TestCase):
             pp_options=[1], serving_batch=8,
             allow_quality_sentinel=True, max_candidates=999999,
         )
-        cands = generate_candidates("h100", c)
+        cands, _, _ = _enumerate_and_dedupe("h100", c)
         # Every candidate must have pp_degree=1
         self.assertTrue(all(getattr(x, "pp_degree", 1) == 1 for x in cands),
                         "single-pp expansion must label every candidate pp_degree=1")
@@ -112,7 +112,7 @@ class DedupeIncludesPpTests(unittest.TestCase):
         """Two candidates differing only in pp_degree must NOT collide in
         dedupe. Without this, the second is silently dropped."""
         from ac.optimizer import (
-            DeploymentConstraints, generate_candidates,
+            DeploymentConstraints, _enumerate_and_dedupe,
         )
         c = DeploymentConstraints(
             target_params_b=1.0, training_tokens=int(2e12),
@@ -120,7 +120,7 @@ class DedupeIncludesPpTests(unittest.TestCase):
             pp_options=[1, 2], serving_batch=8,
             allow_quality_sentinel=True, max_candidates=999999,
         )
-        cands = generate_candidates("h100", c)
+        cands, _, _ = _enumerate_and_dedupe("h100", c)
         # Group by (shape minus pp); within each group, pp_degree variants
         # must be present.
         from collections import defaultdict

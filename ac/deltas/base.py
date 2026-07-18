@@ -29,6 +29,9 @@ _SIDECAR_ATTRS = (
     "_n_local_attn_layers",  # Wave 18g: local:global interleave
     "_tp_override", "_pp_override", "_ep_override", "_cp_override",
     "_dp_override",
+    # Resolution and precision metadata must survive later transformations
+    # in a composed sequence just like topology sidecars do.
+    "_target_activation_precision", "_state_layer_summary", "_delta_notes",
     # Provenance: the ordered list of delta names already applied to this
     # arch. Used by compose-time precondition checks so a later
     # transformation can refuse to silently overwrite an earlier one.
@@ -80,8 +83,30 @@ def _attention_already_swapped(arch: TArchConfig) -> Optional[str]:
     if getattr(arch, "_mla_latent_dim", None) is not None:
         return "swap_attention_to_mla"
     if getattr(arch, "_swa_window", None) is not None:
-        return "swap_attention_to_swa"
+        return (
+            "interleave_local_attention"
+            if int(getattr(arch, "_n_local_attn_layers", 0) or 0) > 0
+            else "swap_attention_to_swa"
+        )
+    # Baseline-loaded candidates carry canonical fields rather than delta
+    # sidecars. Treat them identically so an entry-point round-trip cannot
+    # bypass the overwrite guard.
+    if str(getattr(arch, "attention_type", "full") or "full") == "mla":
+        return "swap_attention_to_mla"
+    if int(getattr(arch, "local_window", 0) or 0) > 0:
+        return (
+            "interleave_local_attention"
+            if int(getattr(arch, "n_local_attn_layers", 0) or 0) > 0
+            else "swap_attention_to_swa"
+        )
     return None
+
+
+def _has_attention_layers(arch: TArchConfig) -> bool:
+    """Whether an architecture contains at least one attention layer."""
+    layer_types = list(getattr(arch, "layer_type_list", None) or [])
+    return not layer_types or any(
+        kind in ("attention", "local_attention") for kind in layer_types)
 
 
 class Transformation:
@@ -117,6 +142,96 @@ class Transformation:
         for f in common_fields:
             if hasattr(arch, f):
                 kwargs[f] = getattr(arch, f)
+        kwargs["weight_precision"] = str(
+            getattr(arch, "weight_precision", "bf16") or "bf16")
+        kwargs["activation_precision"] = str(
+            getattr(arch, "activation_precision", "bf16") or "bf16")
+        kwargs["kv_precision"] = str(
+            getattr(arch, "kv_precision", "bf16") or "bf16")
+        component_precisions = {}
+        ffn_precision = str(getattr(arch, "precision", "bf16") or "bf16")
+        if ffn_precision != kwargs["weight_precision"]:
+            for component in ("ffn_up", "ffn_down", "ffn_gate"):
+                component_precisions[component] = ffn_precision
+        attn_precision = getattr(arch, "attn_precision", None) or {}
+        v_precision = attn_precision.get("v", "bf16")
+        if v_precision != "bf16":
+            component_precisions["qkv_proj"] = v_precision
+        qk_precision = next((
+            value for value in (
+                attn_precision.get("qk"), attn_precision.get("q"),
+                attn_precision.get("k"))
+            if value and value != "bf16"), "bf16")
+        if qk_precision != "bf16":
+            component_precisions["qkv_proj"] = qk_precision
+        output_precision = attn_precision.get(
+            "output", attn_precision.get("o", "bf16"))
+        if output_precision != "bf16":
+            component_precisions["output_proj"] = output_precision
+        if component_precisions:
+            kwargs["component_precisions"] = component_precisions
+        attention_type = str(
+            getattr(arch, "attention_type", "full") or "full")
+        local_window = int(
+            getattr(arch, "local_window", 0)
+            or getattr(arch, "_swa_window", 0)
+            or 0)
+        n_local = int(
+            getattr(arch, "n_local_attn_layers", 0)
+            or getattr(arch, "_n_local_attn_layers", 0)
+            or 0)
+        if local_window > 0 and n_local == 0:
+            kwargs["attention_type"] = "swa"
+        else:
+            kwargs["attention_type"] = (
+                "gqa" if attention_type in {"full", "mha", "gqa", "mqa"}
+                else attention_type)
+        if local_window > 0:
+            kwargs["local_window"] = local_window
+            if n_local > 0:
+                layer_types = list(getattr(arch, "layer_type_list", None) or [])
+                n_attention = sum(
+                    1 for kind in layer_types if kind != "state")
+                if n_attention <= 0:
+                    n_attention = int(getattr(arch, "n_layers", 1) or 1)
+                kwargs["local_attention_fraction"] = min(
+                    1.0, n_local / max(1, n_attention))
+        passthrough = {
+            "mla_q_latent_dim": "mla_q_latent_dim",
+            "mla_rope_head_dim": "mla_rope_head_dim",
+            "mla_nope_head_dim": "mla_nope_head_dim",
+            "nsa_compress_block_size": "nsa_compress_block_size",
+            "nsa_compress_block_stride": "nsa_compress_block_stride",
+            "nsa_select_block_size": "nsa_select_block_size",
+            "nsa_select_top_k": "nsa_select_top_k",
+            "nsa_window_size": "nsa_window_size",
+            "csa_block_size": "csa_block_size",
+            "csa_top_k_blocks": "csa_top_k_blocks",
+            "csa_compression_dim": "csa_compression_dim",
+            "indexshare_num_buckets": "indexshare_num_buckets",
+            "indexshare_top_k_buckets": "indexshare_top_k_buckets",
+            "indexshare_index_dim": "indexshare_index_dim",
+            "msa_window_size": "msa_window_size",
+            "msa_dilated_top_k": "msa_dilated_top_k",
+            "msa_global_top_k": "msa_global_top_k",
+            "yoco_n_self_attn_layers": "yoco_n_self_attn_layers",
+            "mtp_n_predict_depths": "mtp_n_predict_depths",
+            "mtp_depth_n_layers": "mtp_depth_n_layers",
+            "mtp_train_loss_weight": "mtp_train_loss_weight",
+            "rope_scaling_method": "rope_scaling_method",
+            "rope_scaling_factor": "rope_scaling_factor",
+            "rope_original_max_position": "rope_original_max_position",
+            "sparsity_2_4": "sparsity_2_4",
+        }
+        for source, target in passthrough.items():
+            value = getattr(arch, source, None)
+            if value is not None:
+                kwargs[target] = copy.deepcopy(value)
+        mla_latent = (
+            getattr(arch, "mla_kv_latent_dim", None)
+            or getattr(arch, "_mla_latent_dim", None))
+        if mla_latent is not None:
+            kwargs["mla_latent_dim"] = int(mla_latent)
         # MoE → mark model_type
         if arch.moe_config is not None:
             kwargs["model_type"] = "moe"
@@ -125,7 +240,8 @@ class Transformation:
         # State → mark model_type
         if arch.state_config is not None:
             kwargs.setdefault("model_type", "hybrid" if arch.layer_type_list and
-                              any(lt == "attention" for lt in arch.layer_type_list)
+                              any(lt in ("attention", "local_attention")
+                                  for lt in arch.layer_type_list)
                               else "state")
             kwargs["state_config"] = copy.deepcopy(arch.state_config)
             # Provide layer counts the quality model expects.
@@ -135,6 +251,7 @@ class Transformation:
                     sum(1 for lt in arch.layer_type_list if lt == "state"))
                 kwargs["state_config"].setdefault(
                     "attention_layers",
-                    sum(1 for lt in arch.layer_type_list if lt == "attention"))
+                    sum(1 for lt in arch.layer_type_list
+                        if lt in ("attention", "local_attention")))
                 kwargs["state_config"].setdefault("enabled", True)
         return QArchConfig(**kwargs)

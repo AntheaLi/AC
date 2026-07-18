@@ -1,0 +1,490 @@
+{
+  "schema_version": "wave15.golden.v1",
+  "hardware": "h100",
+  "training_tokens": 2000000000000,
+  "generated_at_utc": "2026-07-17T21:09:28Z",
+  "max_candidates": 50,
+  "max_full_evaluations": 20,
+  "cells": [
+    {
+      "size_b": 1.0,
+      "ctx": 32768,
+      "serving": "short_serving",
+      "elapsed_s": 0.53,
+      "family": "dense",
+      "picked": {
+        "d_model": 2048,
+        "n_layers": 19,
+        "tp_degree": 1,
+        "loss": 2.2388,
+        "tbt_ms": 10.73,
+        "mem_gb": 28.79
+      }
+    },
+    {
+      "size_b": 1.0,
+      "ctx": 32768,
+      "serving": "long_serving",
+      "elapsed_s": 0.53,
+      "family": "dense",
+      "picked": {
+        "d_model": 2048,
+        "n_layers": 19,
+        "tp_degree": 1,
+        "loss": 2.2388,
+        "tbt_ms": 6.22,
+        "mem_gb": 15.11
+      }
+    },
+    {
+      "size_b": 1.0,
+      "ctx": 131072,
+      "serving": "short_serving",
+      "elapsed_s": 0.52,
+      "family": "dense",
+      "picked": {
+        "d_model": 2048,
+        "n_layers": 19,
+        "tp_degree": 1,
+        "loss": 2.2571,
+        "tbt_ms": 66.44,
+        "mem_gb": 110.87
+      }
+    },
+    {
+      "size_b": 1.0,
+      "ctx": 131072,
+      "serving": "long_serving",
+      "elapsed_s": 0.51,
+      "family": "dense",
+      "picked": {
+        "d_model": 2048,
+        "n_layers": 19,
+        "tp_degree": 1,
+        "loss": 2.2571,
+        "tbt_ms": 19.75,
+        "mem_gb": 56.15
+      }
+    },
+    {
+      "size_b": 1.0,
+      "ctx": 1048576,
+      "serving": "short_serving",
+      "elapsed_s": 0.45,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 2048,
+        "n_layers": 23,
+        "tp_degree": 1,
+        "loss": 2.2913,
+        "tbt_ms": 5.91,
+        "mem_gb": 282.98
+      }
+    },
+    {
+      "size_b": 1.0,
+      "ctx": 1048576,
+      "serving": "long_serving",
+      "elapsed_s": 0.46,
+      "family": "dense",
+      "picked": {
+        "d_model": 2048,
+        "n_layers": 19,
+        "tp_degree": 1,
+        "loss": 2.2845,
+        "tbt_ms": 471.24,
+        "mem_gb": 439.17
+      }
+    },
+    {
+      "size_b": 1.0,
+      "ctx": 2097152,
+      "serving": "short_serving",
+      "elapsed_s": 0.45,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 2048,
+        "n_layers": 22,
+        "tp_degree": 1,
+        "loss": 2.2783,
+        "tbt_ms": 6.38,
+        "mem_gb": 557.64
+      }
+    },
+    {
+      "size_b": 1.0,
+      "ctx": 2097152,
+      "serving": "long_serving",
+      "elapsed_s": 0.45,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 2048,
+        "n_layers": 22,
+        "tp_degree": 1,
+        "loss": 2.2783,
+        "tbt_ms": 5.63,
+        "mem_gb": 279.55
+      }
+    },
+    {
+      "size_b": 7.0,
+      "ctx": 32768,
+      "serving": "short_serving",
+      "elapsed_s": 1.0,
+      "family": "dense",
+      "picked": {
+        "d_model": 4608,
+        "n_layers": 33,
+        "tp_degree": 1,
+        "loss": 2.1255,
+        "tbt_ms": 17.68,
+        "mem_gb": 55.49
+      }
+    },
+    {
+      "size_b": 7.0,
+      "ctx": 32768,
+      "serving": "long_serving",
+      "elapsed_s": 1.0,
+      "family": "dense",
+      "picked": {
+        "d_model": 4608,
+        "n_layers": 33,
+        "tp_degree": 1,
+        "loss": 2.1255,
+        "tbt_ms": 11.79,
+        "mem_gb": 32.15
+      }
+    },
+    {
+      "size_b": 7.0,
+      "ctx": 131072,
+      "serving": "short_serving",
+      "elapsed_s": 0.91,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 4096,
+        "n_layers": 36,
+        "tp_degree": 1,
+        "loss": 2.1232,
+        "tbt_ms": 90.97,
+        "mem_gb": 156.4
+      }
+    },
+    {
+      "size_b": 7.0,
+      "ctx": 131072,
+      "serving": "long_serving",
+      "elapsed_s": 0.91,
+      "family": "moe_hybrid",
+      "picked": {
+        "d_model": 4096,
+        "n_layers": 41,
+        "tp_degree": 1,
+        "loss": 2.1273,
+        "tbt_ms": 10.56,
+        "mem_gb": 66.42
+      }
+    },
+    {
+      "size_b": 7.0,
+      "ctx": 1048576,
+      "serving": "short_serving",
+      "elapsed_s": 0.87,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 4096,
+        "n_layers": 31,
+        "tp_degree": 1,
+        "loss": 2.1524,
+        "tbt_ms": 23.86,
+        "mem_gb": 623.51
+      }
+    },
+    {
+      "size_b": 7.0,
+      "ctx": 1048576,
+      "serving": "long_serving",
+      "elapsed_s": 0.87,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 4096,
+        "n_layers": 31,
+        "tp_degree": 1,
+        "loss": 2.1524,
+        "tbt_ms": 21.44,
+        "mem_gb": 317.34
+      }
+    },
+    {
+      "size_b": 7.0,
+      "ctx": 2097152,
+      "serving": "short_serving",
+      "elapsed_s": 0.85,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 4608,
+        "n_layers": 32,
+        "tp_degree": 1,
+        "loss": 20.162,
+        "tbt_ms": 187.3,
+        "mem_gb": 1400.01
+      }
+    },
+    {
+      "size_b": 7.0,
+      "ctx": 2097152,
+      "serving": "long_serving",
+      "elapsed_s": 0.85,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 4608,
+        "n_layers": 32,
+        "tp_degree": 1,
+        "loss": 2.1652,
+        "tbt_ms": 49.18,
+        "mem_gb": 704.72
+      }
+    },
+    {
+      "size_b": 70.0,
+      "ctx": 32768,
+      "serving": "short_serving",
+      "elapsed_s": 1.89,
+      "family": "dense",
+      "picked": {
+        "d_model": 9216,
+        "n_layers": 70,
+        "tp_degree": 1,
+        "loss": 2.0225,
+        "tbt_ms": 636.6,
+        "mem_gb": 460.34
+      }
+    },
+    {
+      "size_b": 70.0,
+      "ctx": 32768,
+      "serving": "long_serving",
+      "elapsed_s": 1.89,
+      "family": "dense",
+      "picked": {
+        "d_model": 9216,
+        "n_layers": 70,
+        "tp_degree": 1,
+        "loss": 2.0225,
+        "tbt_ms": 354.86,
+        "mem_gb": 275.02
+      }
+    },
+    {
+      "size_b": 70.0,
+      "ctx": 131072,
+      "serving": "short_serving",
+      "elapsed_s": 1.74,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 9216,
+        "n_layers": 81,
+        "tp_degree": 1,
+        "loss": 2.0438,
+        "tbt_ms": 231.12,
+        "mem_gb": 376.24
+      }
+    },
+    {
+      "size_b": 70.0,
+      "ctx": 131072,
+      "serving": "long_serving",
+      "elapsed_s": 1.75,
+      "family": "moe_hybrid",
+      "picked": {
+        "d_model": 9216,
+        "n_layers": 67,
+        "tp_degree": 1,
+        "loss": 2.0327,
+        "tbt_ms": 3199.8,
+        "mem_gb": 790.55
+      }
+    },
+    {
+      "size_b": 70.0,
+      "ctx": 1048576,
+      "serving": "short_serving",
+      "elapsed_s": 1.53,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 9216,
+        "n_layers": 82,
+        "tp_degree": 1,
+        "loss": 19.1858,
+        "tbt_ms": 1793.43,
+        "mem_gb": 1971.51
+      }
+    },
+    {
+      "size_b": 70.0,
+      "ctx": 1048576,
+      "serving": "long_serving",
+      "elapsed_s": 1.54,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 9216,
+        "n_layers": 82,
+        "tp_degree": 1,
+        "loss": 19.1858,
+        "tbt_ms": 1079.76,
+        "mem_gb": 1031.53
+      }
+    },
+    {
+      "size_b": 70.0,
+      "ctx": 2097152,
+      "serving": "short_serving",
+      "elapsed_s": 1.51,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 9216,
+        "n_layers": 82,
+        "tp_degree": 1,
+        "loss": 19.1858,
+        "tbt_ms": 2175.21,
+        "mem_gb": 3852.04
+      }
+    },
+    {
+      "size_b": 70.0,
+      "ctx": 2097152,
+      "serving": "long_serving",
+      "elapsed_s": 1.5,
+      "family": "hybrid",
+      "picked": {
+        "d_model": 9216,
+        "n_layers": 82,
+        "tp_degree": 1,
+        "loss": 19.1858,
+        "tbt_ms": 1791.94,
+        "mem_gb": 1972.07
+      }
+    },
+    {
+      "size_b": 500.0,
+      "ctx": 32768,
+      "serving": "short_serving",
+      "elapsed_s": 0.36,
+      "family": "dense",
+      "picked": {
+        "d_model": 18432,
+        "n_layers": 140,
+        "tp_degree": 1,
+        "loss": 18.8023,
+        "tbt_ms": 4795.34,
+        "mem_gb": 826.09
+      }
+    },
+    {
+      "size_b": 500.0,
+      "ctx": 32768,
+      "serving": "long_serving",
+      "elapsed_s": 0.36,
+      "family": "dense",
+      "picked": {
+        "d_model": 18432,
+        "n_layers": 140,
+        "tp_degree": 1,
+        "loss": 2.0577,
+        "tbt_ms": 1166.06,
+        "mem_gb": 649.85
+      }
+    },
+    {
+      "size_b": 500.0,
+      "ctx": 131072,
+      "serving": "short_serving",
+      "elapsed_s": 0.37,
+      "family": "dense",
+      "picked": {
+        "d_model": 18432,
+        "n_layers": 140,
+        "tp_degree": 1,
+        "loss": 18.8023,
+        "tbt_ms": 22563.36,
+        "mem_gb": 1883.56
+      }
+    },
+    {
+      "size_b": 500.0,
+      "ctx": 131072,
+      "serving": "long_serving",
+      "elapsed_s": 0.36,
+      "family": "dense",
+      "picked": {
+        "d_model": 18432,
+        "n_layers": 140,
+        "tp_degree": 1,
+        "loss": 18.8023,
+        "tbt_ms": 11135.22,
+        "mem_gb": 1178.58
+      }
+    },
+    {
+      "size_b": 500.0,
+      "ctx": 1048576,
+      "serving": "short_serving",
+      "elapsed_s": 0.36,
+      "family": "dense",
+      "picked": {
+        "d_model": 18432,
+        "n_layers": 140,
+        "tp_degree": 1,
+        "loss": 18.8023,
+        "tbt_ms": 170095.25,
+        "mem_gb": 11753.27
+      }
+    },
+    {
+      "size_b": 500.0,
+      "ctx": 1048576,
+      "serving": "long_serving",
+      "elapsed_s": 0.36,
+      "family": "dense",
+      "picked": {
+        "d_model": 18432,
+        "n_layers": 140,
+        "tp_degree": 1,
+        "loss": 18.8023,
+        "tbt_ms": 86332.24,
+        "mem_gb": 6113.43
+      }
+    },
+    {
+      "size_b": 500.0,
+      "ctx": 2097152,
+      "serving": "short_serving",
+      "elapsed_s": 0.37,
+      "family": "dense",
+      "picked": {
+        "d_model": 18432,
+        "n_layers": 140,
+        "tp_degree": 1,
+        "loss": 18.8023,
+        "tbt_ms": 337251.08,
+        "mem_gb": 23032.93
+      }
+    },
+    {
+      "size_b": 500.0,
+      "ctx": 2097152,
+      "serving": "long_serving",
+      "elapsed_s": 0.37,
+      "family": "dense",
+      "picked": {
+        "d_model": 18432,
+        "n_layers": 140,
+        "tp_degree": 1,
+        "loss": 18.8023,
+        "tbt_ms": 170088.79,
+        "mem_gb": 11753.27
+      }
+    }
+  ]
+}

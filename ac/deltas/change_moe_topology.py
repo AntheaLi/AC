@@ -36,8 +36,9 @@ class ChangeMoeTopology(Transformation):
             if capacity_factor <= 0:
                 raise ValueError("capacity_factor must be > 0")
             cfg["capacity_factor"] = float(capacity_factor)
-        # top_k must not exceed n_experts.
-        cfg["top_k"] = min(cfg["top_k"], cfg["n_experts"])
+        if int(cfg["top_k"]) > int(cfg["n_experts"]):
+            raise ValueError(
+                f"top_k={cfg['top_k']} must be <= n_experts={cfg['n_experts']}")
         out.moe_config = cfg
         _record_applied(out, self.name)
         return out

@@ -434,7 +434,7 @@ def _reason_for_record(rec: ModifierRecord) -> str:
         return "changes tensor-parallel communication/compute split"
     if "n_layers" in fields:
         return "trades depth quality proxy against latency"
-    if "ffn_dim" in fields:
+    if "ffn_dim" in fields or "expert_dim" in fields:
         return "changes FFN capacity and tile shape"
     return "local architecture perturbation"
 
@@ -447,6 +447,7 @@ def _reason_for_change(field: str) -> str:
         "tp": "changes tensor-parallel sharding and all-reduce pressure.",
         "n_layers": "trades depth against latency, memory, and scaling-law shape residual.",
         "ffn_dim": "adjusts FFN capacity while keeping the dimension tile-friendly.",
+        "expert_dim": "adjusts routed-expert capacity while keeping the dense reference FFN unchanged.",
     }.get(field, "local baseline-relative architecture change.")
 
 

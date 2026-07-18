@@ -1,4 +1,4 @@
-"""v1-stress transformation library — exports the 10 named transformations."""
+"""v1-stress transformation library - exports the 11 named transformations."""
 
 from .base import Transformation
 from .swap_attention_to_gqa import SwapAttentionToGQA

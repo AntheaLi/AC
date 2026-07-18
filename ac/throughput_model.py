@@ -58,9 +58,17 @@ except ImportError:  # direct-script invocation: synthesize sibling import
     )
 
 try:
-    from .architecture import parameter_ledger  # type: ignore[no-redef]
+    from .architecture import (  # type: ignore[no-redef]
+        parameter_byte_ledger, parameter_ledger,
+        precision_bytes_per_element, training_parameter_byte_layout,
+        training_parameter_layout,
+    )
 except ImportError:
-    from architecture import parameter_ledger  # type: ignore[no-redef]
+    from architecture import (  # type: ignore[no-redef]
+        parameter_byte_ledger, parameter_ledger,
+        precision_bytes_per_element, training_parameter_byte_layout,
+        training_parameter_layout,
+    )
 
 
 # =============================================================================
@@ -81,6 +89,15 @@ class ArchConfig:
     batch_size: int = 1
     seq_len: int = 2048
     precision: str = "bf16"
+    # Keep weight and activation precision explicit even though the current
+    # matmul model uses `precision` as its dominant compute tier. Delta and
+    # bridge paths need to preserve all three independently; activation
+    # precision also controls activation/communication byte volume.
+    weight_precision: str = "bf16"
+    activation_precision: str = "bf16"
+    attn_precision: Dict[str, str] = field(default_factory=lambda: {
+        "qk": "bf16", "v": "bf16", "output": "bf16",
+    })
     kv_precision: str = "bf16"  # KV cache precision (can differ for quantized KV)
 
     # v1 MoE hook (v0.1: always None; v0.2+: dict with the MoE FFN block).
@@ -107,6 +124,7 @@ class ArchConfig:
     # Keys: d_state, state_expansion, n_heads, d_head, state_precision
     layer_type_list: Optional[List[str]] = None
     # Per-layer type: "attention" or "state". When None, all attention.
+    placement_strategy: str = "none"
 
     # v1-fix MLA: DeepSeek-V2/V3 Multi-head Latent Attention. When
     # `attention_type == "mla"`, the per-token KV cache stores ONE compressed
@@ -152,6 +170,14 @@ class ArchConfig:
     mtp_n_predict_depths: int = 0
     mtp_depth_n_layers: int = 1
     mtp_inference_mode: str = "drop"      # "drop" | "speculative_decode"
+    # Quality/config identity retained on this shared delta representation.
+    mtp_train_loss_weight: float = 0.3
+
+    # Positional identity is quality-only today, but delta transforms use
+    # ArchConfig as their mutable architecture view and must preserve it.
+    rope_scaling_method: str = "none"
+    rope_scaling_factor: float = 1.0
+    rope_original_max_position: int = 8192
 
     # v1-fix CP: Context Parallelism. Splits the sequence axis across CP
     # ranks. At training time, attention compute and KV-cache memory both
@@ -189,6 +215,7 @@ class ArchConfig:
     # K-th layer's KV. KV cache shrinks to K/N of dense, and decode
     # bandwidth too (modulo the cross-attention read pattern).
     yoco_n_self_attn_layers: int = 0  # 0 = YOCO off
+    yoco_share_pattern: str = "single_source"
 
     # Wave 18g (Jul 2026): per-layer attention heterogeneity — local:global
     # interleave (GPT-OSS / Gemma-2 / Llama-4 pattern). `n_local_attn_layers`
@@ -327,6 +354,33 @@ class ArchConfig:
             return int(dense_per_token * effective_share)
         return int(2 * self.n_kv_heads * self.d_head * bpe)
 
+    def kv_bytes_per_token_split(self, context_length: int = 0):
+        """Wave 35: (tp_shardable, tp_replicated) per-token per-layer KV bytes.
+
+        The per-kv-head portion of a KV cache shards across TP exactly like
+        GQA heads do — this covers full/GQA/MQA, NSA, CSA, and MSA, whose
+        caches are all stored per kv head. Two structures are genuinely
+        replicated across TP ranks because they are shared across query
+        heads: the MLA latent (+ RoPE key), and the IndexShare per-token
+        index entry (the DSA-style lightning indexer is shared across
+        heads). Previously the decode-bandwidth path treated ALL of
+        NSA/CSA/IndexShare/MSA as replicated while the capacity path
+        treated them (index included) as sharded — mutually inconsistent
+        and both wrong for IndexShare. Sums to kv_bytes_per_token_per_layer.
+        """
+        total = self.kv_bytes_per_token_per_layer(context_length)
+        if self.attention_type == "mla" and self.mla_kv_latent_dim:
+            return 0, total
+        if self.attention_type == "indexshare" and self.indexshare_top_k_buckets:
+            bpe_map = {"bf16": 2, "fp16": 2, "fp8": 1, "fp4": 0.5,
+                       "int8": 1, "int4": 0.5, "tf32": 4, "fp32": 4,
+                       "mxfp4": 0.53, "mxfp6": 0.78}
+            bpe = bpe_map.get(self.kv_precision, 2)
+            idx_dim = int(self.indexshare_index_dim or 64)
+            replicated = int(2 * idx_dim * bpe)
+            return max(0, total - replicated), replicated
+        return total, 0
+
 
 @dataclass
 class HardwareConfig:
@@ -352,6 +406,15 @@ class HardwareConfig:
     # 8 for TPU v5e. Optional in JSON — falls back to family-based inference when absent.
     nvlink_domain_size: Optional[int] = None
 
+    # Gate-2 Task C (rack-scale system layer, pure-additive): optional
+    # rack-level metadata for system targets such as GB200 NVL72. Both
+    # default to None; single-node specs are completely unaffected.
+    #   gpus_per_rack — accelerators inside one rack-scale NVLink domain.
+    #   chip          — records chip-level parameter inheritance
+    #                   (gb200_nvl72 reuses b200 single-chip params).
+    gpus_per_rack: Optional[int] = None
+    chip: Optional[str] = None
+
     # Wave 20 (feedback #2): vendor DATASHEET dense Tensor-Core peaks, for
     # implied-MFU reporting only. On NVIDIA parts `peak_flops_tf` is the
     # internal roofline baseline (~half of datasheet by convention); on
@@ -373,6 +436,32 @@ class HardwareConfig:
         with open(path) as f:
             d = json.load(f)
         calibration = d.get("calibration", {})
+        interconnect = dict(d["interconnect"])
+
+        # Gate-2 Task C: optional rack-scale `system` block. When present it
+        # is the authoritative source for the fabric-domain layer and is
+        # mapped onto the legacy fields below; when absent the loader keeps
+        # single-node semantics exactly (nvlink_domain_size stays whatever
+        # the top-level field says — default None → family inference in
+        # `_nvlink_domain_size`, 8 for all shipping single-node specs — and
+        # the interconnect dict passes through unmodified), so pre-existing
+        # spec files behave byte-identically.
+        system = d.get("system") or {}
+        if not isinstance(system, dict):
+            system = {}
+        if system:
+            if system.get("intra_domain_bandwidth_gbps") is not None:
+                interconnect["intra_node_bw_gb_s"] = system["intra_domain_bandwidth_gbps"]
+            if system.get("inter_domain_bandwidth_gbps") is not None:
+                interconnect["inter_node_bw_gb_s"] = system["inter_domain_bandwidth_gbps"]
+
+        nvlink_domain_size = d.get("nvlink_domain_size")
+        if system.get("nvlink_domain_size") is not None:
+            nvlink_domain_size = system["nvlink_domain_size"]
+        gpus_per_rack = d.get("gpus_per_rack")
+        if system.get("gpus_per_rack") is not None:
+            gpus_per_rack = system["gpus_per_rack"]
+
         return cls(
             vendor=d["vendor"],
             accelerator_family=d["accelerator_family"],
@@ -386,10 +475,12 @@ class HardwareConfig:
             supported_precisions=d["supported_precisions"],
             fused_attention_efficiency=d["fused_attention_efficiency"],
             fused_attention_kernel=d["fused_attention_kernel"],
-            interconnect=d["interconnect"],
+            interconnect=interconnect,
             gpus_per_node=d.get("gpus_per_node", d.get("chips_per_host", 8)),
             chips_per_host=d.get("chips_per_host", d.get("gpus_per_node", 4)),
-            nvlink_domain_size=d.get("nvlink_domain_size"),
+            nvlink_domain_size=nvlink_domain_size,
+            gpus_per_rack=gpus_per_rack,
+            chip=d.get("chip"),
             datasheet_peak_flops_tf=d.get("datasheet_peak_flops_tf"),
             calibration=calibration,
         )
@@ -539,6 +630,7 @@ class ThroughputResult:
     # TP=1 PP=1 even though real training memory (weights + grads + AdamW
     # opt states + activations) is 90-150 GB before sharding.
     training_memory_per_gpu_gb: float = 0.0
+    training_sequence_length: int = 0
 
     # Breakdown
     per_layer_breakdown: Optional[LayerBreakdown] = None  # training
@@ -991,16 +1083,74 @@ def _efficiency_for(
 
     return mu, sigma, bucket
 
+
+def _mixed_efficiency_for(
+    phase: str,
+    breakdowns: List[LayerBreakdown],
+    arch: ArchConfig,
+    cal: dict,
+) -> tuple:
+    """Blend calibrated efficiency continuously across layer cost classes.
+
+    A winner-take-all bottleneck lookup creates a discontinuity: shaving one
+    microsecond from compute can relabel a layer ``communication`` and apply a
+    lower efficiency to *all* work, including fixed launch overhead. The
+    reported latency can then increase after a real speedup. Calibrate each
+    additive cost class and combine their exposed times instead.
+    """
+    totals = {
+        "compute": sum(max(0.0, bd.compute_s) for bd in breakdowns),
+        "memory": sum(max(0.0, bd.memory_s) for bd in breakdowns),
+        "communication": sum(
+            max(0.0, bd.communication_s) for bd in breakdowns
+        ),
+    }
+    raw_total = sum(totals.values())
+    if raw_total <= 0:
+        return _efficiency_for(phase, "compute", arch, cal)
+
+    exposed_total = 0.0
+    variance = 0.0
+    labels = []
+    for regime, raw_time in totals.items():
+        if raw_time <= 0:
+            continue
+        mu, sigma, label = _efficiency_for(phase, regime, arch, cal)
+        mu = max(mu, 1e-9)
+        exposed = raw_time / mu
+        exposed_total += exposed
+        variance += (exposed * sigma / mu) ** 2
+        short_label = {
+            "compute": "compute",
+            "memory": "memory",
+            "communication": "comm",
+        }[regime]
+        labels.append(f"{short_label}={raw_time / raw_total:.2f}")
+
+    effective_mu = raw_total / max(exposed_total, 1e-12)
+    relative_sigma = math.sqrt(variance) / max(exposed_total, 1e-12)
+    effective_sigma = effective_mu * relative_sigma
+    return effective_mu, effective_sigma, "mix:" + ",".join(labels)
+
 def load_calibration(hw_name: str) -> Optional[CalibrationTable]:
-    """Load calibration table for a hardware target, if available."""
-    if hw_name in _CALIBRATION_CACHE:
-        return _CALIBRATION_CACHE[hw_name]
-    path = os.path.join(_CALIBRATION_DIR, f"{hw_name}_calibration.json")
+    """Load calibration table for a hardware target, if available.
+
+    Gate-2 Task C: `_HARDWARE_CALIBRATION_ALIAS` is now honored here (not
+    only in `warn_if_uncalibrated`) so same-silicon system targets
+    (gb200_nvl72 → b200, h800 → h100) share the measured table of their
+    chip. Existing targets are unaffected: every pre-existing alias
+    (trn2/trn3) points at a canonical name with no calibration file on
+    disk, which still returns None exactly as before.
+    """
+    canonical = _HARDWARE_CALIBRATION_ALIAS.get(hw_name, hw_name)
+    if canonical in _CALIBRATION_CACHE:
+        return _CALIBRATION_CACHE[canonical]
+    path = os.path.join(_CALIBRATION_DIR, f"{canonical}_calibration.json")
     if os.path.exists(path):
         table = CalibrationTable.from_json(path)
-        _CALIBRATION_CACHE[hw_name] = table
+        _CALIBRATION_CACHE[canonical] = table
         return table
-    _CALIBRATION_CACHE[hw_name] = None
+    _CALIBRATION_CACHE[canonical] = None
     return None
 
 
@@ -1009,6 +1159,11 @@ def load_calibration(hw_name: str) -> Optional[CalibrationTable]:
 _HARDWARE_CALIBRATION_ALIAS: Dict[str, str] = {
     "trn2": "trainium2",
     "trn3": "trainium3",
+    # Gate-2 Task C: system targets share the measured calibration table of
+    # their chip silicon (compute-side efficiency transfers; the bandwidth
+    # differences live in the spec JSON interconnect fields).
+    "gb200_nvl72": "b200",
+    "h800": "h100",
 }
 
 # Track which hardware names we've already warned about in this process so
@@ -1055,6 +1210,8 @@ def load_hardware(name: str) -> HardwareConfig:
     mapping = {
         "h100": "h100_sxm.json",
         "b200": "b200.json",
+        "gb200_nvl72": "gb200_nvl72.json",  # Gate-2 Task C: rack-scale system target
+        "h800": "h800.json",                # Gate-2 Task C: H100 export SKU (NVLink 400 GB/s)
         "tpu_v5e": "tpu_v5e.json",
         "tpu_v5p": "tpu_v5p.json",
         "trainium2": "trainium2.json",
@@ -1406,10 +1563,26 @@ def _dp_grad_allreduce_cost(
     × dp_degree` overcounts large-cluster throughput by ~1.2-3× at
     dp ≥ 256, depending on params and fabric.
     """
+    bpe = hw.bytes_per_elem(precision)
+    return _dp_grad_allreduce_bytes_cost(
+        total_params * bpe,
+        hw,
+        dp_degree,
+        zero_stage=zero_stage,
+        overlap_fraction=overlap_fraction,
+    )
+
+
+def _dp_grad_allreduce_bytes_cost(
+    grad_bytes: float,
+    hw: HardwareConfig,
+    dp_degree: int,
+    zero_stage: int = 3,
+    overlap_fraction: float = 0.7,
+) -> float:
+    """DP gradient synchronization cost from already-typed tensor bytes."""
     if dp_degree <= 1:
         return 0.0
-    bpe = hw.bytes_per_elem(precision)
-    grad_bytes = total_params * bpe
     intra_bw = hw.interconnect["intra_node_bw_gb_s"] * 1e9
     inter_bw = hw.interconnect["inter_node_bw_gb_s"] * 1e9
     per_node = hw.gpus_per_node if hw.vendor == "nvidia" else hw.chips_per_host
@@ -1762,14 +1935,12 @@ def _state_layer_cost(
     B = arch.batch_size
     S = arch.seq_len if phase != "decode" else 1
     d = arch.d_model
-    prec = arch.precision
-    bpe = hw.bytes_per_elem(prec)
-
     d_state = int(sc.get("d_state", 128))
     state_expansion = int(sc.get("state_expansion", 2))
     state_n_heads = int(sc.get("n_heads", arch.n_heads))
     state_d_head = int(sc.get("d_head", 64))
-    state_prec = sc.get("state_precision", prec)
+    state_prec = str(sc.get("state_precision", arch.weight_precision))
+    prec = state_prec
     state_bpe = hw.bytes_per_elem(state_prec)
 
     heads_per_gpu = state_n_heads // tp_degree
@@ -1941,26 +2112,15 @@ def estimate_memory_per_gpu(
         shared_weights_per_gpu = 3 * d_model * shared_dim
                                   * bpe_expert / tp_degree   (replicated over EP)
     """
-    bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(arch.precision, 2)
-    kv_bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1}.get(arch.kv_precision, 2)
+    activation_bpe = precision_bytes_per_element(arch.activation_precision)
 
     layers_per_stage = math.ceil(arch.n_layers / max(pp_degree, 1))
-    ledger = parameter_ledger(arch)
-    if arch.moe_config is not None:
-        expert_prec = arch.moe_config.get("precision", arch.precision)
-        bpe_exp = {
-            "bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4,
-            "mxfp4": 0.53, "mxfp6": 0.78,
-        }.get(expert_prec, 2)
-    else:
-        bpe_exp = bpe
-    shared_nonexpert = max(0, ledger.shared_params - ledger.shared_expert)
+    byte_ledger = parameter_byte_ledger(arch)
     shared_divisor = max(1, tp_degree) * max(1, pp_degree)
     expert_divisor = shared_divisor * max(1, ep_degree)
     model_bytes = (
-        shared_nonexpert * bpe / shared_divisor
-        + ledger.shared_expert * bpe_exp / shared_divisor
-        + ledger.expert_total * bpe_exp / expert_divisor
+        byte_ledger.shared_bytes / shared_divisor
+        + byte_ledger.expert_total / expert_divisor
     )
 
     # KV cache
@@ -1970,8 +2130,14 @@ def estimate_memory_per_gpu(
         # v1-fix MLA: when type=mla, KV is a single compressed latent + RoPE
         # key (not 2× n_kv_heads × d_head). kv_bytes_per_token_per_layer
         # returns the right per-token quantity.
-        kv_per_token = arch.kv_bytes_per_token_per_layer(kv_cache_len)
-        kv_per_layer = kv_per_token * kv_cache_len * arch.batch_size
+        # Wave 35: split per-token KV into the TP-shardable per-kv-head
+        # portion and the TP-replicated portion (MLA latent, IndexShare
+        # index). Replaces the old kv_tp_shards special-case, which
+        # wrongly TP-divided the IndexShare index.
+        kv_shard_b, kv_repl_b = arch.kv_bytes_per_token_split(kv_cache_len)
+        _kv_tp_shards = max(1, min(tp_degree, arch.n_kv_heads))
+        kv_per_token_sharded = kv_shard_b / _kv_tp_shards + kv_repl_b
+        kv_per_layer = kv_per_token_sharded * kv_cache_len * arch.batch_size
         # v1-fix YOCO: cross-layer KV sharing — only K layers carry their
         # own KV. Cuts kv_bytes by K/n_layers in the dense memory estimator.
         yoco_k = int(getattr(arch, "yoco_n_self_attn_layers", 0) or 0)
@@ -1994,14 +2160,11 @@ def estimate_memory_per_gpu(
         # entirely, which made every long-ctx cell stamp infeasible
         # even when CP would have made it fit.
         cp = max(1, int(cp_degree))
-        # When n_kv_heads < TP, KV heads are replicated across TP rank
-        # groups. Only min(TP, n_kv_heads) is a real KV-sharding factor.
-        kv_tp_shards = (
-            1
-            if arch.attention_type == "mla"
-            else max(1, min(tp_degree, arch.n_kv_heads))
-        )
-        kv_bytes = kv_per_layer * effective_kv_layers / (kv_tp_shards * cp)
+        # Wave 35: TP sharding is already folded into kv_per_layer via
+        # kv_bytes_per_token_split (per-kv-head part / min(TP, n_kv_heads),
+        # MLA latent + IndexShare index replicated). CP splits the
+        # sequence axis for every cache type.
+        kv_bytes = kv_per_layer * effective_kv_layers / cp
 
     # Activations.
     # v1-fix long-ctx (June 2026): the previous formula
@@ -2055,7 +2218,7 @@ def estimate_memory_per_gpu(
     )
     # Guard: never larger than the model's supported context.
     act_seq_len = min(act_seq_len, int(arch.seq_len)) if arch.seq_len else act_seq_len
-    act_bytes = (arch.batch_size * act_seq_len * arch.d_model * bpe
+    act_bytes = (arch.batch_size * act_seq_len * arch.d_model * activation_bpe
                  * layer_factor * pp_act_queue / (tp_act * cp))
 
     return model_bytes + kv_bytes + act_bytes
@@ -2085,67 +2248,23 @@ def estimate_memory_per_gpu_hybrid(
     n_attn_layers = n_global_attn_layers + n_local_attn_layers
     n_state_layers = sum(1 for lt in layer_types if lt == "state")
 
-    bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(arch.precision, 2)
-    kv_bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1}.get(arch.kv_precision, 2)
+    activation_bpe = precision_bytes_per_element(arch.activation_precision)
 
     layers_per_stage = arch.n_layers // max(pp_degree, 1)
 
     # Count attention and state layers in this pipeline stage
     # (Simplified: assume uniform distribution across stages)
     attn_frac = n_attn_layers / max(1, arch.n_layers)
-    state_frac = n_state_layers / max(1, arch.n_layers)
     attn_layers_this_stage = int(attn_frac * layers_per_stage + 0.5)
-    state_layers_this_stage = layers_per_stage - attn_layers_this_stage
-
-    # Attention layer weights per layer
-    q_params = arch.d_model * arch.d_head * arch.n_heads
-    kv_params = 2 * arch.d_model * arch.d_head * arch.n_kv_heads
-    o_params = arch.d_head * arch.n_heads * arch.d_model
-    ffn_params = 3 * arch.d_model * arch.ffn_dim
-    attn_per_layer = q_params + kv_params + o_params + ffn_params
-    attn_bytes = attn_per_layer * attn_layers_this_stage * bpe / tp_degree
-
-    # State layer weights per layer
-    sc = arch.state_config or {}
-    d_state = int(sc.get("d_state", 128))
-    state_expansion = int(sc.get("state_expansion", 2))
-    state_n_heads = int(sc.get("n_heads", arch.n_heads))
-    state_d_head = int(sc.get("d_head", 64))
-    state_prec = sc.get("state_precision", arch.precision)
-    state_bpe = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(state_prec, 2)
-
-    # State replaces attention: input proj + SSM params + output proj + FFN
-    state_proj_params = arch.d_model * (state_expansion * arch.d_model)
-    ssm_params = state_n_heads * d_state * state_d_head
-    state_out_params = arch.d_model * arch.d_model
-    state_per_layer = state_proj_params + ssm_params + state_out_params + ffn_params
-    state_bytes = state_per_layer * state_layers_this_stage * state_bpe / tp_degree
-
-    # Embedding
-    embed_params = 2 * arch.vocab_size * arch.d_model
-    embed_bytes = embed_params * bpe / tp_degree
-
-    # Norm params
-    norm_bytes = 2 * arch.d_model * layers_per_stage * bpe
 
     # Use the shared parameter ledger so hybrid+MoE stores all experts rather
     # than one dense-FFN surrogate.
-    ledger = parameter_ledger(arch)
-    if arch.moe_config is not None:
-        expert_prec = arch.moe_config.get("precision", arch.precision)
-        bpe_exp = {
-            "bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4,
-            "mxfp4": 0.53, "mxfp6": 0.78,
-        }.get(expert_prec, 2)
-    else:
-        bpe_exp = bpe
-    shared_nonexpert = max(0, ledger.shared_params - ledger.shared_expert)
+    byte_ledger = parameter_byte_ledger(arch)
     shared_divisor = max(1, tp_degree) * max(1, pp_degree)
     expert_divisor = shared_divisor * max(1, ep_degree)
     model_bytes = (
-        shared_nonexpert * bpe / shared_divisor
-        + ledger.shared_expert * bpe_exp / shared_divisor
-        + ledger.expert_total * bpe_exp / expert_divisor
+        byte_ledger.shared_bytes / shared_divisor
+        + byte_ledger.expert_total / expert_divisor
     )
 
     # KV cache: only for attention layers
@@ -2153,8 +2272,14 @@ def estimate_memory_per_gpu_hybrid(
     if include_kv_cache:
         # v1-fix MLA: MLA caches one compressed latent + d_rope key, not
         # 2× n_kv × d_head. The helper handles both attention types.
-        kv_per_token = arch.kv_bytes_per_token_per_layer(kv_cache_len)
-        kv_per_layer = kv_per_token * kv_cache_len * arch.batch_size
+        # Wave 35: TP-shardable vs TP-replicated split (see
+        # kv_bytes_per_token_split). Folds min(TP, n_kv_heads) sharding
+        # into the per-token figure; MLA latent and IndexShare index stay
+        # replicated across TP ranks.
+        kv_shard_b, kv_repl_b = arch.kv_bytes_per_token_split(kv_cache_len)
+        _kv_tp_shards = max(1, min(tp_degree, arch.n_kv_heads))
+        kv_per_token_sharded = kv_shard_b / _kv_tp_shards + kv_repl_b
+        kv_per_layer = kv_per_token_sharded * kv_cache_len * arch.batch_size
         # v1-fix YOCO: cross-layer KV sharing — only K layers keep their own
         # KV. Cuts kv_bytes by K/n_layers.
         yoco_k = int(getattr(arch, "yoco_n_self_attn_layers", 0) or 0)
@@ -2172,13 +2297,9 @@ def estimate_memory_per_gpu_hybrid(
                 (1.0 - local_frac) + local_frac * local_ratio)
         cp = max(1, int(cp_degree))
         # v1-fix long-ctx (June 2026): CP splits the sequence axis, so KV
-        # and seq-parallel activations are 1/cp per rank.
-        kv_tp_shards = (
-            1
-            if arch.attention_type == "mla"
-            else max(1, min(tp_degree, arch.n_kv_heads))
-        )
-        kv_bytes = kv_per_layer * effective_kv_layers / (kv_tp_shards * cp)
+        # and seq-parallel activations are 1/cp per rank. Wave 35: TP
+        # sharding already folded into kv_per_layer via the split helper.
+        kv_bytes = kv_per_layer * effective_kv_layers / cp
 
     # Activations: TP-sequence-parallel + CP-sharded + sqrt(L) checkpoint
     # boundaries + PP queue depth. See estimate_memory_per_gpu for the
@@ -2199,7 +2320,7 @@ def estimate_memory_per_gpu_hybrid(
         pp_act_queue = ((pp + 1) / 2) * v_stages
     else:  # "1f1b"
         pp_act_queue = (pp + 1) / 2
-    act_bytes = (arch.batch_size * arch.seq_len * arch.d_model * bpe
+    act_bytes = (arch.batch_size * arch.seq_len * arch.d_model * activation_bpe
                  * layer_factor * pp_act_queue / (tp_act * cp))
 
     return model_bytes + kv_bytes + act_bytes
@@ -2237,7 +2358,22 @@ def compute_layer_time(
     nh = arch.n_heads
     nkv = arch.n_kv_heads
     ffn = arch.ffn_dim
-    prec = arch.precision
+    ffn_prec = arch.precision
+    attn_precisions = dict(getattr(arch, "attn_precision", {}) or {})
+    projection_prec = str(
+        attn_precisions.get("v", arch.weight_precision) or arch.weight_precision
+    )
+    attention_prec = str(
+        attn_precisions.get(
+            "qk", attn_precisions.get("q", arch.activation_precision)
+        ) or arch.activation_precision
+    )
+    output_prec = str(
+        attn_precisions.get(
+            "output", attn_precisions.get("o", arch.weight_precision)
+        ) or arch.weight_precision
+    )
+    activation_prec = str(arch.activation_precision or "bf16")
 
     # Wave 18g: local (sliding-window) attention layer. Same projections
     # and FFN as a global attention layer; the only differences are that
@@ -2269,22 +2405,22 @@ def compute_layer_time(
         if arch.moe_config is None:
             ffn_per_gpu = ffn // tp_degree
             if arch.ffn_type == "swiglu":
-                t_up, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
-                t_gate, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
+                t_up, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
+                t_gate, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
                 breakdown.ffn_up_s = t_up + t_gate
             else:
-                t_up, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
+                t_up, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
                 breakdown.ffn_up_s = t_up
-            t_down, _, _ = _matmul_cost(M, d, ffn_per_gpu, prec, hw, lattice_hw, tp_degree, calibration)
+            t_down, _, _ = _matmul_cost(M, d, ffn_per_gpu, ffn_prec, hw, lattice_hw, tp_degree, calibration)
             breakdown.ffn_down_s = t_down
         else:
-            expert_prec = arch.moe_config.get("precision", prec)
+            expert_prec = arch.moe_config.get("precision", ffn_prec)
             moe_cost = _moe_ffn_cost(
                 B=B, S=S, d_model=d,
                 moe_cfg=arch.moe_config,
                 ep_degree=ep_degree,
                 tp_degree=tp_degree,
-                activation_precision=prec,
+                activation_precision=arch.activation_precision,
                 expert_precision=expert_prec,
                 hw=hw, lattice_hw=lattice_hw,
                 phase=phase,
@@ -2299,9 +2435,9 @@ def compute_layer_time(
             n_moe = max(0, arch.n_layers - n_dense)
             if n_dense > 0 and n_moe > 0:
                 ffn_per_gpu = ffn // tp_degree
-                t_up_d, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
-                t_gate_d, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
-                t_down_d, _, _ = _matmul_cost(M, d, ffn_per_gpu, prec, hw, lattice_hw, tp_degree, calibration)
+                t_up_d, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
+                t_gate_d, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
+                t_down_d, _, _ = _matmul_cost(M, d, ffn_per_gpu, ffn_prec, hw, lattice_hw, tp_degree, calibration)
                 dense_layer_s = t_up_d + t_gate_d + t_down_d
                 w_d = n_dense / arch.n_layers
                 w_m = n_moe / arch.n_layers
@@ -2320,11 +2456,11 @@ def compute_layer_time(
                 breakdown.load_balance_factor = moe_cost["load_balance_factor"]
 
         # Membound ops and allreduce
-        breakdown.membound_ops_s = _membound_ops_cost(B, S if phase != "decode" else 1, d, prec, hw)
+        breakdown.membound_ops_s = _membound_ops_cost(B, S if phase != "decode" else 1, d, activation_prec, hw)
         # Wave 17 Part 2: pass phase through so decode picks lower overlap +
         # picks up the per-collective launch-latency floor.
         breakdown.allreduce_s = _allreduce_cost(
-            B, S if phase != "decode" else 1, d, prec, hw, tp_degree,
+            B, S if phase != "decode" else 1, d, activation_prec, hw, tp_degree,
             phase=phase,
         )
 
@@ -2377,20 +2513,20 @@ def compute_layer_time(
         d_rope = int(getattr(arch, "mla_rope_head_dim", 0) or 0)
         # Q path: (M, d) × (d, c_q) + (M, c_q) × (c_q, nh*dh/tp)
         if c_q > 0:
-            t_q_down, _, _ = _matmul_cost(M, c_q, d, prec, hw, lattice_hw,
+            t_q_down, _, _ = _matmul_cost(M, c_q, d, projection_prec, hw, lattice_hw,
                                             tp_degree, calibration)
-            t_q_up, _, _ = _matmul_cost(M, heads_per_gpu * dh, c_q, prec,
+            t_q_up, _, _ = _matmul_cost(M, heads_per_gpu * dh, c_q, projection_prec,
                                           hw, lattice_hw, tp_degree, calibration)
         else:
             # Without an explicit q-latent, treat Q as a direct projection.
-            t_q_down, _, _ = _matmul_cost(M, heads_per_gpu * dh, d, prec,
+            t_q_down, _, _ = _matmul_cost(M, heads_per_gpu * dh, d, projection_prec,
                                             hw, lattice_hw, tp_degree, calibration)
             t_q_up = 0.0
         # KV down-projection: shared latent + RoPE'd key, NOT sharded by TP
         # (because the latent feeds every query head; replicating is cheaper
         # than the all-gather required to shard).
         kv_proj_N = c_kv + d_rope
-        t_kv_down, _, _ = _matmul_cost(M, kv_proj_N, d, prec, hw, lattice_hw,
+        t_kv_down, _, _ = _matmul_cost(M, kv_proj_N, d, projection_prec, hw, lattice_hw,
                                          1, calibration)
         if phase == "decode":
             # Absorbed: KV up-projection is folded into the attention dot;
@@ -2400,7 +2536,7 @@ def compute_layer_time(
             # Prefill / training: explicit KV up-projection per token.
             kv_up_N = heads_per_gpu * max(0, dh - d_rope)
             if kv_up_N > 0:
-                t_kv_up, _, _ = _matmul_cost(M, kv_up_N, c_kv, prec, hw,
+                t_kv_up, _, _ = _matmul_cost(M, kv_up_N, c_kv, projection_prec, hw,
                                                lattice_hw, tp_degree, calibration)
             else:
                 t_kv_up = 0.0
@@ -2409,7 +2545,7 @@ def compute_layer_time(
         # Q: (M, d) × (d, nh*dh/tp) -> three such matmuls (Q, K, V separately or fused)
         # Fused: (M, d) × (d, (nh + 2*nkv)*dh / tp)
         qkv_N = (heads_per_gpu + 2 * kv_heads_per_gpu) * dh
-        t_qkv, _, _ = _matmul_cost(M, qkv_N, d, prec, hw, lattice_hw, tp_degree, calibration)
+        t_qkv, _, _ = _matmul_cost(M, qkv_N, d, projection_prec, hw, lattice_hw, tp_degree, calibration)
         breakdown.qkv_proj_s = t_qkv
 
     # --- Attention ---
@@ -2429,28 +2565,37 @@ def compute_layer_time(
             kv_bytes_per_layer = 2 * B * kv_heads_per_gpu * L * dh * kv_bpe
         elif arch.attention_type == "mla" and arch.mla_kv_latent_dim:
             kv_bytes_per_layer = B * L * arch.kv_bytes_per_token_per_layer(L)
-        elif arch.attention_type == "nsa" and arch.nsa_window_size:
-            kv_bytes_per_layer = B * L * arch.kv_bytes_per_token_per_layer(L)
-        elif arch.attention_type in ("csa", "indexshare", "msa"):
-            # Wave 9: compressed-attention variants. Each maps per-token KV
-            # bytes through the helper above; multiply by B × L for layer total.
-            kv_bytes_per_layer = B * L * arch.kv_bytes_per_token_per_layer(L)
+        elif arch.attention_type in ("nsa", "csa", "indexshare", "msa"):
+            # Wave 35 fix: these caches are stored PER KV HEAD, so the
+            # per-rank decode stream shards across TP exactly like GQA
+            # (the capacity estimator already divided them by
+            # min(TP, n_kv_heads); the bandwidth path here charged every
+            # rank the full unsharded stream — an 8× TBT over-charge at
+            # TP=8). Only the truly head-shared structures stay
+            # replicated: the MLA latent (branch above) and the
+            # IndexShare per-token index entry.
+            shard_b, repl_b = arch.kv_bytes_per_token_split(L)
+            kv_shards = max(1, min(tp_degree, arch.n_kv_heads))
+            kv_bytes_per_layer = B * L * (shard_b / kv_shards + repl_b)
         else:
             kv_bytes_per_layer = 2 * B * kv_heads_per_gpu * L * dh * kv_bpe
-        # v1-fix YOCO: only K of N layers actually read their own KV during
-        # decode; the rest cross-attend to a single shared cache. Amortize
-        # the bandwidth cost across the stack so decode TBT shrinks by K/N.
-        yoco_k = int(getattr(arch, "yoco_n_self_attn_layers", 0) or 0)
-        if 0 < yoco_k < arch.n_layers:
-            kv_bytes_per_layer *= yoco_k / arch.n_layers
+        # Wave 35 YOCO decode fix: the previous K/N amortization claimed
+        # decode TBT shrinks by K/N — physically wrong. Each of the N-K
+        # cross-decoder layers still STREAMS the shared cache from HBM
+        # every decode step (a multi-GB cache does not persist in ~50 MB
+        # of L2 across layers), and the K self layers stream their own:
+        # N cache-reads per step, same as a conventional stack. YOCO's
+        # real serving wins are cache CAPACITY (K/N, modeled in the
+        # memory estimators) and PREFILL early-exit (modeled in the
+        # serving prefill path). No decode-bandwidth factor is applied.
         t_kv_load = kv_bytes_per_layer / hw.hbm_bandwidth_bytes_s
 
         # Small compute: (B, heads_per_gpu, 1, dh) × (B, heads_per_gpu, dh, L)
         # GQA: each kv head serves multiple q heads, but compute is still small
         attn_flops = 2 * B * heads_per_gpu * 1 * L * dh * 2
-        fused_eff = hw.fused_attention_efficiency.get(prec,
+        fused_eff = hw.fused_attention_efficiency.get(attention_prec,
                     hw.fused_attention_efficiency.get("bf16", 0.75))
-        t_attn_compute = attn_flops / (hw.peak_flops_s(prec) * fused_eff)
+        t_attn_compute = attn_flops / (hw.peak_flops_s(attention_prec) * fused_eff)
         breakdown.attention_s = max(t_kv_load, t_attn_compute)
     else:
         if _is_local_layer:
@@ -2459,7 +2604,7 @@ def compute_layer_time(
             # window as the attended span.
             attended = min(arch.seq_len, int(arch.local_window or 0))
             breakdown.attention_s = _sparse_attention_cost(
-                B, arch.seq_len, attended, nh, dh, nkv, prec, hw, tp_degree
+                B, arch.seq_len, attended, nh, dh, nkv, attention_prec, hw, tp_degree
             )
         elif arch.attention_type == "nsa" and arch.nsa_window_size:
             stride = int(arch.nsa_compress_block_stride or 16)
@@ -2474,18 +2619,68 @@ def compute_layer_time(
                 + int(arch.nsa_window_size or 512),
             )
             breakdown.attention_s = _sparse_attention_cost(
-                B, arch.seq_len, attended, nh, dh, nkv, prec, hw, tp_degree
+                B, arch.seq_len, attended, nh, dh, nkv, attention_prec, hw, tp_degree
+            )
+        elif arch.attention_type == "csa" and arch.csa_top_k_blocks:
+            # Wave 32 fix: CSA/indexshare/MSA prefill used to fall through
+            # to the full S x S branch below, pricing sparse-attention
+            # prefill AT OR ABOVE dense — physically wrong. Their decode
+            # KV bytes were already sparse (kv_bytes_per_token_per_layer),
+            # so TBT was right while TTFT was dense-priced. Each family
+            # now uses the same S x attended sparse-cost model NSA uses,
+            # with `attended` mirroring its decode-side effective-KV
+            # formula.
+            #
+            # CSA: score S/block_size compressed blocks (comp_dim wide,
+            # scaled to d_head units), then attend top_k selected blocks
+            # at full width.
+            block_size = int(arch.csa_block_size or 64)
+            top_k = int(arch.csa_top_k_blocks or 16)
+            comp_dim = int(arch.csa_compression_dim or dh)
+            attended = min(
+                arch.seq_len,
+                math.ceil(
+                    math.ceil(arch.seq_len / max(1, block_size))
+                    * (comp_dim / max(1, dh)))
+                + top_k * block_size,
+            )
+            breakdown.attention_s = _sparse_attention_cost(
+                B, arch.seq_len, attended, nh, dh, nkv, attention_prec, hw, tp_degree
+            )
+        elif arch.attention_type == "indexshare" and arch.indexshare_top_k_buckets:
+            # IndexShare: indexer scores num_buckets centroids (idx_dim
+            # wide, scaled to d_head units), then attends
+            # top_k_buckets x (S / num_buckets) tokens at full width.
+            num_buckets = int(arch.indexshare_num_buckets or 64)
+            top_k = int(arch.indexshare_top_k_buckets or 4)
+            idx_dim = int(arch.indexshare_index_dim or 64)
+            attended = min(
+                arch.seq_len,
+                math.ceil(num_buckets * (idx_dim / max(1, dh)))
+                + top_k * math.ceil(arch.seq_len / max(1, num_buckets)),
+            )
+            breakdown.attention_s = _sparse_attention_cost(
+                B, arch.seq_len, attended, nh, dh, nkv, attention_prec, hw, tp_degree
+            )
+        elif arch.attention_type == "msa":
+            # MSA: local window + dilated top-k + global top-k per query.
+            win = int(arch.msa_window_size or 512)
+            dilated_k = int(arch.msa_dilated_top_k or 64)
+            global_k = int(arch.msa_global_top_k or 16)
+            attended = min(arch.seq_len, win + dilated_k + global_k)
+            breakdown.attention_s = _sparse_attention_cost(
+                B, arch.seq_len, attended, nh, dh, nkv, attention_prec, hw, tp_degree
             )
         else:
             # Training / prefill: full S×S attention
             breakdown.attention_s = _attention_cost(
-                B, arch.seq_len, nh, dh, nkv, prec, hw, tp_degree
+                B, arch.seq_len, nh, dh, nkv, attention_prec, hw, tp_degree
             )
 
     # --- Output projection ---
     # (M, heads_per_gpu * dh) × (heads_per_gpu * dh, d)
     out_K = heads_per_gpu * dh
-    t_out, _, _ = _matmul_cost(M, d, out_K, prec, hw, lattice_hw, tp_degree, calibration)
+    t_out, _, _ = _matmul_cost(M, d, out_K, output_prec, hw, lattice_hw, tp_degree, calibration)
     breakdown.out_proj_s = t_out
 
     # v1-fix 2:4 sparsity: per-component speedup factor. NVIDIA tensor cores
@@ -2506,27 +2701,27 @@ def compute_layer_time(
         ffn_per_gpu = ffn // tp_degree
         if arch.ffn_type == "swiglu":
             # SwiGLU: two parallel projections (up + gate), each (M, d) → (M, ffn/tp)
-            t_up, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
-            t_gate, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
+            t_up, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
+            t_gate, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
             breakdown.ffn_up_s = t_up * _sparse_factor("ffn_up") + t_gate * _sparse_factor("ffn_gate")
         else:
-            t_up, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
+            t_up, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
             breakdown.ffn_up_s = t_up * _sparse_factor("ffn_up")
 
         # --- FFN down ---
-        t_down, _, _ = _matmul_cost(M, d, ffn_per_gpu, prec, hw, lattice_hw, tp_degree, calibration)
+        t_down, _, _ = _matmul_cost(M, d, ffn_per_gpu, ffn_prec, hw, lattice_hw, tp_degree, calibration)
         breakdown.ffn_down_s = t_down * _sparse_factor("ffn_down")
     else:
         # MoE path. ffn_up_s carries the expert-compute total; ffn_down_s is
         # left at 0 (the down matmul is rolled into compute_s by _moe_ffn_cost).
         # The shared-expert compute is recorded separately for inspection.
-        expert_prec = arch.moe_config.get("precision", prec)
+        expert_prec = arch.moe_config.get("precision", ffn_prec)
         moe_cost = _moe_ffn_cost(
             B=B, S=S, d_model=d,
             moe_cfg=arch.moe_config,
             ep_degree=ep_degree,
             tp_degree=tp_degree,
-            activation_precision=prec,
+            activation_precision=arch.activation_precision,
             expert_precision=expert_prec,
             hw=hw, lattice_hw=lattice_hw,
             phase=phase,
@@ -2544,9 +2739,9 @@ def compute_layer_time(
         n_moe = max(0, arch.n_layers - n_dense)
         if n_dense > 0 and n_moe > 0:
             ffn_per_gpu = ffn // tp_degree
-            t_up_d, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
-            t_gate_d, _, _ = _matmul_cost(M, ffn_per_gpu, d, prec, hw, lattice_hw, tp_degree, calibration)
-            t_down_d, _, _ = _matmul_cost(M, d, ffn_per_gpu, prec, hw, lattice_hw, tp_degree, calibration)
+            t_up_d, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
+            t_gate_d, _, _ = _matmul_cost(M, ffn_per_gpu, d, ffn_prec, hw, lattice_hw, tp_degree, calibration)
+            t_down_d, _, _ = _matmul_cost(M, d, ffn_per_gpu, ffn_prec, hw, lattice_hw, tp_degree, calibration)
             dense_layer_s = t_up_d + t_gate_d + t_down_d
             w_d = n_dense / arch.n_layers
             w_m = n_moe / arch.n_layers
@@ -2565,13 +2760,13 @@ def compute_layer_time(
             breakdown.load_balance_factor = moe_cost["load_balance_factor"]
 
     # --- Memory-bound ops ---
-    breakdown.membound_ops_s = _membound_ops_cost(B, S if phase != "decode" else 1, d, prec, hw)
+    breakdown.membound_ops_s = _membound_ops_cost(B, S if phase != "decode" else 1, d, activation_prec, hw)
 
     # --- Communication ---
     # Wave 17 Part 2: pass phase through so decode picks lower overlap +
     # picks up the per-collective launch-latency floor.
     breakdown.allreduce_s = _allreduce_cost(
-        B, S if phase != "decode" else 1, d, prec, hw, tp_degree,
+        B, S if phase != "decode" else 1, d, activation_prec, hw, tp_degree,
         phase=phase,
     )
 
@@ -2658,6 +2853,7 @@ def throughput(
     dp_degree: Optional[int] = None,
     decode_kv_len: int = 1024,
     prefill_seq_len: Optional[int] = None,
+    training_seq_len: Optional[int] = None,
     lattice_hw_override: str = None,
     ep_degree: int = 1,                # v1 MoE: expert-parallel degree
     ep_topology: str = "single_axis",  # v1 MoE: TPU torus axis layout
@@ -2673,7 +2869,8 @@ def throughput(
     -----------------------------------------------------------------
     The current critical path sums comm times for TP allreduce, DP grad
     sync, EP all-to-all, CP all-gather, and PP send/recv as if they
-    each owned the fabric. In a 4D-parallel deployment (TP×PP×DP×EP×CP)
+    each owned the fabric. In a 4D-parallel training deployment
+    (TP×PP×DP×CP, with EP partitioning DP)
     several of these collectives can land in the same window on the
     same NVLink / IB fabric and should split the available bandwidth:
 
@@ -2706,6 +2903,9 @@ def throughput(
         prefill_seq_len: Prompt length for cold-prefill TTFT. Defaults to
             arch.seq_len for backward compatibility; callers should pass the
             serving prompt/context length explicitly for long-context studies.
+        training_seq_len: Sequence length used for training throughput and
+            activation memory. Defaults to arch.seq_len. Compiler callers
+            pass the independently declared pretraining context.
         lattice_hw_override: Override lattice hardware name (if different from throughput hw).
     """
     hw = load_hardware(hardware)
@@ -2725,6 +2925,13 @@ def throughput(
     dp_degree = max(
         1, int(dp_degree if dp_degree is not None else getattr(arch, "dp_degree", 1))
     )
+    if arch.moe_config and dp_degree > 1 and (
+        ep_degree > dp_degree or dp_degree % max(1, ep_degree) != 0
+    ):
+        raise ValueError(
+            f"EP={ep_degree} must divide DP={dp_degree} when EP overlays "
+            "the DP dimension"
+        )
     microbatches = max(
         1,
         int(
@@ -2826,12 +3033,14 @@ def throughput(
     )
     train_arch = replace(
         arch,
+        seq_len=max(1, int(training_seq_len or arch.seq_len)),
         batch_size=(
             configured_training_mb
             if configured_training_mb > 0
             else TRAINING_MICRO_BATCH_PER_REPLICA
         ),
     )
+    result.training_sequence_length = int(train_arch.seq_len)
 
     if is_hybrid:
         # --- Heterogeneous path: sum per-layer costs ---
@@ -2843,6 +3052,7 @@ def throughput(
         # Simplified: use first layers_per_stage layers
         raw_train_s = sum(bd.total_s for bd in train_layers[:layers_per_stage])
         layer_train = train_layers[0]  # Representative for breakdown
+        train_efficiency_layers = train_layers[:layers_per_stage]
 
         prefill_layers = compute_heterogeneous_layer_times(
             prefill_arch, hw, lattice_hw, tp_degree, "prefill",
@@ -2850,6 +3060,7 @@ def throughput(
         )
         raw_prefill_s = sum(bd.total_s for bd in prefill_layers[:layers_per_stage])
         layer_prefill = prefill_layers[0]
+        prefill_efficiency_layers = prefill_layers[:layers_per_stage]
 
         decode_layers = compute_heterogeneous_layer_times(
             arch, hw, lattice_hw, tp_degree, "decode",
@@ -2869,17 +3080,20 @@ def throughput(
         # See plan/redesign/17-pp-decode-serving-cost-fix.md.
         raw_decode_s = sum(bd.total_s for bd in decode_layers[:arch.n_layers])
         layer_decode = decode_layers[0]
+        decode_efficiency_layers = decode_layers[:arch.n_layers]
     else:
         # --- Uniform path (v0 behavior) ---
         layer_train = compute_layer_time(train_arch, hw, lattice_hw, tp_degree, "training",
                                          calibration=cal_table,
                                          ep_degree=ep_degree, ep_topology=ep_topology)
         raw_train_s = layer_train.total_s * layers_per_stage
+        train_efficiency_layers = [layer_train]
 
         layer_prefill = compute_layer_time(prefill_arch, hw, lattice_hw, tp_degree, "prefill",
                                            calibration=cal_table,
                                            ep_degree=ep_degree, ep_topology=ep_topology)
         raw_prefill_s = layer_prefill.total_s * layers_per_stage
+        prefill_efficiency_layers = [layer_prefill]
 
         layer_decode = compute_layer_time(
             arch, hw, lattice_hw, tp_degree, "decode",
@@ -2891,13 +3105,18 @@ def throughput(
         # full reasoning. Replaces `layer_decode.total_s * layers_per_stage`
         # which made PP > 1 erroneously divide decode TBT linearly.
         raw_decode_s = layer_decode.total_s * arch.n_layers
+        decode_efficiency_layers = [layer_decode]
 
     # Optimizer step: read params + gradients, write params + optimizer states
     # AdamW: ~12 bytes per param (fp32 master weights + m + v)
     ledger = parameter_ledger(arch)
-    params_per_gpu = ledger.local_total_params(
-        tp=tp_degree, pp=pp_degree, ep=ep_degree
+    training_layout = training_parameter_layout(
+        ledger, tp=tp_degree, pp=pp_degree, dp=dp_degree, ep=ep_degree,
     )
+    training_byte_layout = training_parameter_byte_layout(
+        arch, tp=tp_degree, pp=pp_degree, dp=dp_degree, ep=ep_degree,
+    )
+    params_per_gpu = training_layout.zero3_params
     opt_bytes = params_per_gpu * cal.get("optimizer_bytes_per_param", 12)
     optimizer_step_s = opt_bytes / hw.hbm_bandwidth_bytes_s
 
@@ -2924,13 +3143,20 @@ def throughput(
     result.bubble_fraction = bubble
 
     # Training: forward + backward ~ 3x forward compute
-    train_bottleneck = getattr(layer_train, "bottleneck", "compute")
-    sys_eff_train, sigma_train, bucket_train = _efficiency_for(
-        "training", train_bottleneck, arch, cal)
-    train_step_s = (raw_train_s * 3.0 + kernel_overhead_total * 3 + optimizer_step_s) * (1 + bubble) / sys_eff_train
+    sys_eff_train, sigma_train, bucket_train = _mixed_efficiency_for(
+        "training", train_efficiency_layers, arch, cal)
+    optimizer_eff, _, _ = _efficiency_for(
+        "training", "memory", arch, cal)
+    calibrated_optimizer_step_s = optimizer_step_s / max(optimizer_eff, 1e-9)
+    train_step_s = (
+        raw_train_s * 3.0 / max(sys_eff_train, 1e-9)
+        + kernel_overhead_total * 3
+        + calibrated_optimizer_step_s
+    ) * (1 + bubble)
     optimizer_step_exposed_s = (
-        optimizer_step_s * (1 + bubble) / sys_eff_train
+        calibrated_optimizer_step_s * (1 + bubble)
     )
+    kernel_overhead_exposed_s = kernel_overhead_total * 3 * (1 + bubble)
 
     # Pipeline activation/gradient transfers. In steady-state training, each
     # stage sends activations forward and gradients backward once per
@@ -2942,7 +3168,7 @@ def throughput(
             train_arch.batch_size
             * train_arch.seq_len
             * train_arch.d_model
-            * hw.bytes_per_elem(arch.precision)
+            * hw.bytes_per_elem(arch.activation_precision)
         )
         worst_boundary_s, _ = _pipeline_link_costs(
             train_payload, pp_degree, hw
@@ -2954,7 +3180,7 @@ def throughput(
             prefill_arch.batch_size
             * prefill_arch.seq_len
             * prefill_arch.d_model
-            * hw.bytes_per_elem(arch.precision)
+            * hw.bytes_per_elem(arch.activation_precision)
         )
         _, pp_prefill_path_s = _pipeline_link_costs(
             prefill_payload, pp_degree, hw
@@ -2988,7 +3214,7 @@ def throughput(
     # artificially expensive at long context.
     cp = max(1, int(getattr(arch, "cp_degree", 1) or 1))
     if cp > 1:
-        bpe_act = hw.bytes_per_elem(arch.precision)
+        bpe_act = hw.bytes_per_elem(arch.activation_precision)
         comm_factor = (cp - 1) / cp
         cp_method_factor = 0.5 if getattr(arch, "cp_method", "ring") == "ulysses" else 1.0
 
@@ -3026,7 +3252,9 @@ def throughput(
         # transfers. Preserve those non-shardable components rather than
         # granting them an artificial 1/cp speedup.
         non_cp_shardable_s = (
-            optimizer_step_exposed_s + result.pp_training_comm_s
+            optimizer_step_exposed_s
+            + kernel_overhead_exposed_s
+            + result.pp_training_comm_s
         )
         cp_shardable_s = max(0.0, train_step_s - non_cp_shardable_s)
         train_step_s = (
@@ -3042,9 +3270,6 @@ def throughput(
     # aggregate.
     dp_degree_for_grad = dp_degree
     if dp_degree_for_grad > 1:
-        local_params_for_dp = ledger.local_total_params(
-            tp=tp_degree, pp=pp_degree, ep=ep_degree
-        )
         # Wave 7b.4: pull the DP overlap fraction from the calibration
         # table when fitted; fall back to the default in the function
         # signature otherwise. The pattern is to read the override into a
@@ -3057,11 +3282,21 @@ def throughput(
             {"overlap_fraction": _dp_overlap_override}
             if _dp_overlap_override is not None else {}
         )
-        dp_grad_s = _dp_grad_allreduce_cost(
-            int(local_params_for_dp), arch.precision, hw,
-            dp_degree_for_grad, zero_stage=3,
-            **_dp_overlap_kw,
+        # Shared and expert parameters use different replica groups when EP
+        # overlays DP. Expert gradients synchronize over EDP=DP/EP, not the
+        # full DP group; pricing one combined tensor double-counted EP in the
+        # parameter shard and disagreed with the memory model.
+        dp_grad_s = _dp_grad_allreduce_bytes_cost(
+            training_byte_layout.shared_resident_bytes, hw,
+            dp_degree_for_grad, zero_stage=3, **_dp_overlap_kw,
         )
+        if (training_layout.expert_resident_params > 0
+                and training_layout.expert_data_parallel_degree > 1):
+            dp_grad_s += _dp_grad_allreduce_bytes_cost(
+                training_byte_layout.expert_resident_bytes, hw,
+                training_layout.expert_data_parallel_degree,
+                zero_stage=3, **_dp_overlap_kw,
+            )
         train_step_s = train_step_s + dp_grad_s
         result.dp_grad_allreduce_s = dp_grad_s
 
@@ -3071,15 +3306,29 @@ def throughput(
     result.training_throughput_tokens_per_sec = tokens_per_step / train_step_s if train_step_s > 0 else 0
 
     # --- Prefill (inference) ---
-    prefill_bottleneck = getattr(layer_prefill, "bottleneck", "compute")
-    sys_eff_prefill, sigma_prefill, bucket_prefill = _efficiency_for(
-        "prefill", prefill_bottleneck, arch, cal)
-    raw_prefill = raw_prefill_s + kernel_overhead_total
+    sys_eff_prefill, sigma_prefill, bucket_prefill = _mixed_efficiency_for(
+        "prefill", prefill_efficiency_layers, arch, cal)
+    # Wave 35 YOCO prefill early-exit (Sun et al. 2024 §3.3): the shared KV
+    # cache is produced entirely by the K self-decoder layers, and a
+    # cross-decoder layer's output at position i depends only on position
+    # i's input — so cold prefill only needs all S positions through the K
+    # self layers, plus the LAST position through the N-K cross layers
+    # (≈ a 1/S share of a layer's prefill work). This is the paper's
+    # headline TTFT win and was previously not modeled at all (all N
+    # layers were priced at full S×S). Training is unaffected — the
+    # training path above needs every position through every layer.
+    _yoco_k_pf = int(getattr(arch, "yoco_n_self_attn_layers", 0) or 0)
+    if 0 < _yoco_k_pf < arch.n_layers:
+        _pf_S = max(1, int(prefill_seq_len or arch.seq_len))
+        _self_frac = _yoco_k_pf / arch.n_layers
+        _cross_frac = 1.0 - _self_frac
+        raw_prefill_s = raw_prefill_s * (_self_frac + _cross_frac / _pf_S)
+    calibrated_prefill_layers = raw_prefill_s / max(sys_eff_prefill, 1e-9)
     if cp > 1 and (prefill_seq_len or arch.seq_len) >= 32768:
         # Mirror of the training CP block: split comm by layer type so state
         # layers pay state-pass cost (log2(cp) × state_bytes), not full-
         # activation all-gather. See Wave 1 Step 1.1 in plan/redesign/.
-        bpe_act = hw.bytes_per_elem(arch.precision)
+        bpe_act = hw.bytes_per_elem(arch.activation_precision)
         prefill_s = max(1, int(prefill_seq_len or arch.seq_len))
         comm_factor = (cp - 1) / cp
         cp_method_factor = 0.5 if getattr(arch, "cp_method", "ring") == "ulysses" else 1.0
@@ -3115,19 +3364,27 @@ def throughput(
         cp_comm_bytes = attn_cp_comm_bytes + state_cp_comm_bytes
         cp_bw = hw.interconnect_bw_bytes_s(cp)
         cp_prefill_comm_s = cp_comm_bytes / max(1.0, cp_bw)
-        raw_prefill = raw_prefill / cp + cp_prefill_comm_s
-    raw_prefill += pp_prefill_path_s
-    result.prefill_time_ms = raw_prefill / sys_eff_prefill * 1000
+        calibrated_prefill_layers = (
+            calibrated_prefill_layers / cp + cp_prefill_comm_s
+        )
+    raw_prefill = (
+        calibrated_prefill_layers
+        + kernel_overhead_total
+        + pp_prefill_path_s
+    )
+    result.prefill_time_ms = raw_prefill * 1000
 
     # --- Decode ---
-    decode_bottleneck = getattr(layer_decode, "bottleneck", "memory")
-    sys_eff_decode, sigma_decode, bucket_decode = _efficiency_for(
-        "decode", decode_bottleneck, arch, cal)
+    sys_eff_decode, sigma_decode, bucket_decode = _mixed_efficiency_for(
+        "decode", decode_efficiency_layers, arch, cal)
     # Wave 17 Part 1 fix (Jun 2026): use the decode-specific kernel-overhead
     # total (which scales with arch.n_layers, not layers_per_stage) — the
     # original used kernel_overhead_total which divided by PP and made the
     # serving cost look linearly cheaper as PP grew.
-    raw_decode = raw_decode_s + kernel_overhead_decode_total
+    raw_decode = (
+        raw_decode_s / max(sys_eff_decode, 1e-9)
+        + kernel_overhead_decode_total
+    )
     # Wave 17 Part 1 fix (Jun 2026): PP decode bubble. At PP > 1, every
     # token crosses (pp_degree - 1) stage boundaries; each boundary needs
     # an activation send/recv between adjacent pipeline stages. For decode
@@ -3136,14 +3393,14 @@ def throughput(
     # NVLink is ~3-5 µs; over IB ~10-15 µs. We use a conservative 5 µs per
     # boundary intra-island and the inter-node BW transit time outside it.
     if pp_degree > 1:
-        bpe_act = hw.bytes_per_elem(arch.precision)
+        bpe_act = hw.bytes_per_elem(arch.activation_precision)
         decode_payload = max(1, arch.batch_size) * arch.d_model * bpe_act
         _, pp_decode_path_s = _pipeline_link_costs(
             decode_payload, pp_degree, hw
         )
         result.pp_decode_comm_s = pp_decode_path_s
         raw_decode += pp_decode_path_s
-    result.decode_time_per_token_ms = raw_decode / sys_eff_decode * 1000
+    result.decode_time_per_token_ms = raw_decode * 1000
 
     # Scheduler launch/dispatch overhead. Kernel service time is already
     # modeled above; this adds only the control-plane work that differs by
@@ -3217,22 +3474,34 @@ def throughput(
     # We surface this so the optimizer / report can flag training-infeasible
     # configs even when inference-memory fits.
     try:
-        bpe_train = {"bf16": 2, "fp8": 1, "fp4": 0.5, "int8": 1, "tf32": 4}.get(
-            arch.precision, 2)
         opt_bpp = float(cal.get("optimizer_bytes_per_param", 12))
-        dp_shard = dp_degree
-        local_params = ledger.local_total_params(
-            tp=tp_degree, pp=pp_degree, ep=ep_degree
-        )
-        weight_bytes = local_params * bpe_train / dp_shard
-        grad_bytes = local_params * bpe_train / dp_shard
-        opt_bytes_total = local_params * opt_bpp / dp_shard
-        # Activations: rough O(microbatch * seq * d_model * 10 * bpe) per
-        # gradient checkpoint region. We reuse the activations term computed
-        # by estimate_memory_per_gpu by recomputing it for the training
-        # micro-batch.
+        zero3_params = training_layout.zero3_params
+        weight_bytes = training_byte_layout.zero3_bytes
+        grad_bytes = training_byte_layout.zero3_bytes
+        opt_bytes_total = zero3_params * opt_bpp
+        # Activations follow the same sequence-parallel/checkpoint/pipeline
+        # accounting as estimate_memory_per_gpu. Previously this used the
+        # serving context and replicated it on every TP/CP rank, making CP a
+        # silent no-op for training memory.
         train_mb = max(1, int(train_arch.batch_size))
-        act_bytes_train = train_mb * arch.seq_len * arch.d_model * bpe_train * 10
+        layer_factor = 4.0 + math.sqrt(max(1, int(arch.n_layers)))
+        schedule = getattr(arch, "pp_schedule", "1f1b")
+        if pp_degree <= 1:
+            pp_act_queue = 1.0
+        elif schedule == "gpipe":
+            pp_act_queue = float(pp_degree)
+        elif schedule == "interleaved":
+            pp_act_queue = (
+                (pp_degree + 1) / 2
+                * max(1, int(getattr(arch, "pp_virtual_stages", 2))))
+        else:
+            pp_act_queue = (pp_degree + 1) / 2
+        bpe_activation = hw.bytes_per_elem(arch.activation_precision)
+        act_bytes_train = (
+            train_mb * train_arch.seq_len * arch.d_model * bpe_activation
+            * layer_factor * pp_act_queue
+            / (max(1, int(tp_degree)) * max(1, int(cp)))
+        )
         train_total = weight_bytes + grad_bytes + opt_bytes_total + act_bytes_train
         result.training_memory_per_gpu_gb = train_total / (1024 ** 3)
     except Exception:

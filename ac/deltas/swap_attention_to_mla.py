@@ -13,6 +13,7 @@ from .base import (
     _copy_arch,
     _record_applied,
     _attention_already_swapped,
+    _has_attention_layers,
 )
 try:
     from ..quality_model import ArchConfig as QArchConfig
@@ -29,8 +30,16 @@ class SwapAttentionToMLA(Transformation):
     }
 
     def precondition(self, arch):
+        if not _has_attention_layers(arch):
+            return False, "pure-state baseline has no attention layers to replace"
+        attention_type = str(getattr(arch, "attention_type", "full") or "full")
+        if attention_type != "full":
+            return False, (
+                f"baseline attention.type={attention_type!r}; MLA cannot be "
+                "stacked over another attention family")
         prior = _attention_already_swapped(arch)
-        if prior is not None and prior != self.name:
+        if prior is not None and prior not in (
+                self.name, "interleave_local_attention"):
             return False, (
                 f"attention block was already swapped by '{prior}'; "
                 f"chaining {self.name} on top would silently overwrite it. "
@@ -41,6 +50,10 @@ class SwapAttentionToMLA(Transformation):
     def apply(self, arch, latent_dim: int = 512, d_rope: int = 64):
         if latent_dim < 16:
             raise ValueError("latent_dim must be >= 16")
+        if int(d_rope) <= 0 or int(d_rope) > int(arch.d_head):
+            raise ValueError(
+                f"d_rope must be in [1, d_head] (d_head={arch.d_head}), "
+                f"got {d_rope}")
         out = _copy_arch(arch)
         # Drive the throughput model's real MLA branch by setting the proper
         # TArchConfig fields. The branch in kv_bytes_per_token_per_layer
@@ -79,4 +92,7 @@ class SwapAttentionToMLA(Transformation):
         if latent is not None:
             qa.attention_type = "mla"
             qa.mla_latent_dim = int(latent)
+            qa.mla_q_latent_dim = getattr(arch, "mla_q_latent_dim", None)
+            qa.mla_rope_head_dim = getattr(arch, "mla_rope_head_dim", None)
+            qa.mla_nope_head_dim = getattr(arch, "mla_nope_head_dim", None)
         return qa

@@ -344,18 +344,28 @@ WEIGHT_PRECISION_PENALTIES = {
     ("output_proj", "fp4"): 0.012,
     ("output_head", "fp4"): 0.020,   # final projection FP4-sensitive
     ("embedding", "fp4"):   0.030,   # embedding rarely run at FP4
+
+    # Wave 39: OCP MX block formats. Missing rows fell through to the generic
+    # 0.005 fallback in weight_precision_quality, which is BELOW the fp8
+    # embedding penalty (0.010) — a 6-bit format cannot cost less than an
+    # 8-bit one on the same component. Interpolated between fp8 and fp4
+    # (microscaling recovers most of the plain-FP4 gap, per MXFP launch data).
+    ("embedding", "mxfp6"): 0.012,
+    ("embedding", "mxfp4"): 0.018,
 }
 
 # Hardware availability for each precision
+# Gate-2 Task C: gb200_nvl72 inherits b200's set (B200 silicon);
+# h800 inherits h100's set (H100 silicon, NVLink reduction only).
 PRECISION_HARDWARE_SUPPORT = {
-    "bf16": {"h100", "b200", "tpu_v5e", "tpu_v5p", "trainium2", "trn2", "trainium3", "trn3"},
-    "fp16": {"h100", "b200", "tpu_v5e", "tpu_v5p", "trainium2", "trn2", "trainium3", "trn3"},
-    "fp8":  {"h100", "b200", "trainium2", "trn2", "trainium3", "trn3"},
-    "fp4":  {"b200", "trainium3", "trn3"},
+    "bf16": {"h100", "b200", "gb200_nvl72", "h800", "tpu_v5e", "tpu_v5p", "trainium2", "trn2", "trainium3", "trn3"},
+    "fp16": {"h100", "b200", "gb200_nvl72", "h800", "tpu_v5e", "tpu_v5p", "trainium2", "trn2", "trainium3", "trn3"},
+    "fp8":  {"h100", "b200", "gb200_nvl72", "h800", "trainium2", "trn2", "trainium3", "trn3"},
+    "fp4":  {"b200", "gb200_nvl72", "trainium3", "trn3"},
     # v1-fix microscaling: OCP MX formats. Blackwell + Trainium 3.
-    "mxfp4": {"b200", "trainium3", "trn3"},
-    "mxfp6": {"b200", "trainium3", "trn3"},
-    "int8": {"h100", "b200", "tpu_v5e", "tpu_v5p", "trainium2", "trn2", "trainium3", "trn3"},
+    "mxfp4": {"b200", "gb200_nvl72", "trainium3", "trn3"},
+    "mxfp6": {"b200", "gb200_nvl72", "trainium3", "trn3"},
+    "int8": {"h100", "b200", "gb200_nvl72", "h800", "tpu_v5e", "tpu_v5p", "trainium2", "trn2", "trainium3", "trn3"},
 }
 
 

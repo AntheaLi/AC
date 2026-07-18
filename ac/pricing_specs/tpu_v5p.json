@@ -1,0 +1,70 @@
+{
+  "schema_version": "pricing_v1",
+  "hardware_target": "tpu_v5p",
+  "cloud_vendor": "gcp",
+  "accelerator_name": "Google Cloud TPU v5p",
+  "instance_reference": {
+    "instance_type": "cloud_tpu_v5p_slice",
+    "accelerators_per_instance": 1,
+    "region": "us-east5 (also us-east1)",
+    "note": "Cloud TPU bills per chip-hour directly; no instance-level division needed."
+  },
+  "usd_per_accelerator_hour": {
+    "on_demand": 4.20,
+    "reserved_1y": 2.94,
+    "spot": 2.10
+  },
+  "reference_estimate_usd_per_accelerator_hour": null,
+  "tdp_watts": null,
+  "assumed_avg_utilization": 0.65,
+  "assumed_pue": 1.10,
+  "electricity_usd_per_kwh": 0.10,
+  "currency": "USD",
+  "price_note": "LIST PRICES from the official Cloud TPU pricing page (per chip-hour). reserved_1y is the 1-year committed-use discount rate; spot is the DWS Flex-start price used as the preemptible/spot reference. Prices vary by region; base-region figures used.",
+  "energy_note": "Google does not publish TPU v5p power consumption or TDP (IEA 4E server-efficiency study: only performance data available for v5e/v5p). tdp_watts is therefore null and the electricity sub-term is NOT modeled for this target. PUE 1.10 is Google's published fleet average.",
+  "provenance": {
+    "prices": [
+      {
+        "field": "on_demand",
+        "value_usd_per_accelerator_hour": 4.20,
+        "derivation": "Official Cloud TPU list price per chip-hour, v5p us-east5/us-east1",
+        "tier": "T3",
+        "source_url": "https://cloud.google.com/tpu/pricing",
+        "corroborating_urls": [],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "reserved_1y",
+        "value_usd_per_accelerator_hour": 2.94,
+        "derivation": "Official Cloud TPU 1-year commitment price per chip-hour, v5p",
+        "tier": "T3",
+        "source_url": "https://cloud.google.com/tpu/pricing",
+        "corroborating_urls": [],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "spot",
+        "value_usd_per_accelerator_hour": 2.10,
+        "derivation": "Official Cloud TPU DWS Flex-start price per chip-hour, v5p (used as spot/preemptible reference)",
+        "tier": "T3",
+        "source_url": "https://cloud.google.com/tpu/pricing",
+        "corroborating_urls": [],
+        "date_accessed": "2026-07-17"
+      }
+    ],
+    "tdp": {
+      "value_watts": null,
+      "tier": "T3",
+      "source_url": "https://www.iea-4e.org/wp-content/uploads/2025/05/EDNA-EE-of-servers-FINAL.pdf",
+      "note": "Google has released only performance data for TPU v5e/v5p, no power consumption or TDP data (IEA 4E, EDNA server-efficiency study). Electricity sub-term omitted.",
+      "date_accessed": "2026-07-17"
+    },
+    "pue": {
+      "value": 1.10,
+      "tier": "T2",
+      "source_url": "https://www.google.com/about/datacenters/efficiency/",
+      "note": "Google-reported trailing-twelve-month fleet-average PUE 1.10.",
+      "date_accessed": "2026-07-17"
+    }
+  }
+}

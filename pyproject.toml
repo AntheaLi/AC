@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ac-architecture-compiler"
-version = "0.3.0"
+name = "archc"
+version = "0.4.0"
 description = "Hardware-aware Transformer-architecture compiler. Maps (hardware, workload, quality budget) to recommended architecture (dense, MoE, hybrid state-attention)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,8 +37,10 @@ ac-matrix-18b  = "ac.cli_matrix18b:main"
 ac-trust-audit = "ac.cli_trust_audit:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/ac"
-Issues   = "https://github.com/your-org/ac/issues"
+Homepage = "https://github.com/AntheaLi/AC"
+Issues   = "https://github.com/AntheaLi/AC/issues"
+Demo     = "https://antheali.github.io/ac-demo/"
+Changelog = "https://github.com/AntheaLi/AC/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -49,4 +51,6 @@ ac = [
     "hardware_specs/*.json",
     "calibration/*.json",
     "quality_defaults.yaml",
+    "packaged_configs/*.json",
+    "pricing_specs/*.json",
 ]

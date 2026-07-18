@@ -45,5 +45,27 @@ class ScaleDModel(Transformation):
             target_ratio = arch.ffn_dim / arch.d_model
             new_ffn = int(round(new_d * target_ratio / ffn_align)) * ffn_align
             out.ffn_dim = max(ffn_align, new_ffn)
+            # For MoE, expert_dim is the real routed FFN width. Scaling only
+            # the dense reference width silently changed active/total ratios
+            # and made the delta mean something different on dense and MoE
+            # baselines. Preserve routed and shared-expert width ratios too.
+            if arch.moe_config is not None:
+                moe = dict(arch.moe_config)
+                ratio = new_d / arch.d_model
+
+                def _scaled(value):
+                    scaled = int(round(
+                        int(value) * ratio / ffn_align)) * ffn_align
+                    return max(ffn_align, scaled)
+
+                if int(moe.get("expert_dim", 0) or 0) > 0:
+                    moe["expert_dim"] = _scaled(moe["expert_dim"])
+                shared = moe.get("shared_expert")
+                if isinstance(shared, dict) and int(
+                        shared.get("ffn_dim", 0) or 0) > 0:
+                    shared = dict(shared)
+                    shared["ffn_dim"] = _scaled(shared["ffn_dim"])
+                    moe["shared_expert"] = shared
+                out.moe_config = moe
         _record_applied(out, self.name)
         return out

@@ -52,7 +52,7 @@ class FeasibilityStructureTests(unittest.TestCase):
                          "Feasibility.is_feasible must match meets_constraints (back-compat)")
 
     def test_named_guards_present(self):
-        """All five expected named guards must be in feasibility.guards."""
+        """All expected named guards must be in feasibility.guards."""
         c = self.DC(
             target_params_b=1.0, training_tokens=int(2e12),
             context_length=8192, tp=1, pp=1, dp=1,
@@ -63,6 +63,7 @@ class FeasibilityStructureTests(unittest.TestCase):
         expected_guards = {
             "memory_extreme_overflow",
             "quality_sentinel_tripped",
+            "training_cluster_cap",
             "tbt_budget_warning",
             "ttft_budget_warning",
             "hbm_spill_warning",

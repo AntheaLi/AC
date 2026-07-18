@@ -1,0 +1,74 @@
+{
+  "schema_version": "pricing_v1",
+  "hardware_target": "trainium2",
+  "cloud_vendor": "aws",
+  "accelerator_name": "AWS Trainium2",
+  "instance_reference": {
+    "instance_type": "trn2.48xlarge",
+    "accelerators_per_instance": 16,
+    "region": "us-east-2",
+    "note": "Per-chip-hour figures derived from the whole-instance hourly price divided by 16 Trainium2 chips."
+  },
+  "usd_per_accelerator_hour": {
+    "on_demand": 1.50,
+    "reserved_1y": null,
+    "spot": 0.55
+  },
+  "reference_estimate_usd_per_accelerator_hour": null,
+  "tdp_watts": 650,
+  "assumed_avg_utilization": 0.65,
+  "assumed_pue": 1.15,
+  "electricity_usd_per_kwh": 0.10,
+  "currency": "USD",
+  "price_note": "AWS does NOT publish an official on-demand list price for trn2.48xlarge on its product/pricing pages (checked 2026-07-17); on_demand is the figure replicated by two independent secondary sources (~$23.97-24/hr per instance, Feb 2026) = $1.50/chip-hr. CONFLICT: one Jun-2026 secondary source reports ~$38.47/hr (= $2.40/chip-hr); treat on_demand as uncertain by +/-60%. reserved_1y is null because no 1-year reserved rate is publicly listed; ac.pricing falls back to on_demand when the requested tier is null. Spot is a structured price-tracker snapshot (~$8.60-8.72/hr per instance in us-east-2).",
+  "energy_note": "AWS does not publish Trainium2 TDP; 650W is a SECONDARY-ESTIMATE (reporting aligned with SemiAnalysis modeling), tier T3. utilization, PUE (1.15, assumption) and $0.10/kWh are ASSUMPTIONS, not measurements.",
+  "provenance": {
+    "prices": [
+      {
+        "field": "on_demand",
+        "value_usd_per_accelerator_hour": 1.50,
+        "derivation": "trn2.48xlarge ~$23.97-24/hr / 16 chips, two independent secondary sources (Feb 2026). Conflicting report: ~$38.47/hr (Jun 2026, stackpulsar) = $2.40/chip-hr; lower replicated figure chosen, uncertainty flagged.",
+        "tier": "T3",
+        "source_url": "https://www.factualminds.com/blog/aws-trainium2-inferentia2-ai-chips/",
+        "corroborating_urls": [
+          "https://www.onoff.gr/blog/en/ai/gpu-vs-tpu-which-chip-wins-in-ai-2026/",
+          "https://stackpulsar.com/blog/aws-trainium-inferentia/"
+        ],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "reserved_1y",
+        "value_usd_per_accelerator_hour": null,
+        "derivation": "No publicly listed 1-year reserved rate for trn2.48xlarge found as of 2026-07-17; null = caller falls back to on_demand.",
+        "tier": "T3",
+        "source_url": "https://aws.amazon.com/ec2/instance-types/trn2/",
+        "corroborating_urls": [],
+        "date_accessed": "2026-07-17"
+      },
+      {
+        "field": "spot",
+        "value_usd_per_accelerator_hour": 0.55,
+        "derivation": "trn2.48xlarge spot $8.60-8.72/hr / 16 chips (us-east-2 structured price trackers, snapshot; spot is dynamic)",
+        "tier": "T3",
+        "source_url": "https://sparecores.com/server/aws/trn2.48xlarge",
+        "corroborating_urls": [
+          "https://instances.vantage.sh/aws/ec2/trn2.48xlarge"
+        ],
+        "date_accessed": "2026-07-17"
+      }
+    ],
+    "tdp": {
+      "value_watts": 650,
+      "tier": "T3",
+      "source_url": "https://tech-insider.org/uber-aws-trainium3-amazon-ai-chip-deal-2026/",
+      "note": "AWS does not publish Trainium2 TDP. 650W from secondary reporting (spec table aligned with SemiAnalysis modeling); treat as approximate.",
+      "date_accessed": "2026-07-17"
+    },
+    "pue": {
+      "value": 1.15,
+      "tier": "T3",
+      "note": "ASSUMPTION. AWS does not publish fleet-average PUE.",
+      "date_accessed": "2026-07-17"
+    }
+  }
+}
