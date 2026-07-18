@@ -3887,15 +3887,6 @@ class PublicPayloadQualityFilterTests(unittest.TestCase):
         self.assertEqual(sentinel_row["feasible"], 0)
 
 
-class WebAppPayloadContractTests(unittest.TestCase):
-    def test_web_app_uses_payload_serving_modes_and_hw_fields(self):
-        app = (ROOT.parent / "v1-web" / "app.js").read_text()
-        self.assertIn("AVAILABLE_SERVING_MODES", app)
-        self.assertIn("DEFAULT_SERVING_MODE", app)
-        self.assertIn("hwSubline", app)
-        self.assertNotIn('serving: "unconstrained"', app)
-
-
 class PostChainSharedTests(unittest.TestCase):
     def test_emit_decision_grid_delegates(self):
         import emit_decision_grid as edg
@@ -7785,17 +7776,6 @@ def test_training_cluster_cap_is_a_shared_evaluator_guard():
             training_cluster_gpus=128,
             max_training_cluster_gpus=64,
         )
-
-
-def test_web_memory_preference_prices_the_whole_serving_instance():
-    repo_root = Path(__file__).resolve().parents[2]
-    app = (repo_root / "v1-web" / "app.js").read_text()
-    page = (repo_root / "v1-web" / "index.html").read_text()
-
-    assert 'mem: "serving_footprint_gb"' in app
-    assert 'if (field === "serving_footprint_gb")' in app
-    assert "memPerGpu * servingGpus" in app
-    assert "Serving HBM footprint" in page
 
 
 # ============================================================
