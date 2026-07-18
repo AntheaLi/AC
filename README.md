@@ -1,4 +1,4 @@
-# 算模 AC — Architecture Compiler - v0
+# 算模 AC — Architecture Compiler 
 
 [![CI](https://github.com/AntheaLi/AC/actions/workflows/ci.yml/badge.svg)](https://github.com/AntheaLi/AC/actions/workflows/ci.yml)
 
