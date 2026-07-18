@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 semantic versioning. Any change that moves prediction numbers must ride a
 version bump and pass the anchor re-verification protocol (Gate-2).
 
-## [0.4.0] - 2026-07-17
+## [0.0.0] - 2026-07-17
 
 ### Gate 2 — credibility layer (validation, rack-scale hardware, USD costs)
 
