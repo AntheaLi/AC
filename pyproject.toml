@@ -38,7 +38,6 @@ ac-trust-audit = "ac.cli_trust_audit:main"
 [project.urls]
 Homepage = "https://github.com/AntheaLi/AC"
 Issues   = "https://github.com/AntheaLi/AC/issues"
-Demo     = "https://antheali.github.io/ac-demo/"
 Changelog = "https://github.com/AntheaLi/AC/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
