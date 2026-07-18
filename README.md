@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://github.com/AntheaLi/AC/actions/workflows/ci.yml"><img src="https://github.com/AntheaLi/AC/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://pypi.org/project/archc/"><img src="https://img.shields.io/pypi/v/archc.svg" alt="PyPI"></a>
-  <a href="https://github.com/AntheaLi/AC/blob/main/LICENSE"><img src="https://img.shields.io/github/license/AntheaLi/AC.svg" alt="License"></a>
+  <a href="https://github.com/AntheaLi/AC/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
   <a href="https://pypi.org/project/archc/"><img src="https://img.shields.io/pypi/status/archc.svg" alt="Status"></a>
   <a href="https://antheali.github.io/ac-demo/"><img src="https://img.shields.io/badge/demo-live-6f42c1" alt="Live Demo"></a>
 </p>
